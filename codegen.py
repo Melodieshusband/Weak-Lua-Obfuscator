@@ -143,12 +143,8 @@ def build_anti_tamper(seeds, rng, var_k, encode_fn):
     loop_count   = 100000
 
     executor_globals = [
-        "syn", "fluxus", "krnl", "oxygen", "electron", "sentinel",
-        "hydroxide", "coco", "macsploit", "scriptware", "evon",
-        "getgenv", "getrawmetatable", "hookfunction", "newcclosure",
-        "isexecutorclosure", "checkcaller", "getscriptbytecode",
-        "decompile", "getsenv", "getinstances", "getnilinstances",
-        "filtergc", "getconnections",
+        # Убраны стандартные executor API (getgenv, hookfunction, etc.)
+        # которые есть в любом нормальном executor'е и не являются признаком отладки
     ]
 
     debugger_names = [
@@ -225,7 +221,7 @@ def build_anti_tamper(seeds, rng, var_k, encode_fn):
         f"if rawget({ev_v},'__BREAKPOINT__')~=nil then {kill_v}() end "
         f"if rawget({ev_v},'__DEBUG__')~=nil then {kill_v}() end "
         f"if rawget({ev_v},'__ATTACHED__')~=nil then {kill_v}() end "
-        f"if rawget({ev_v},'syn') and rawget(rawget({ev_v},'syn'),'is_executor_closure') then {kill_v}() end "
+        # syn check removed - kills modern executors
     )
 
 def build_runtime_footer(var_Q, var_G):
