@@ -6,6 +6,8 @@ from codegen import (
     build_runtime_header, build_vm_dispatch,
     build_anti_tamper, build_runtime_footer,
 )
+from vm import try_compile_vm, bytecode_to_lua
+from string_fold import fold_strings
 
 MIN_CHUNKS = 3
 MAX_CHUNKS = 7
@@ -44,7 +46,7 @@ class Obfuscator:
         self.var_h = gen_name()
         self.var_r = gen_name()
 
-        self.wm_var = f"Weak_Obfuscator_{secrets.randbelow(10**19 - 10**18) + 10**18}"
+        self.wm_var = f"_WO_{secrets.randbelow(10**19 - 10**18) + 10**18}"
 
     def next_call_id(self):
         self.call_counter += 1
@@ -67,25 +69,17 @@ class Obfuscator:
 
     def build_chunk_loader(self, chunks):
         rng = self.rng
-        k = self.var_k
 
-        buf_var   = gen_name()
-        idx_var   = gen_name()
-        fn_var    = gen_name()
-        ok_var    = gen_name()
-        er_var    = gen_name()
-        ls_var    = gen_name()
-        step_var  = gen_name()
-
-        n = len(chunks)
-
-        chunk_seeds = [make_seeds() for _ in chunks]
-        chunk_alpha = [secrets.randbelow(89999999) + 10000000 for _ in chunks]
+        buf_var  = gen_name()
+        fn_var   = gen_name()
+        ok_var   = gen_name()
+        er_var   = gen_name()
+        ls_var   = gen_name()
 
         encoded_chunks = []
-        for i, chunk in enumerate(chunks):
-            cseeds = chunk_seeds[i]
-            calpha = chunk_alpha[i]
+        for chunk in chunks:
+            cseeds = make_seeds()
+            calpha = secrets.randbelow(89999999) + 10000000
             cid = self.next_call_id()
             enc = encode_string(chunk, cid, cseeds, calpha)
             if enc is None:
@@ -94,12 +88,11 @@ class Obfuscator:
             encoded_chunks.append((enc, cid, cseeds, calpha))
 
         lines = []
-
         lines.append(f"local {ls_var}=loadstring or load ")
         lines.append(f"if type({ls_var})~='function' then error('',0) end ")
         lines.append(f"local {buf_var}='' ")
 
-        for i, (enc, cid, cseeds, calpha) in enumerate(encoded_chunks):
+        for enc, cid, cseeds, calpha in encoded_chunks:
             dv   = gen_name()
             lcg1 = gen_name()
             lcg2 = gen_name()
@@ -121,10 +114,6 @@ class Obfuscator:
             BK = cseeds["BK"]
             A1 = cseeds["A1"]
             A2 = cseeds["A2"]
-
-            s0r = rng.randint(100000, 2**31 - 1)
-            s2r = rng.randint(100000, 2**31 - 1)
-            s3r = rng.randint(100000, 2**31 - 1)
 
             lines.append(f"do ")
             lines.append(f"local {sbv}=string.byte local {scv}=string.char ")
@@ -166,9 +155,16 @@ class Obfuscator:
             )
             lines.append(f"end ")
 
+        env_var  = gen_name()
+        wrap_var = gen_name()
+        var_k = self.var_k
         lines.append(
-            f"local {fn_var},{er_var}={ls_var}({buf_var}) "
+            f"local {env_var}=setmetatable({{}},{{__index=(getfenv and getfenv(0)) or _ENV or {{}}}}) "
+            f"{env_var}['{var_k}']={var_k} "
+            f"local {wrap_var}='(function(...)' .. {buf_var} .. ' end)(...)' "
+            f"local {fn_var},{er_var}={ls_var}({wrap_var}) "
             f"if not {fn_var} then error({er_var} or '',0) end "
+            f"if setfenv then setfenv({fn_var},{env_var}) end "
             f"local {ok_var},{er_var}=pcall({fn_var}) "
             f"if not {ok_var} then error({er_var} or '',0) end "
         )
@@ -178,6 +174,13 @@ class Obfuscator:
     def obfuscate(self):
         source = self.source
         rng = self.rng
+
+        bytecode = try_compile_vm(source)
+        if bytecode is not None:
+            vm_lua = bytecode_to_lua(bytecode, rng, gen_name)
+            use_vm = True
+        else:
+            use_vm = False
 
         header = build_runtime_header(
             self.seeds, self.alphabet_seed,
@@ -192,8 +195,15 @@ class Obfuscator:
             self.seeds, rng, self.var_k, self.encode
         )
 
-        n_chunks = rng.randint(MIN_CHUNKS, MAX_CHUNKS)
-        chunks = split_source(source, n_chunks)
+        if use_vm:
+            folded = fold_strings(vm_lua, self.encode, self.var_k, rng)
+            n_chunks = rng.randint(MIN_CHUNKS, MAX_CHUNKS)
+            chunks = split_source(folded, n_chunks)
+        else:
+            folded = fold_strings(source, self.encode, self.var_k, rng)
+            n_chunks = rng.randint(MIN_CHUNKS, MAX_CHUNKS)
+            chunks = split_source(folded, n_chunks)
+
         chunk_loader = self.build_chunk_loader(chunks)
 
         sm_var = gen_name()
@@ -241,4 +251,5 @@ class Obfuscator:
             "]]\n"
         )
 
-        return banner + header + body + footer
+        mode = "VM" if use_vm else "chunks+string-fold"
+        return banner + header + body + footer, mode
