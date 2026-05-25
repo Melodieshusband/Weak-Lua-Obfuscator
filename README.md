@@ -1,4 +1,4 @@
-# Weak — Lua/LuaU Obfuscator
+# Weak — Lua/Luau Obfuscator
 
 A source-level Lua/LuaU obfuscator written in Python, designed for Roblox scripts.
 
