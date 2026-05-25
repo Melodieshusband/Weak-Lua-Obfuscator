@@ -18,12 +18,9 @@ def main():
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(result)
 
-    print(f"[+] Input:         {input_path}")
-    print(f"[+] Output:        {output_path}")
-    print(f"[+] Mode:          {mode}")
-    print(f"[+] Alphabet seed: {obf.alphabet_seed}")
-    print(f"[+] Watermark var: {obf.wm_var}")
-    print(f"[+] Call counter:  {obf.call_counter}")
+    print(f"[+] Input:  {input_path}")
+    print(f"[+] Output: {output_path}")
+    print(f"[+] Mode:   {mode}")
 
 if __name__ == "__main__":
     main()
