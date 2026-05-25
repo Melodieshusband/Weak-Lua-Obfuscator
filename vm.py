@@ -1,63 +1,63 @@
 import struct
+from vm_opcodes import make_opmap, CANONICAL_OPS
 
-OP_LOAD_CONST   = 0x01
-OP_LOAD_VAR     = 0x02
-OP_SET_VAR      = 0x03
-OP_LOAD_GLOBAL  = 0x04
-OP_SET_GLOBAL   = 0x05
-OP_LOAD_UPVAL   = 0x06
-OP_SET_UPVAL    = 0x07
-OP_GET_TABLE    = 0x08
-OP_SET_TABLE    = 0x09
-OP_NEW_TABLE    = 0x0A
-OP_SET_LIST     = 0x0B
-OP_GET_FIELD    = 0x0C
-OP_SET_FIELD    = 0x0D
+_DEFAULT_OPMAP = make_opmap()
 
-OP_ADD   = 0x10
-OP_SUB   = 0x11
-OP_MUL   = 0x12
-OP_DIV   = 0x13
-OP_MOD   = 0x14
-OP_POW   = 0x15
-OP_CONCAT= 0x16
-OP_UNM   = 0x17
-OP_LEN   = 0x18
-OP_NOT   = 0x19
-OP_IDIV  = 0x1C
-OP_AND   = 0x1A
-OP_OR    = 0x1B
+def _get_op(name, opmap=None):
+    m = opmap if opmap is not None else _DEFAULT_OPMAP
+    return m[name]
 
-OP_EQ    = 0x20
-OP_NE    = 0x21
-OP_LT    = 0x22
-OP_LE    = 0x23
-OP_GT    = 0x24
-OP_GE    = 0x25
-
-OP_JUMP          = 0x30
-OP_JUMP_FALSE    = 0x31
-OP_JUMP_TRUE     = 0x32
-OP_JUMP_FALSE_NK = 0x33
-OP_JUMP_TRUE_NK  = 0x34
-
-OP_CALL          = 0x40
-OP_CALL_METHOD   = 0x41
-OP_RETURN        = 0x42
-OP_RETURN_NONE   = 0x43
-OP_VARARG        = 0x44
-
-OP_CLOSURE       = 0x50
-OP_CLOSE_UPVAL   = 0x51
-
-OP_FOR_PREP      = 0x60
-OP_FOR_LOOP      = 0x61
-OP_TFOR_CALL     = 0x62
-OP_TFOR_LOOP     = 0x63
-
-OP_POP           = 0x70
-OP_DUP           = 0x71
-OP_MOVE          = 0x72
+OP_LOAD_CONST    = _DEFAULT_OPMAP['LOAD_CONST']
+OP_LOAD_VAR      = _DEFAULT_OPMAP['LOAD_VAR']
+OP_SET_VAR       = _DEFAULT_OPMAP['SET_VAR']
+OP_LOAD_GLOBAL   = _DEFAULT_OPMAP['LOAD_GLOBAL']
+OP_SET_GLOBAL    = _DEFAULT_OPMAP['SET_GLOBAL']
+OP_LOAD_UPVAL    = _DEFAULT_OPMAP['LOAD_UPVAL']
+OP_SET_UPVAL     = _DEFAULT_OPMAP['SET_UPVAL']
+OP_GET_TABLE     = _DEFAULT_OPMAP['GET_TABLE']
+OP_SET_TABLE     = _DEFAULT_OPMAP['SET_TABLE']
+OP_NEW_TABLE     = _DEFAULT_OPMAP['NEW_TABLE']
+OP_SET_LIST      = _DEFAULT_OPMAP['SET_LIST']
+OP_GET_FIELD     = _DEFAULT_OPMAP['GET_FIELD']
+OP_SET_FIELD     = _DEFAULT_OPMAP['SET_FIELD']
+OP_ADD           = _DEFAULT_OPMAP['ADD']
+OP_SUB           = _DEFAULT_OPMAP['SUB']
+OP_MUL           = _DEFAULT_OPMAP['MUL']
+OP_DIV           = _DEFAULT_OPMAP['DIV']
+OP_MOD           = _DEFAULT_OPMAP['MOD']
+OP_POW           = _DEFAULT_OPMAP['POW']
+OP_CONCAT        = _DEFAULT_OPMAP['CONCAT']
+OP_UNM           = _DEFAULT_OPMAP['UNM']
+OP_LEN           = _DEFAULT_OPMAP['LEN']
+OP_NOT           = _DEFAULT_OPMAP['NOT']
+OP_AND           = _DEFAULT_OPMAP['AND']
+OP_OR            = _DEFAULT_OPMAP['OR']
+OP_IDIV          = _DEFAULT_OPMAP['IDIV']
+OP_EQ            = _DEFAULT_OPMAP['EQ']
+OP_NE            = _DEFAULT_OPMAP['NE']
+OP_LT            = _DEFAULT_OPMAP['LT']
+OP_LE            = _DEFAULT_OPMAP['LE']
+OP_GT            = _DEFAULT_OPMAP['GT']
+OP_GE            = _DEFAULT_OPMAP['GE']
+OP_JUMP          = _DEFAULT_OPMAP['JUMP']
+OP_JUMP_FALSE    = _DEFAULT_OPMAP['JUMP_FALSE']
+OP_JUMP_TRUE     = _DEFAULT_OPMAP['JUMP_TRUE']
+OP_JUMP_FALSE_NK = _DEFAULT_OPMAP['JUMP_FALSE_NK']
+OP_JUMP_TRUE_NK  = _DEFAULT_OPMAP['JUMP_TRUE_NK']
+OP_CALL          = _DEFAULT_OPMAP['CALL']
+OP_CALL_METHOD   = _DEFAULT_OPMAP['CALL_METHOD']
+OP_RETURN        = _DEFAULT_OPMAP['RETURN']
+OP_RETURN_NONE   = _DEFAULT_OPMAP['RETURN_NONE']
+OP_VARARG        = _DEFAULT_OPMAP['VARARG']
+OP_CLOSURE       = _DEFAULT_OPMAP['CLOSURE']
+OP_CLOSE_UPVAL   = _DEFAULT_OPMAP['CLOSE_UPVAL']
+OP_FOR_PREP      = _DEFAULT_OPMAP['FOR_PREP']
+OP_FOR_LOOP      = _DEFAULT_OPMAP['FOR_LOOP']
+OP_TFOR_CALL     = _DEFAULT_OPMAP['TFOR_CALL']
+OP_TFOR_LOOP     = _DEFAULT_OPMAP['TFOR_LOOP']
+OP_POP           = _DEFAULT_OPMAP['POP']
+OP_DUP           = _DEFAULT_OPMAP['DUP']
+OP_MOVE          = _DEFAULT_OPMAP['MOVE']
 
 TYPE_NIL    = 0
 TYPE_BOOL   = 1
@@ -1245,17 +1245,25 @@ class Parser:
 
 def try_compile_vm(source):
     try:
+        opmap = make_opmap()
+        _patch_global_ops(opmap)
         tokens = tokenize(source)
         parser = Parser(tokens)
         ast = parser.parse()
         compiler = Compiler()
         compiler.compile_chunk(ast)
-        return compiler.serialize()
+        bytecode = compiler.serialize()
+        return bytecode, opmap
     except Exception:
         return None
 
+def _patch_global_ops(opmap):
+    g = globals()
+    for name, val in opmap.items():
+        g['OP_' + name] = val
 
-def bytecode_to_lua(bytecode, rng, gen_name_fn):
+
+def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None):
     data = list(bytecode)
     encoded = ','.join(str(b) for b in data)
 
@@ -1272,6 +1280,48 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn):
     iter_v    = N(); state_v   = N(); ctrl_v    = N(); tmp_v     = N()
     ok_v      = N(); err_v     = N(); retbase_v = N(); nret_v    = N()
     obj_v     = N(); mfn_v     = N(); vararg_v  = N(); nargs_v   = N()
+
+    om = opmap if opmap is not None else _DEFAULT_OPMAP
+    def O(name): return om[name]
+
+    AB2  = f"a={u16_v}(d,i) i=i+2 b={u16_v}(d,i) i=i+2 "
+    AB2C = f"a={u16_v}(d,i) i=i+2 b={u16_v}(d,i) i=i+2 cc={u16_v}(d,i) i=i+2 "
+    A2   = f"a={u16_v}(d,i) i=i+2 "
+
+    def ldi_cases():
+        groups_ab2 = [
+            ('LOAD_CONST','LOAD_VAR','SET_VAR','LOAD_GLOBAL','SET_GLOBAL','CLOSURE','CLOSE_UPVAL'),
+            ('LOAD_UPVAL','SET_UPVAL'),
+            ('RETURN','VARARG'),
+            ('JUMP','JUMP_FALSE','JUMP_TRUE','JUMP_FALSE_NK','JUMP_TRUE_NK'),
+            ('UNM','LEN','NOT'),
+            ('FOR_PREP','FOR_LOOP','TFOR_CALL','TFOR_LOOP'),
+            ('DUP','MOVE'),
+        ]
+        groups_ab2c = [
+            ('GET_TABLE','SET_TABLE','SET_LIST'),
+            ('GET_FIELD','SET_FIELD'),
+            ('ADD','SUB','MUL','DIV','MOD','POW','CONCAT','IDIV','AND','OR'),
+            ('EQ','NE','LT','LE','GT','GE'),
+            ('CALL','CALL_METHOD'),
+        ]
+        groups_a2 = [('NEW_TABLE',), ('RETURN_NONE',), ('POP',)]
+
+        lines = []
+        first = True
+        for grp in groups_ab2:
+            cond = " or ".join(f"o=={O(n)}" for n in grp)
+            kw = "if" if first else "elseif"
+            lines.append(f"{kw} {cond} then {AB2}")
+            first = False
+        for grp in groups_ab2c:
+            cond = " or ".join(f"o=={O(n)}" for n in grp)
+            lines.append(f"elseif {cond} then {AB2C}")
+        for grp in groups_a2:
+            cond = " or ".join(f"o=={O(n)}" for n in grp)
+            lines.append(f"elseif {cond} then {A2}")
+        lines.append("end")
+        return " ".join(lines)
 
     lua = (
         f"local {data_v}={{{encoded}}} "
@@ -1299,45 +1349,7 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn):
         f"local op=d[i] i=i+1 "
         f"local a,b,cc=nil,nil,nil "
         f"local o=op "
-        f"if o==0x01 or o==0x02 or o==0x03 or o==0x04 or o==0x05 or o==0x50 or o==0x51 then "
-        f"a={u16_v}(d,i) i=i+2 b={u16_v}(d,i) i=i+2 "
-        f"elseif o==0x06 or o==0x07 then "
-        f"a={u16_v}(d,i) i=i+2 b={u16_v}(d,i) i=i+2 "
-        f"elseif o==0x08 or o==0x09 or o==0x0B then "
-        f"a={u16_v}(d,i) i=i+2 b={u16_v}(d,i) i=i+2 cc={u16_v}(d,i) i=i+2 "
-        f"elseif o==0x0A then "
-        f"a={u16_v}(d,i) i=i+2 "
-        f"elseif o==0x0C or o==0x0D then "
-        f"a={u16_v}(d,i) i=i+2 b={u16_v}(d,i) i=i+2 cc={u16_v}(d,i) i=i+2 "
-        f"elseif (o>=0x10 and o<=0x1B) or o==0x1C then "
-        f"if o==0x17 or o==0x18 or o==0x19 then "
-        f"a={u16_v}(d,i) i=i+2 b={u16_v}(d,i) i=i+2 "
-        f"else "
-        f"a={u16_v}(d,i) i=i+2 b={u16_v}(d,i) i=i+2 cc={u16_v}(d,i) i=i+2 "
-        f"end "
-        f"elseif o>=0x20 and o<=0x25 then "
-        f"a={u16_v}(d,i) i=i+2 b={u16_v}(d,i) i=i+2 cc={u16_v}(d,i) i=i+2 "
-        f"elseif o>=0x30 and o<=0x34 then "
-        f"a={u16_v}(d,i) i=i+2 b={u16_v}(d,i) i=i+2 "
-        f"elseif o==0x40 then "
-        f"a={u16_v}(d,i) i=i+2 b={u16_v}(d,i) i=i+2 cc={u16_v}(d,i) i=i+2 "
-        f"elseif o==0x41 then "
-        f"a={u16_v}(d,i) i=i+2 b={u16_v}(d,i) i=i+2 cc={u16_v}(d,i) i=i+2 "
-        f"elseif o==0x42 then "
-        f"a={u16_v}(d,i) i=i+2 b={u16_v}(d,i) i=i+2 "
-        f"elseif o==0x43 then "
-        f"elseif o==0x44 then "
-        f"a={u16_v}(d,i) i=i+2 b={u16_v}(d,i) i=i+2 "
-        f"elseif o==0x52 then "
-        f"a={u16_v}(d,i) i=i+2 b={u16_v}(d,i) i=i+2 "
-        f"elseif o==0x60 or o==0x61 or o==0x63 then "
-        f"a={u16_v}(d,i) i=i+2 b={u16_v}(d,i) i=i+2 "
-        f"elseif o==0x62 then "
-        f"a={u16_v}(d,i) i=i+2 b={u16_v}(d,i) i=i+2 "
-        f"elseif o==0x70 then "
-        f"elseif o==0x71 or o==0x72 then "
-        f"a={u16_v}(d,i) i=i+2 b={u16_v}(d,i) i=i+2 "
-        f"end "
+        f"{ldi_cases()} "
         f"return {{op,a,b,cc}},i end "
         f"local function {ldp_v}(d,i) "
         f"local is_vararg=d[i]==1 local params=d[i+1] local nupvals_hdr=d[i+2] i=i+3 "
@@ -1378,90 +1390,90 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn):
         f"local {b_v}={rd_v}[3] "
         f"local {c_v}={rd_v}[4] "
         f"{pc_v}={pc_v}+1 "
-        f"if {op_v}==0x01 then {vars_v}[{a_v}]={consts_v}[{b_v}+1] "
-        f"elseif {op_v}==0x02 then {vars_v}[{a_v}]={vars_v}[{b_v}] "
-        f"elseif {op_v}==0x03 then {vars_v}[{b_v}]={vars_v}[{a_v}] "
-        f"elseif {op_v}==0x04 then local {k_v}={consts_v}[{b_v}+1] {vars_v}[{a_v}]={genv_v}[{k_v}] "
-        f"elseif {op_v}==0x05 then local {k_v}={consts_v}[{a_v}+1] {genv_v}[{k_v}]={vars_v}[{b_v}] "
-        f"elseif {op_v}==0x06 then {vars_v}[{a_v}]={upvals_v}[{b_v}][1] "
-        f"elseif {op_v}==0x07 then {upvals_v}[{a_v}][1]={vars_v}[{b_v}] "
-        f"elseif {op_v}==0x08 then {vars_v}[{a_v}]={vars_v}[{b_v}][{vars_v}[{c_v}]] "
-        f"elseif {op_v}==0x09 then {vars_v}[{a_v}][{vars_v}[{b_v}]]={vars_v}[{c_v}] "
-        f"elseif {op_v}==0x0A then {vars_v}[{a_v}]={{}} "
-        f"elseif {op_v}==0x0B then {vars_v}[{a_v}][{consts_v}[{b_v}+1]]={vars_v}[{c_v}] "
-        f"elseif {op_v}==0x0C then {vars_v}[{a_v}]={vars_v}[{b_v}][{consts_v}[{c_v}+1]] "
-        f"elseif {op_v}==0x0D then {vars_v}[{a_v}][{consts_v}[{b_v}+1]]={vars_v}[{c_v}] "
-        f"elseif {op_v}==0x10 then {vars_v}[{a_v}]={vars_v}[{b_v}]+{vars_v}[{c_v}] "
-        f"elseif {op_v}==0x11 then {vars_v}[{a_v}]={vars_v}[{b_v}]-{vars_v}[{c_v}] "
-        f"elseif {op_v}==0x12 then {vars_v}[{a_v}]={vars_v}[{b_v}]*{vars_v}[{c_v}] "
-        f"elseif {op_v}==0x13 then {vars_v}[{a_v}]={vars_v}[{b_v}]/{vars_v}[{c_v}] "
-        f"elseif {op_v}==0x14 then {vars_v}[{a_v}]={vars_v}[{b_v}]%{vars_v}[{c_v}] "
-        f"elseif {op_v}==0x15 then {vars_v}[{a_v}]={vars_v}[{b_v}]^{vars_v}[{c_v}] "
-        f"elseif {op_v}==0x16 then {vars_v}[{a_v}]={vars_v}[{b_v}]..{vars_v}[{c_v}] "
-        f"elseif {op_v}==0x1C then {vars_v}[{a_v}]=math.floor({vars_v}[{b_v}]/{vars_v}[{c_v}]) "
-        f"elseif {op_v}==0x17 then {vars_v}[{a_v}]=-{vars_v}[{b_v}] "
-        f"elseif {op_v}==0x18 then {vars_v}[{a_v}]=#{vars_v}[{b_v}] "
-        f"elseif {op_v}==0x19 then {vars_v}[{a_v}]=not {vars_v}[{b_v}] "
-        f"elseif {op_v}==0x1A then "
+        f"if {op_v}=={O('LOAD_CONST')} then {vars_v}[{a_v}]={consts_v}[{b_v}+1] "
+        f"elseif {op_v}=={O('LOAD_VAR')} then {vars_v}[{a_v}]={vars_v}[{b_v}] "
+        f"elseif {op_v}=={O('SET_VAR')} then {vars_v}[{b_v}]={vars_v}[{a_v}] "
+        f"elseif {op_v}=={O('LOAD_GLOBAL')} then local {k_v}={consts_v}[{b_v}+1] {vars_v}[{a_v}]={genv_v}[{k_v}] "
+        f"elseif {op_v}=={O('SET_GLOBAL')} then local {k_v}={consts_v}[{a_v}+1] {genv_v}[{k_v}]={vars_v}[{b_v}] "
+        f"elseif {op_v}=={O('LOAD_UPVAL')} then {vars_v}[{a_v}]={upvals_v}[{b_v}][1] "
+        f"elseif {op_v}=={O('SET_UPVAL')} then {upvals_v}[{a_v}][1]={vars_v}[{b_v}] "
+        f"elseif {op_v}=={O('GET_TABLE')} then {vars_v}[{a_v}]={vars_v}[{b_v}][{vars_v}[{c_v}]] "
+        f"elseif {op_v}=={O('SET_TABLE')} then {vars_v}[{a_v}][{vars_v}[{b_v}]]={vars_v}[{c_v}] "
+        f"elseif {op_v}=={O('NEW_TABLE')} then {vars_v}[{a_v}]={{}} "
+        f"elseif {op_v}=={O('SET_LIST')} then {vars_v}[{a_v}][{consts_v}[{b_v}+1]]={vars_v}[{c_v}] "
+        f"elseif {op_v}=={O('GET_FIELD')} then {vars_v}[{a_v}]={vars_v}[{b_v}][{consts_v}[{c_v}+1]] "
+        f"elseif {op_v}=={O('SET_FIELD')} then {vars_v}[{a_v}][{consts_v}[{b_v}+1]]={vars_v}[{c_v}] "
+        f"elseif {op_v}=={O('ADD')} then {vars_v}[{a_v}]={vars_v}[{b_v}]+{vars_v}[{c_v}] "
+        f"elseif {op_v}=={O('SUB')} then {vars_v}[{a_v}]={vars_v}[{b_v}]-{vars_v}[{c_v}] "
+        f"elseif {op_v}=={O('MUL')} then {vars_v}[{a_v}]={vars_v}[{b_v}]*{vars_v}[{c_v}] "
+        f"elseif {op_v}=={O('DIV')} then {vars_v}[{a_v}]={vars_v}[{b_v}]/{vars_v}[{c_v}] "
+        f"elseif {op_v}=={O('MOD')} then {vars_v}[{a_v}]={vars_v}[{b_v}]%{vars_v}[{c_v}] "
+        f"elseif {op_v}=={O('POW')} then {vars_v}[{a_v}]={vars_v}[{b_v}]^{vars_v}[{c_v}] "
+        f"elseif {op_v}=={O('CONCAT')} then {vars_v}[{a_v}]={vars_v}[{b_v}]..{vars_v}[{c_v}] "
+        f"elseif {op_v}=={O('IDIV')} then {vars_v}[{a_v}]=math.floor({vars_v}[{b_v}]/{vars_v}[{c_v}]) "
+        f"elseif {op_v}=={O('UNM')} then {vars_v}[{a_v}]=-{vars_v}[{b_v}] "
+        f"elseif {op_v}=={O('LEN')} then {vars_v}[{a_v}]=#{vars_v}[{b_v}] "
+        f"elseif {op_v}=={O('NOT')} then {vars_v}[{a_v}]=not {vars_v}[{b_v}] "
+        f"elseif {op_v}=={O('AND')} then "
         f"if not {vars_v}[{b_v}] then {vars_v}[{a_v}]={vars_v}[{b_v}] else {vars_v}[{a_v}]={vars_v}[{c_v}] end "
-        f"elseif {op_v}==0x1B then "
+        f"elseif {op_v}=={O('OR')} then "
         f"if {vars_v}[{b_v}] then {vars_v}[{a_v}]={vars_v}[{b_v}] else {vars_v}[{a_v}]={vars_v}[{c_v}] end "
-        f"elseif {op_v}==0x20 then {vars_v}[{a_v}]=({vars_v}[{b_v}]=={vars_v}[{c_v}]) "
-        f"elseif {op_v}==0x21 then {vars_v}[{a_v}]=({vars_v}[{b_v}]~={vars_v}[{c_v}]) "
-        f"elseif {op_v}==0x22 then {vars_v}[{a_v}]=({vars_v}[{b_v}]<{vars_v}[{c_v}]) "
-        f"elseif {op_v}==0x23 then {vars_v}[{a_v}]=({vars_v}[{b_v}]<={vars_v}[{c_v}]) "
-        f"elseif {op_v}==0x24 then {vars_v}[{a_v}]=({vars_v}[{b_v}]>{vars_v}[{c_v}]) "
-        f"elseif {op_v}==0x25 then {vars_v}[{a_v}]=({vars_v}[{b_v}]>={vars_v}[{c_v}]) "
-        f"elseif {op_v}==0x30 then {pc_v}={a_v}+1 "
-        f"elseif {op_v}==0x31 then if not {vars_v}[{a_v}] then {pc_v}={b_v}+1 end "
-        f"elseif {op_v}==0x32 then if {vars_v}[{a_v}] then {pc_v}={b_v}+1 end "
-        f"elseif {op_v}==0x33 then if not {vars_v}[{a_v}] then {pc_v}={b_v}+1 end "
-        f"elseif {op_v}==0x34 then if {vars_v}[{a_v}] then {pc_v}={b_v}+1 end "
-        f"elseif {op_v}==0x40 then "
+        f"elseif {op_v}=={O('EQ')} then {vars_v}[{a_v}]=({vars_v}[{b_v}]=={vars_v}[{c_v}]) "
+        f"elseif {op_v}=={O('NE')} then {vars_v}[{a_v}]=({vars_v}[{b_v}]~={vars_v}[{c_v}]) "
+        f"elseif {op_v}=={O('LT')} then {vars_v}[{a_v}]=({vars_v}[{b_v}]<{vars_v}[{c_v}]) "
+        f"elseif {op_v}=={O('LE')} then {vars_v}[{a_v}]=({vars_v}[{b_v}]<={vars_v}[{c_v}]) "
+        f"elseif {op_v}=={O('GT')} then {vars_v}[{a_v}]=({vars_v}[{b_v}]>{vars_v}[{c_v}]) "
+        f"elseif {op_v}=={O('GE')} then {vars_v}[{a_v}]=({vars_v}[{b_v}]>={vars_v}[{c_v}]) "
+        f"elseif {op_v}=={O('JUMP')} then {pc_v}={a_v}+1 "
+        f"elseif {op_v}=={O('JUMP_FALSE')} then if not {vars_v}[{a_v}] then {pc_v}={b_v}+1 end "
+        f"elseif {op_v}=={O('JUMP_TRUE')} then if {vars_v}[{a_v}] then {pc_v}={b_v}+1 end "
+        f"elseif {op_v}=={O('JUMP_FALSE_NK')} then if not {vars_v}[{a_v}] then {pc_v}={b_v}+1 end "
+        f"elseif {op_v}=={O('JUMP_TRUE_NK')} then if {vars_v}[{a_v}] then {pc_v}={b_v}+1 end "
+        f"elseif {op_v}=={O('CALL')} then "
         f"local {fn_v}={vars_v}[{a_v}] local {nargs_v}={b_v} local {nret_v}={c_v} "
         f"local {args_v}={{}} "
-        f"if {nargs_v}==255 then local {j_v}={a_v}+1 while {vars_v}[{j_v}]~=nil do {args_v}[#{ args_v}+1]={vars_v}[{j_v}] {j_v}={j_v}+1 end "
+        f"if {nargs_v}==255 then local {j_v}={a_v}+1 while {vars_v}[{j_v}]~=nil do {args_v}[#{args_v}+1]={vars_v}[{j_v}] {j_v}={j_v}+1 end "
         f"else for {j_v}=1,{nargs_v} do {args_v}[{j_v}]={vars_v}[{a_v}+{j_v}] end end "
         f"if type({fn_v})=='function' then "
         f"local {res_v}=table.pack({fn_v}(table.unpack({args_v}))) "
         f"if {nret_v}==255 then for {j_v}=1,{res_v}.n do {vars_v}[{a_v}+{j_v}-1]={res_v}[{j_v}] end "
         f"elseif {nret_v}>0 then {vars_v}[{a_v}]={res_v}[1] end end "
-        f"elseif {op_v}==0x41 then "
+        f"elseif {op_v}=={O('CALL_METHOD')} then "
         f"local {obj_v}={vars_v}[{a_v}] local {k_v}={consts_v}[{b_v}+1] local {nargs_v}={c_v} "
         f"local {mfn_v}={obj_v}[{k_v}] "
         f"local {args_v}={{{obj_v}}} "
-        f"for {j_v}=1,{nargs_v} do {args_v}[#{ args_v}+1]={vars_v}[{a_v}+{j_v}] end "
+        f"for {j_v}=1,{nargs_v} do {args_v}[#{args_v}+1]={vars_v}[{a_v}+{j_v}] end "
         f"if type({mfn_v})=='function' then "
-        f"local {res_v}={mfn_v}(table.unpack({args_v})) "
-        f"if {res_v}~=nil then {vars_v}[{a_v}]={res_v} end end "
-        f"elseif {op_v}==0x42 then "
+        f"local {res_v}=table.pack({mfn_v}(table.unpack({args_v}))) "
+        f"if {res_v}.n>=1 then {vars_v}[{a_v}]={res_v}[1] end end "
+        f"elseif {op_v}=={O('RETURN')} then "
         f"local {retbase_v}={a_v} local {nret_v}={b_v} "
         f"if {nret_v}==1 then return {vars_v}[{retbase_v}] "
         f"elseif {nret_v}==0 then return "
         f"else local {res_v}={{}} for {j_v}=0,{nret_v}-1 do {res_v}[{j_v}+1]={vars_v}[{retbase_v}+{j_v}] end return table.unpack({res_v}) end "
-        f"elseif {op_v}==0x43 then return "
-        f"elseif {op_v}==0x44 then "
+        f"elseif {op_v}=={O('RETURN_NONE')} then return "
+        f"elseif {op_v}=={O('VARARG')} then "
         f"local {nret_v}={b_v} "
         f"if {nret_v}==255 then for {j_v}=1,#{vararg_v} do {vars_v}[{a_v}+{j_v}-1]={vararg_v}[{j_v}] end "
         f"elseif {nret_v}==1 then {vars_v}[{a_v}]={vararg_v}[1] end "
-        f"elseif {op_v}==0x50 then "
+        f"elseif {op_v}=={O('CLOSURE')} then "
         f"local {fn_v}={protos_v}[{b_v}+1] "
         f"local _uc={{}} "
         f"if {fn_v}.upval_regs then for _ui=1,#{fn_v}.upval_regs do _uc[_ui]={{{vars_v}[{fn_v}.upval_regs[_ui]]}} end end "
         f"{vars_v}[{a_v}]={mk_v}({fn_v},_uc) "
-        f"elseif {op_v}==0x60 then "
+        f"elseif {op_v}=={O('FOR_PREP')} then "
         f"{vars_v}[{a_v}]={vars_v}[{a_v}]-{vars_v}[{a_v}+2] if not(({vars_v}[{a_v}+2]>0 and ({vars_v}[{a_v}]+{vars_v}[{a_v}+2])<={vars_v}[{a_v}+1]) or ({vars_v}[{a_v}+2]<0 and ({vars_v}[{a_v}]+{vars_v}[{a_v}+2])>={vars_v}[{a_v}+1])) then {pc_v}={b_v}+1 end "
-        f"elseif {op_v}==0x61 then "
+        f"elseif {op_v}=={O('FOR_LOOP')} then "
         f"{vars_v}[{a_v}]={vars_v}[{a_v}]+{vars_v}[{a_v}+2] "
         f"if ({vars_v}[{a_v}+2]>0 and {vars_v}[{a_v}]<={vars_v}[{a_v}+1]) or ({vars_v}[{a_v}+2]<0 and {vars_v}[{a_v}]>={vars_v}[{a_v}+1]) then {vars_v}[{a_v}+3]={vars_v}[{a_v}] {pc_v}={b_v}+1 end "
-        f"elseif {op_v}==0x62 then "
+        f"elseif {op_v}=={O('TFOR_CALL')} then "
         f"local {iter_v}={vars_v}[{a_v}] local {state_v}={vars_v}[{a_v}+1] local {ctrl_v}={vars_v}[{a_v}+2] "
         f"local {res_v}=table.pack({iter_v}({state_v},{ctrl_v})) "
         f"if {res_v}[1]==nil then {pc_v}={b_v}+1 "
         f"else for {j_v}=1,{res_v}.n do {vars_v}[{a_v}+2+{j_v}]={res_v}[{j_v}] end {vars_v}[{a_v}+2]={res_v}[1] end "
-        f"elseif {op_v}==0x63 then "
+        f"elseif {op_v}=={O('TFOR_LOOP')} then "
         f"if {vars_v}[{a_v}]~=nil then {pc_v}={b_v}+1 end "
-        f"elseif {op_v}==0x72 then {vars_v}[{a_v}]={vars_v}[{b_v}] "
+        f"elseif {op_v}=={O('MOVE')} then {vars_v}[{a_v}]={vars_v}[{b_v}] "
         f"end end end end "
         f"local {fn_v} "
         f"do local {tmp_v},{ci_v}={ldp_v}({data_v},1) {fn_v}={mk_v}({tmp_v},{{}}) end "
