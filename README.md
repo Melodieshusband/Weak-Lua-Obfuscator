@@ -76,7 +76,6 @@ main.py          — CLI entry point
 
 ## Limitations
 
-- `loadstring` must be available (`ServerScriptService.LoadStringEnabled = true` for server scripts, or use a LocalScript)
 - Source-level obfuscator — does not modify Roblox bytecode directly
 - LCG cipher is not cryptographically strong; the goal is reverse engineering difficulty, not cryptographic security
 - `continue` (LuaU extension) is not supported in VM mode; obfuscator falls back to chunk mode automatically
