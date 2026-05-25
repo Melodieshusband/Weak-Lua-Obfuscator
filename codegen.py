@@ -1,32 +1,28 @@
 import random
 import string
+import secrets
 from crypto import lcg_next, build_alphabet, LCG_MOD
 
-_name_counter = 0
 _used_names = set()
+_name_rng = None
+
+_CONFUSABLES = ["l", "I", "O", "o", "0", "1"]
 
 def reset_names():
-    global _name_counter, _used_names
-    _name_counter = 0
+    global _used_names, _name_rng
     _used_names = set()
+    _name_rng = random.Random(secrets.randbits(128))
 
 def gen_name(rng=None):
-    global _name_counter
-    _name_counter += 1
-    n = _name_counter
-    chars = string.ascii_letters
-    result = []
-    while n > 0:
-        n -= 1
-        result.append(chars[n % len(chars)])
-        n //= len(chars)
-    name = "".join(reversed(result))
-    while len(name) < 6:
-        if rng:
-            name = rng.choice(string.ascii_lowercase) + name
-        else:
-            name = random.choice(string.ascii_lowercase) + name
-    return name
+    r = rng or _name_rng or random
+    while True:
+        length = r.randint(6, 10)
+        first = r.choice(string.ascii_letters + "_")
+        rest = "".join(r.choice(_CONFUSABLES) for _ in range(length - 1))
+        name = first + rest
+        if name not in _used_names:
+            _used_names.add(name)
+            return name
 
 def build_runtime_header(seeds, alphabet_seed, var_k, var_Q, var_G, var_B, var_f, var_V, wm_var):
     lcg1    = gen_name()
@@ -78,7 +74,7 @@ def build_runtime_header(seeds, alphabet_seed, var_k, var_Q, var_G, var_B, var_f
         f"local function {g3}(a) if type(a)~='string' then return nil end local al=#a if al%2~=0 then return nil end local o={{}} for i=1,al,2 do local h={RA_v}[{sb}(a,i)] local l={RA_v}[{sb}(a,i+1)] if not h or not l then return nil end local kk=(h-1)*{N_v}+(l-1) if kk<0 or kk>255 then return nil end o[#o+1]=kk end return o end "
         f"local function {g5}(E,i0,i1) local o={{}} local s0=(i0+{p_v})%{LCG_MOD} local s1=(i1+{q_v})%{LCG_MOD} local m3={r_v}%256 local m4={s_v}%256 if s0==0 then s0=1 end if s1==0 then s1=1 end for i=1,#E,1 do s0={lcg1}(s0) s1={lcg2}(s1) local kk=((s0+s1)+m3+m4*i)%256 local ct=E[i] o[i]=(ct-kk)%256 s0=(s0+ct)%{LCG_MOD} end return o end "
         f"local {CC_v}={{}} "
-        f"{var_k}=function(a,b1,b2,b3,b4,d1,d2) local ck=b3 if {CC_v}[ck]~=nil then return {CC_v}[ck] end local d={g3}(a) if not d then return nil end local c0={t_v}+b3 local c1=({u_v}+b4)+{bk_v} local Y={g5}(d,c0,c1) local o={{}} for i=1,#Y,1 do o[i]={sc}(Y[i]%256) end local v=table.concat(o) local result if b1==1 then result=v elseif b1==2 then local n=tonumber(v) result=n==nil and 0 or n elseif b1==3 then result=v=='1' end {CC_v}[ck]=result return result end "
+        f"{var_k}=function(a,b1,b2,b3,b4,d1,d2) local ck=b3*{seeds['MK']}+b1 if {CC_v}[ck]~=nil then return {CC_v}[ck] end local d={g3}(a) if not d then return nil end local c0={t_v}+b3 local c1=({u_v}+b4)+{bk_v} local Y={g5}(d,c0,c1) local o={{}} for i=1,#Y,1 do o[i]={sc}(Y[i]%256) end local v=table.concat(o) local result if b1==1 then result=v elseif b1==2 then local n=tonumber(v) result=n==nil and 0 or n elseif b1==3 then result=v=='1' end {CC_v}[ck]=result return result end "
     )
 
 def build_vm_dispatch(var_V, rng):
