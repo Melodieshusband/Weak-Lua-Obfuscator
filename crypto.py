@@ -1,22 +1,16 @@
-import random
 import secrets
 
 LCG_MOD = 2147483647
 
 def make_seeds():
     def rs():
-        v = secrets.randbelow(LCG_MOD - 1) + 1
-        return v
+        return secrets.randbelow(LCG_MOD - 1) + 1
     return {
-        "P":  rs(),
-        "Q":  rs(),
-        "R":  rs(),
-        "S":  rs(),
-        "T":  rs(),
-        "U":  rs(),
-        "BK": rs(),
+        "P":  rs(), "Q":  rs(), "R":  rs(), "S":  rs(),
+        "T":  rs(), "U":  rs(), "BK": rs(),
         "A1": secrets.randbelow(65534) + 48271,
         "A2": secrets.randbelow(65534) + 48271,
+        "MK": secrets.randbits(32),
     }
 
 def lcg_next(s, a):
