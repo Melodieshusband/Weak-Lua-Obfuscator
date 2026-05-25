@@ -76,91 +76,40 @@ class Obfuscator:
         er_var   = gen_name()
         ls_var   = gen_name()
 
+        from crypto import lcg_next, build_alphabet, LCG_MOD
+
         encoded_chunks = []
         for chunk in chunks:
-            cseeds = make_seeds()
-            calpha = secrets.randbelow(89999999) + 10000000
             cid = self.next_call_id()
-            enc = encode_string(chunk, cid, cseeds, calpha)
+            enc = encode_string(chunk, cid, self.seeds, self.alphabet_seed)
             if enc is None:
                 cid = self.next_call_id()
-                enc = encode_string(chunk, cid, cseeds, calpha)
-            encoded_chunks.append((enc, cid, cseeds, calpha))
+                enc = encode_string(chunk, cid, self.seeds, self.alphabet_seed)
+            encoded_chunks.append((enc, cid))
 
         lines = []
         lines.append(f"local {ls_var}=loadstring or load ")
         lines.append(f"if type({ls_var})~='function' then error('',0) end ")
         lines.append(f"local {buf_var}='' ")
 
-        for enc, cid, cseeds, calpha in encoded_chunks:
-            dv   = gen_name()
-            lcg1 = gen_name()
-            lcg2 = gen_name()
-            shuf = gen_name()
-            alp  = gen_name()
-            Nv   = gen_name()
-            RAv  = gen_name()
-            g3v  = gen_name()
-            g5v  = gen_name()
-            sbv  = gen_name()
-            scv  = gen_name()
-
-            P  = cseeds["P"]
-            Q  = cseeds["Q"]
-            R  = cseeds["R"]
-            S  = cseeds["S"]
-            T  = cseeds["T"]
-            U  = cseeds["U"]
-            BK = cseeds["BK"]
-            A1 = cseeds["A1"]
-            A2 = cseeds["A2"]
-
-            lines.append(f"do ")
-            lines.append(f"local {sbv}=string.byte local {scv}=string.char ")
-            lines.append(f"local function {lcg1}(s) return(s*{A1})%2147483647 end ")
-            lines.append(f"local function {lcg2}(s) return(s*{A2})%2147483647 end ")
+        for enc, cid in encoded_chunks:
+            dv  = gen_name()
+            s0  = rng.randint(100000, 2**31 - 1)
+            s2  = rng.randint(100000, 2**31 - 1)
+            s3  = rng.randint(100000, 2**31 - 1)
             lines.append(
-                f"local function {shuf}(seed) local c={{}} for i=33,126 do "
-                f"if i~=34 and i~=39 and i~=92 then c[#c+1]={scv}(i) end end "
-                f"local v=seed for i=#c,2,-1 do v={lcg1}(v) local j=v%i+1 "
-                f"c[i],c[j]=c[j],c[i] end return table.concat(c) end "
-            )
-            lines.append(f"local {alp}={shuf}({calpha}) ")
-            lines.append(f"local {Nv}=#{alp} ")
-            lines.append(f"local {RAv}={{}} for _i=1,{Nv} do {RAv}[{sbv}({alp},_i)]=_i end ")
-            lines.append(
-                f"local function {g3v}(a) if type(a)~='string' then return nil end "
-                f"local al=#a if al%2~=0 then return nil end local o={{}} "
-                f"for i=1,al,2 do local h={RAv}[{sbv}(a,i)] local l={RAv}[{sbv}(a,i+1)] "
-                f"if not h or not l then return nil end "
-                f"local kk=(h-1)*{Nv}+(l-1) if kk<0 or kk>255 then return nil end "
-                f"o[#o+1]=kk end return o end "
-            )
-            lines.append(
-                f"local function {g5v}(E,i0,i1) local o={{}} "
-                f"local s0=(i0+{P})%2147483647 local s1=(i1+{Q})%2147483647 "
-                f"local m3={R}%256 local m4={S}%256 "
-                f"if s0==0 then s0=1 end if s1==0 then s1=1 end "
-                f"for i=1,#E do s0={lcg1}(s0) s1={lcg2}(s1) "
-                f"local kk=((s0+s1)+m3+m4*i)%256 local ct=E[i] "
-                f"o[i]=(ct-kk)%256 s0=(s0+ct)%2147483647 end return o end "
-            )
-            lines.append(
-                f"local {dv}={g3v}(\"{enc}\") "
-                f"if {dv} then "
-                f"local _Y={g5v}({dv},{T}+{cid},{U}+{cid}+{BK}) "
-                f"local _o={{}} for i=1,#_Y do _o[i]={scv}(_Y[i]%256) end "
-                f"{buf_var}={buf_var}..table.concat(_o) "
+                f"do "
+                f"local {dv}={self.var_k}(\"{enc}\",1,{s0},{cid},{cid},{s2},{s3}) "
+                f"if type({dv})=='string' then {buf_var}={buf_var}..{dv} end "
                 f"end "
             )
-            lines.append(f"end ")
 
         env_var  = gen_name()
         wrap_var = gen_name()
         var_k = self.var_k
         lines.append(
             f"local {env_var}=setmetatable({{}},{{__index=(getfenv and getfenv(0)) or _ENV or {{}}}}) "
-            f"{env_var}['{var_k}']={var_k} "
+            f"do local _kn={self.k_call(self.var_k, ret_type=1)} if type(_kn)=='string' then {env_var}[_kn]={var_k} end end "
             f"local {wrap_var}='(function(...)' .. {buf_var} .. ' end)(...)' "
             f"local {fn_var},{er_var}={ls_var}({wrap_var}) "
             f"if not {fn_var} then error({er_var} or '',0) end "
@@ -175,9 +124,10 @@ class Obfuscator:
         source = self.source
         rng = self.rng
 
-        bytecode = try_compile_vm(source)
-        if bytecode is not None:
-            vm_lua = bytecode_to_lua(bytecode, rng, gen_name)
+        bytecode_result = try_compile_vm(source)
+        if bytecode_result is not None:
+            bytecode, opmap = bytecode_result
+            vm_lua = bytecode_to_lua(bytecode, rng, gen_name, opmap)
             use_vm = True
         else:
             use_vm = False
