@@ -120,17 +120,22 @@ class Obfuscator:
 
         return "".join(lines)
 
-    def obfuscate(self):
+    def obfuscate(self, force_vm=False, force_fold=False):
         source = self.source
         rng = self.rng
 
-        bytecode_result = try_compile_vm(source)
-        if bytecode_result is not None:
-            bytecode, opmap = bytecode_result
-            vm_lua = bytecode_to_lua(bytecode, rng, gen_name, opmap)
-            use_vm = True
-        else:
+        if force_fold or not force_vm:
             use_vm = False
+        else:
+            bytecode_result = try_compile_vm(source)
+            if bytecode_result is not None:
+                bytecode, opmap = bytecode_result
+                vm_lua = bytecode_to_lua(bytecode, rng, gen_name, opmap)
+                use_vm = True
+            else:
+                if force_vm:
+                    raise RuntimeError("--vm Error")
+                use_vm = False
 
         header = build_runtime_header(
             self.seeds, self.alphabet_seed,
@@ -203,3 +208,4 @@ class Obfuscator:
 
         mode = "VM" if use_vm else "chunks+string-fold"
         return banner + header + body + footer, mode
+        
