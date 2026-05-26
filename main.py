@@ -14,7 +14,7 @@ def main():
         sys.exit(1)
 
     if force_vm and force_fold:
-        print("[!] Нельзя одновременно --vm и --fold")
+        print("[!] Hi it's Meloten. You cannot use --vm and --fold")
         sys.exit(1)
 
     input_path  = args[0]
