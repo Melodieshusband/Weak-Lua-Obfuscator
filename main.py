@@ -2,18 +2,33 @@ import sys
 from obfuscator import Obfuscator
 
 def main():
-    if len(sys.argv) < 2:
-        print("Usage: python main.py <input.lua> [output.lua]")
+    args = sys.argv[1:]
+    force_vm   = '--vm'   in args
+    force_fold = '--fold' in args
+    args = [a for a in args if not a.startswith('--')]
+
+    if not args:
+        print("Usage: python main.py <input.lua> [output.lua] [--vm | --fold]")
+        print("  --vm    Use VM bytecode")
+        print("  --fold  Use string-fold (without VM)")
         sys.exit(1)
 
-    input_path  = sys.argv[1]
-    output_path = sys.argv[2] if len(sys.argv) > 2 else input_path.replace(".lua", "_obf.lua")
+    if force_vm and force_fold:
+        print("[!] Нельзя одновременно --vm и --fold")
+        sys.exit(1)
+
+    input_path  = args[0]
+    output_path = args[1] if len(args) > 1 else input_path.replace(".lua", "_obf.lua")
 
     with open(input_path, "r", encoding="utf-8") as f:
         source = f.read()
 
     obf = Obfuscator(source)
-    result, mode = obf.obfuscate()
+    try:
+        result, mode = obf.obfuscate(force_vm=force_vm, force_fold=force_fold)
+    except RuntimeError as e:
+        print(f"[!] {e}")
+        sys.exit(1)
 
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(result)
@@ -24,3 +39,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
