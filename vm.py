@@ -416,7 +416,7 @@ class Compiler:
             pass
         child._stmts(node['body'])
         if not child.proto.instructions or child.proto.instructions[-1].op not in (OP_RETURN, OP_RETURN_NONE):
-            child.emit(OP_RETURN_NONE)
+            child.emit(OP_RETURN_NONE, 0)
         child.pop_scope(saved)
         idx = len(self.proto.protos)
         self.proto.protos.append(child.proto)
@@ -509,7 +509,7 @@ class Compiler:
         elif t == 'return':
             exprs = node.get('values', [])
             if not exprs:
-                self.emit(OP_RETURN_NONE)
+                self.emit(OP_RETURN_NONE, 0)
                 return
             base = self.scope.reg_counter[0]
             for i, e in enumerate(exprs):
@@ -718,7 +718,7 @@ class Compiler:
         self.proto.is_vararg = is_vararg
         self._stmts(stmts)
         if not self.proto.instructions or self.proto.instructions[-1].op not in (OP_RETURN, OP_RETURN_NONE):
-            self.emit(OP_RETURN_NONE)
+            self.emit(OP_RETURN_NONE, 0)
 
     def serialize(self):
         return self.proto.serialize()
@@ -1280,6 +1280,7 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None):
     iter_v    = N(); state_v   = N(); ctrl_v    = N(); tmp_v     = N()
     ok_v      = N(); err_v     = N(); retbase_v = N(); nret_v    = N()
     obj_v     = N(); mfn_v     = N(); vararg_v  = N(); nargs_v   = N()
+    ubox_v    = N(); upidx_v   = N()
 
     om = opmap if opmap is not None else _DEFAULT_OPMAP
     def O(name): return om[name]
@@ -1371,14 +1372,20 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None):
         f"for _=1,nins do local iv,ni={ldi_v}(d,i) ins[#ins+1]=iv i=ni end "
         f"return {{is_vararg=is_vararg,params=params,nupvals=nuregs,upval_regs=upval_regs,protos=protos,consts=consts,ins=ins}},i end "
         f"local {genv_v}=(getfenv and getfenv(0)) or _ENV or _G or {{}} "
-        f"local function {mk_v}(proto,upvals_in,varargs) "
+
+        f"local function {mk_v}(proto,parent_vars,upval_regs_in) "
         f"return function(...) "
-        f"local {stack_v}={{}} local {sp_v}=0 "
         f"local {vars_v}={{}} "
-        f"local {upvals_v}=upvals_in or {{}} "
+        f"local {ubox_v}={{}} "
         f"local {vararg_v}={{...}} "
         f"local {args_v}={{...}} "
         f"for {i_v}=1,proto.params do {vars_v}[{i_v}-1]={args_v}[{i_v}] end "
+        f"if upval_regs_in and parent_vars then "
+        f"for {upidx_v}=1,#upval_regs_in do "
+        f"local _ur=upval_regs_in[{upidx_v}] "
+        f"if {ubox_v}[_ur]==nil then {ubox_v}[_ur]={{v=parent_vars[_ur]}} end "
+        f"end "
+        f"end "
         f"local {consts_v}=proto.consts "
         f"local {ins_v}=proto.ins "
         f"local {protos_v}=proto.protos "
@@ -1395,8 +1402,15 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None):
         f"elseif {op_v}=={O('SET_VAR')} then {vars_v}[{b_v}]={vars_v}[{a_v}] "
         f"elseif {op_v}=={O('LOAD_GLOBAL')} then local {k_v}={consts_v}[{b_v}+1] {vars_v}[{a_v}]={genv_v}[{k_v}] "
         f"elseif {op_v}=={O('SET_GLOBAL')} then local {k_v}={consts_v}[{a_v}+1] {genv_v}[{k_v}]={vars_v}[{b_v}] "
-        f"elseif {op_v}=={O('LOAD_UPVAL')} then {vars_v}[{a_v}]={upvals_v}[{b_v}][1] "
-        f"elseif {op_v}=={O('SET_UPVAL')} then {upvals_v}[{a_v}][1]={vars_v}[{b_v}] "
+
+        f"elseif {op_v}=={O('LOAD_UPVAL')} then "
+        f"local _ub={ubox_v}[{b_v}] "
+        f"if _ub then {vars_v}[{a_v}]=_ub.v else {vars_v}[{a_v}]=nil end "
+
+        f"elseif {op_v}=={O('SET_UPVAL')} then "
+        f"if {ubox_v}[{a_v}] then {ubox_v}[{a_v}].v={vars_v}[{b_v}] end "
+        f"{vars_v}[{a_v}]={vars_v}[{b_v}] "
+
         f"elseif {op_v}=={O('GET_TABLE')} then {vars_v}[{a_v}]={vars_v}[{b_v}][{vars_v}[{c_v}]] "
         f"elseif {op_v}=={O('SET_TABLE')} then {vars_v}[{a_v}][{vars_v}[{b_v}]]={vars_v}[{c_v}] "
         f"elseif {op_v}=={O('NEW_TABLE')} then {vars_v}[{a_v}]={{}} "
@@ -1456,11 +1470,116 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None):
         f"local {nret_v}={b_v} "
         f"if {nret_v}==255 then for {j_v}=1,#{vararg_v} do {vars_v}[{a_v}+{j_v}-1]={vararg_v}[{j_v}] end "
         f"elseif {nret_v}==1 then {vars_v}[{a_v}]={vararg_v}[1] end "
+
         f"elseif {op_v}=={O('CLOSURE')} then "
-        f"local {fn_v}={protos_v}[{b_v}+1] "
-        f"local _uc={{}} "
-        f"if {fn_v}.upval_regs then for _ui=1,#{fn_v}.upval_regs do _uc[_ui]={{{vars_v}[{fn_v}.upval_regs[_ui]]}} end end "
-        f"{vars_v}[{a_v}]={mk_v}({fn_v},_uc) "
+        f"local _cp={protos_v}[{b_v}+1] "
+        f"local _cur_vars={vars_v} "
+        f"local _cur_ubox={ubox_v} "
+        f"local _child_uregs=_cp.upval_regs "
+        f"if _child_uregs and #_child_uregs>0 then "
+        f"for _ui=1,#_child_uregs do "
+        f"local _ur=_child_uregs[_ui] "
+        f"if _cur_ubox[_ur]==nil then "
+        f"_cur_ubox[_ur]={{v=_cur_vars[_ur]}} "
+        f"end "
+        f"end "
+        f"end "
+        f"local _child_ubox={{}} "
+        f"if _child_uregs then "
+        f"for _ui=1,#_child_uregs do "
+        f"local _ur=_child_uregs[_ui] "
+        f"_child_ubox[_ur]=_cur_ubox[_ur] "
+        f"end "
+        f"end "
+        f"local _mk2={mk_v} "
+        f"{vars_v}[{a_v}]=function(...) "
+        f"local _cv={{}} "
+        f"local _ca={{...}} "
+        f"for _pi=1,_cp.params do _cv[_pi-1]=_ca[_pi] end "
+        f"local _ubox2=_child_ubox "
+        f"local _cst=_cp.consts local _ins=_cp.ins local _prt=_cp.protos "
+        f"local _pc=1 local _varg={{...}} "
+        f"while _pc<=#_ins do "
+        f"local _rd=_ins[_pc] local _op=_rd[1] local _a=_rd[2] local _b=_rd[3] local _c=_rd[4] _pc=_pc+1 "
+        f"if _op=={O('LOAD_CONST')} then _cv[_a]=_cst[_b+1] "
+        f"elseif _op=={O('LOAD_VAR')} then _cv[_a]=_cv[_b] "
+        f"elseif _op=={O('SET_VAR')} then _cv[_b]=_cv[_a] "
+        f"elseif _op=={O('LOAD_GLOBAL')} then _cv[_a]={genv_v}[_cst[_b+1]] "
+        f"elseif _op=={O('SET_GLOBAL')} then {genv_v}[_cst[_a+1]]=_cv[_b] "
+        f"elseif _op=={O('LOAD_UPVAL')} then local _ub=_ubox2[_b] if _ub then _cv[_a]=_ub.v else _cv[_a]=nil end "
+        f"elseif _op=={O('SET_UPVAL')} then if _ubox2[_a] then _ubox2[_a].v=_cv[_b] end _cv[_a]=_cv[_b] "
+        f"elseif _op=={O('GET_TABLE')} then _cv[_a]=_cv[_b][_cv[_c]] "
+        f"elseif _op=={O('SET_TABLE')} then _cv[_a][_cv[_b]]=_cv[_c] "
+        f"elseif _op=={O('NEW_TABLE')} then _cv[_a]={{}} "
+        f"elseif _op=={O('SET_LIST')} then _cv[_a][_cst[_b+1]]=_cv[_c] "
+        f"elseif _op=={O('GET_FIELD')} then _cv[_a]=_cv[_b][_cst[_c+1]] "
+        f"elseif _op=={O('SET_FIELD')} then _cv[_a][_cst[_b+1]]=_cv[_c] "
+        f"elseif _op=={O('ADD')} then _cv[_a]=_cv[_b]+_cv[_c] "
+        f"elseif _op=={O('SUB')} then _cv[_a]=_cv[_b]-_cv[_c] "
+        f"elseif _op=={O('MUL')} then _cv[_a]=_cv[_b]*_cv[_c] "
+        f"elseif _op=={O('DIV')} then _cv[_a]=_cv[_b]/_cv[_c] "
+        f"elseif _op=={O('MOD')} then _cv[_a]=_cv[_b]%_cv[_c] "
+        f"elseif _op=={O('POW')} then _cv[_a]=_cv[_b]^_cv[_c] "
+        f"elseif _op=={O('CONCAT')} then _cv[_a]=_cv[_b].._cv[_c] "
+        f"elseif _op=={O('IDIV')} then _cv[_a]=math.floor(_cv[_b]/_cv[_c]) "
+        f"elseif _op=={O('UNM')} then _cv[_a]=-_cv[_b] "
+        f"elseif _op=={O('LEN')} then _cv[_a]=#_cv[_b] "
+        f"elseif _op=={O('NOT')} then _cv[_a]=not _cv[_b] "
+        f"elseif _op=={O('AND')} then if not _cv[_b] then _cv[_a]=_cv[_b] else _cv[_a]=_cv[_c] end "
+        f"elseif _op=={O('OR')} then if _cv[_b] then _cv[_a]=_cv[_b] else _cv[_a]=_cv[_c] end "
+        f"elseif _op=={O('EQ')} then _cv[_a]=(_cv[_b]==_cv[_c]) "
+        f"elseif _op=={O('NE')} then _cv[_a]=(_cv[_b]~=_cv[_c]) "
+        f"elseif _op=={O('LT')} then _cv[_a]=(_cv[_b]<_cv[_c]) "
+        f"elseif _op=={O('LE')} then _cv[_a]=(_cv[_b]<=_cv[_c]) "
+        f"elseif _op=={O('GT')} then _cv[_a]=(_cv[_b]>_cv[_c]) "
+        f"elseif _op=={O('GE')} then _cv[_a]=(_cv[_b]>=_cv[_c]) "
+        f"elseif _op=={O('JUMP')} then _pc=_a+1 "
+        f"elseif _op=={O('JUMP_FALSE')} then if not _cv[_a] then _pc=_b+1 end "
+        f"elseif _op=={O('JUMP_TRUE')} then if _cv[_a] then _pc=_b+1 end "
+        f"elseif _op=={O('JUMP_FALSE_NK')} then if not _cv[_a] then _pc=_b+1 end "
+        f"elseif _op=={O('JUMP_TRUE_NK')} then if _cv[_a] then _pc=_b+1 end "
+        f"elseif _op=={O('CALL')} then "
+        f"local _fn=_cv[_a] local _na=_b local _nr=_c local _as={{}} "
+        f"if _na==255 then local _ji=_a+1 while _cv[_ji]~=nil do _as[#_as+1]=_cv[_ji] _ji=_ji+1 end "
+        f"else for _ji=1,_na do _as[_ji]=_cv[_a+_ji] end end "
+        f"if type(_fn)=='function' then local _rs=table.pack(_fn(table.unpack(_as))) "
+        f"if _nr==255 then for _ji=1,_rs.n do _cv[_a+_ji-1]=_rs[_ji] end "
+        f"elseif _nr>0 then _cv[_a]=_rs[1] end end "
+        f"elseif _op=={O('CALL_METHOD')} then "
+        f"local _ob=_cv[_a] local _mk=_cst[_b+1] local _na=_c local _mf=_ob[_mk] "
+        f"local _as={{_ob}} for _ji=1,_na do _as[#_as+1]=_cv[_a+_ji] end "
+        f"if type(_mf)=='function' then local _rs=table.pack(_mf(table.unpack(_as))) "
+        f"if _rs.n>=1 then _cv[_a]=_rs[1] end end "
+        f"elseif _op=={O('RETURN')} then "
+        f"local _rb=_a local _nr=_b "
+        f"if _nr==1 then return _cv[_rb] "
+        f"elseif _nr==0 then return "
+        f"else local _rs={{}} for _ji=0,_nr-1 do _rs[_ji+1]=_cv[_rb+_ji] end return table.unpack(_rs) end "
+        f"elseif _op=={O('RETURN_NONE')} then return "
+        f"elseif _op=={O('VARARG')} then "
+        f"if _b==255 then for _ji=1,#_varg do _cv[_a+_ji-1]=_varg[_ji] end "
+        f"elseif _b==1 then _cv[_a]=_varg[1] end "
+        f"elseif _op=={O('CLOSURE')} then "
+        f"local _cp2=_prt[_b+1] local _cv2=_cv local _ub2=_ubox2 "
+        f"local _ur2=_cp2.upval_regs "
+        f"if _ur2 and #_ur2>0 then for _ui=1,#_ur2 do local _ur=_ur2[_ui] "
+        f"if _ub2[_ur]==nil then _ub2[_ur]={{v=_cv2[_ur]}} end end end "
+        f"local _cub2={{}} if _ur2 then for _ui=1,#_ur2 do local _ur=_ur2[_ui] _cub2[_ur]=_ub2[_ur] end end "
+        f"_cv[_a]={mk_v}(_cp2,_cv2,_ur2) "
+        f"elseif _op=={O('FOR_PREP')} then "
+        f"_cv[_a]=_cv[_a]-_cv[_a+2] if not((_cv[_a+2]>0 and (_cv[_a]+_cv[_a+2])<=_cv[_a+1]) or (_cv[_a+2]<0 and (_cv[_a]+_cv[_a+2])>=_cv[_a+1])) then _pc=_b+1 end "
+        f"elseif _op=={O('FOR_LOOP')} then "
+        f"_cv[_a]=_cv[_a]+_cv[_a+2] "
+        f"if (_cv[_a+2]>0 and _cv[_a]<=_cv[_a+1]) or (_cv[_a+2]<0 and _cv[_a]>=_cv[_a+1]) then _cv[_a+3]=_cv[_a] _pc=_b+1 end "
+        f"elseif _op=={O('TFOR_CALL')} then "
+        f"local _it=_cv[_a] local _st=_cv[_a+1] local _ct=_cv[_a+2] "
+        f"local _rs=table.pack(_it(_st,_ct)) "
+        f"if _rs[1]==nil then _pc=_b+1 "
+        f"else for _ji=1,_rs.n do _cv[_a+2+_ji]=_rs[_ji] end _cv[_a+2]=_rs[1] end "
+        f"elseif _op=={O('TFOR_LOOP')} then if _cv[_a]~=nil then _pc=_b+1 end "
+        f"elseif _op=={O('MOVE')} then _cv[_a]=_cv[_b] "
+        f"end end end "
+
         f"elseif {op_v}=={O('FOR_PREP')} then "
         f"{vars_v}[{a_v}]={vars_v}[{a_v}]-{vars_v}[{a_v}+2] if not(({vars_v}[{a_v}+2]>0 and ({vars_v}[{a_v}]+{vars_v}[{a_v}+2])<={vars_v}[{a_v}+1]) or ({vars_v}[{a_v}+2]<0 and ({vars_v}[{a_v}]+{vars_v}[{a_v}+2])>={vars_v}[{a_v}+1])) then {pc_v}={b_v}+1 end "
         f"elseif {op_v}=={O('FOR_LOOP')} then "
@@ -1476,8 +1595,7 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None):
         f"elseif {op_v}=={O('MOVE')} then {vars_v}[{a_v}]={vars_v}[{b_v}] "
         f"end end end end "
         f"local {fn_v} "
-        f"do local {tmp_v},{ci_v}={ldp_v}({data_v},1) {fn_v}={mk_v}({tmp_v},{{}}) end "
+        f"do local {tmp_v},{ci_v}={ldp_v}({data_v},1) {fn_v}={mk_v}({tmp_v},nil,nil) end "
         f"return {fn_v}(...) "
     )
     return lua
-
