@@ -83,4 +83,4 @@ main.py          — CLI entry point
 
 ## License
 
-MIT
+MIT [LICENSE](LICENSE).
