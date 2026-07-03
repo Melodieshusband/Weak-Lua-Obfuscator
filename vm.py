@@ -18,6 +18,7 @@ OP_GET_TABLE     = _DEFAULT_OPMAP['GET_TABLE']
 OP_SET_TABLE     = _DEFAULT_OPMAP['SET_TABLE']
 OP_NEW_TABLE     = _DEFAULT_OPMAP['NEW_TABLE']
 OP_SET_LIST      = _DEFAULT_OPMAP['SET_LIST']
+OP_SET_LIST_MULTI = _DEFAULT_OPMAP['SET_LIST_MULTI']
 OP_GET_FIELD     = _DEFAULT_OPMAP['GET_FIELD']
 OP_SET_FIELD     = _DEFAULT_OPMAP['SET_FIELD']
 OP_ADD           = _DEFAULT_OPMAP['ADD']
@@ -164,10 +165,7 @@ class Scope:
         if name in self.locals:
             return ('local', self.locals[name])
         if self.parent:
-            r = self.parent.resolve(name)
-            if r and r[0] == 'local':
-                return ('upval', r[1])
-            return r
+            return self.parent.resolve(name)
         return None
 
 class Compiler:
@@ -191,7 +189,15 @@ class Compiler:
         self.scope.reg_counter[0] = saved_reg
 
     def resolve(self, name):
-        return self.scope.resolve(name)
+        r = self.scope.resolve(name)
+        if r is not None:
+            return r
+        if self.parent:
+            pr = self.parent.resolve(name)
+            if pr and pr[0] in ('local', 'upval'):
+                return ('upval', pr[1])
+            return pr
+        return None
 
     def alloc(self, name='_'):
         return self.scope.alloc(name)
@@ -384,15 +390,21 @@ class Compiler:
     def _table_ctor(self, node, dst):
         self.emit(OP_NEW_TABLE, dst)
         array_idx = 1
-        for entry in node['fields']:
+        fields = node['fields']
+        for fi, entry in enumerate(fields):
             tmp = self.scope.reg_counter[0]
             self.scope.reg_counter[0] += 2
             if entry['type'] == 'array_field':
                 val_r = tmp
-                self._expr(entry['value'], val_r)
-                ki = self.K(float(array_idx))
-                self.emit(OP_SET_LIST, dst, ki, val_r)
-                array_idx += 1
+                is_last = (fi == len(fields) - 1)
+                if is_last and entry['value'].get('type') in ('call', 'method_call', 'vararg'):
+                    self._call_multiret(entry['value'], val_r)
+                    self.emit(OP_SET_LIST_MULTI, dst, val_r, self.K(float(array_idx)))
+                else:
+                    self._expr(entry['value'], val_r)
+                    ki = self.K(float(array_idx))
+                    self.emit(OP_SET_LIST, dst, ki, val_r)
+                    array_idx += 1
             elif entry['type'] == 'string_field':
                 val_r = tmp
                 self._expr(entry['value'], val_r)
@@ -684,15 +696,24 @@ class Compiler:
         state_r = self.scope.reg_counter[0]; self.scope.reg_counter[0] += 1
         ctrl_r  = self.scope.reg_counter[0]; self.scope.reg_counter[0] += 1
         exprs = node['iters']
-        self._expr(exprs[0], iter_r)
-        if len(exprs) > 1:
-            self._expr(exprs[1], state_r)
-        else:
-            self.emit(OP_LOAD_CONST, state_r, self.K(None))
-        if len(exprs) > 2:
-            self._expr(exprs[2], ctrl_r)
-        else:
-            self.emit(OP_LOAD_CONST, ctrl_r, self.K(None))
+        last_idx = len(exprs) - 1
+        slots = [iter_r, state_r, ctrl_r]
+        for i in range(3):
+            if i < len(exprs):
+                e = exprs[i]
+                if i == last_idx and e.get('type') in ('call', 'method_call', 'vararg'):
+                    tmp = self.scope.reg_counter[0]
+                    self.scope.reg_counter[0] = tmp + 1
+                    self._call_multiret(e, tmp)
+                    remaining = 3 - i
+                    for k in range(remaining):
+                        self.emit(OP_MOVE, slots[i + k], tmp + k)
+                    self.scope.reg_counter[0] = ctrl_r + 1
+                    break
+                else:
+                    self._expr(e, slots[i])
+            else:
+                self.emit(OP_LOAD_CONST, slots[i], self.K(None))
         loop_start = self.pc()
         var_regs = []
         for vn in node['vars']:
@@ -1294,19 +1315,20 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None):
             ('LOAD_CONST','LOAD_VAR','SET_VAR','LOAD_GLOBAL','SET_GLOBAL','CLOSURE','CLOSE_UPVAL'),
             ('LOAD_UPVAL','SET_UPVAL'),
             ('RETURN','VARARG'),
-            ('JUMP','JUMP_FALSE','JUMP_TRUE','JUMP_FALSE_NK','JUMP_TRUE_NK'),
+            ('JUMP_FALSE','JUMP_TRUE','JUMP_FALSE_NK','JUMP_TRUE_NK'),
             ('UNM','LEN','NOT'),
             ('FOR_PREP','FOR_LOOP','TFOR_CALL','TFOR_LOOP'),
             ('DUP','MOVE'),
         ]
         groups_ab2c = [
             ('GET_TABLE','SET_TABLE','SET_LIST'),
+            ('SET_LIST_MULTI',),
             ('GET_FIELD','SET_FIELD'),
             ('ADD','SUB','MUL','DIV','MOD','POW','CONCAT','IDIV','AND','OR'),
             ('EQ','NE','LT','LE','GT','GE'),
             ('CALL','CALL_METHOD'),
         ]
-        groups_a2 = [('NEW_TABLE',), ('RETURN_NONE',), ('POP',)]
+        groups_a2 = [('NEW_TABLE',), ('RETURN_NONE',), ('POP',), ('JUMP',)]
 
         lines = []
         first = True
@@ -1415,6 +1437,9 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None):
         f"elseif {op_v}=={O('SET_TABLE')} then {vars_v}[{a_v}][{vars_v}[{b_v}]]={vars_v}[{c_v}] "
         f"elseif {op_v}=={O('NEW_TABLE')} then {vars_v}[{a_v}]={{}} "
         f"elseif {op_v}=={O('SET_LIST')} then {vars_v}[{a_v}][{consts_v}[{b_v}+1]]={vars_v}[{c_v}] "
+        f"elseif {op_v}=={O('SET_LIST_MULTI')} then "
+        f"local {j_v}={b_v} local {i_v}={consts_v}[{c_v}+1] "
+        f"while {vars_v}[{j_v}]~=nil do {vars_v}[{a_v}][{i_v}]={vars_v}[{j_v}] {i_v}={i_v}+1 {j_v}={j_v}+1 end "
         f"elseif {op_v}=={O('GET_FIELD')} then {vars_v}[{a_v}]={vars_v}[{b_v}][{consts_v}[{c_v}+1]] "
         f"elseif {op_v}=={O('SET_FIELD')} then {vars_v}[{a_v}][{consts_v}[{b_v}+1]]={vars_v}[{c_v}] "
         f"elseif {op_v}=={O('ADD')} then {vars_v}[{a_v}]={vars_v}[{b_v}]+{vars_v}[{c_v}] "
@@ -1450,7 +1475,9 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None):
         f"else for {j_v}=1,{nargs_v} do {args_v}[{j_v}]={vars_v}[{a_v}+{j_v}] end end "
         f"if type({fn_v})=='function' then "
         f"local {res_v}=table.pack({fn_v}(table.unpack({args_v}))) "
-        f"if {nret_v}==255 then for {j_v}=1,{res_v}.n do {vars_v}[{a_v}+{j_v}-1]={res_v}[{j_v}] end "
+        f"if {nret_v}==255 then "
+        f"local {j_v}=1 while {j_v}<={res_v}.n or {vars_v}[{a_v}+{j_v}-1]~=nil do "
+        f"{vars_v}[{a_v}+{j_v}-1]={res_v}[{j_v}] {j_v}={j_v}+1 end "
         f"elseif {nret_v}>0 then {vars_v}[{a_v}]={res_v}[1] end end "
         f"elseif {op_v}=={O('CALL_METHOD')} then "
         f"local {obj_v}={vars_v}[{a_v}] local {k_v}={consts_v}[{b_v}+1] local {nargs_v}={c_v} "
@@ -1512,6 +1539,9 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None):
         f"elseif _op=={O('SET_TABLE')} then _cv[_a][_cv[_b]]=_cv[_c] "
         f"elseif _op=={O('NEW_TABLE')} then _cv[_a]={{}} "
         f"elseif _op=={O('SET_LIST')} then _cv[_a][_cst[_b+1]]=_cv[_c] "
+        f"elseif _op=={O('SET_LIST_MULTI')} then "
+        f"local _ji=_b local _ii=_cst[_c+1] "
+        f"while _cv[_ji]~=nil do _cv[_a][_ii]=_cv[_ji] _ii=_ii+1 _ji=_ji+1 end "
         f"elseif _op=={O('GET_FIELD')} then _cv[_a]=_cv[_b][_cst[_c+1]] "
         f"elseif _op=={O('SET_FIELD')} then _cv[_a][_cst[_b+1]]=_cv[_c] "
         f"elseif _op=={O('ADD')} then _cv[_a]=_cv[_b]+_cv[_c] "
@@ -1543,7 +1573,9 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None):
         f"if _na==255 then local _ji=_a+1 while _cv[_ji]~=nil do _as[#_as+1]=_cv[_ji] _ji=_ji+1 end "
         f"else for _ji=1,_na do _as[_ji]=_cv[_a+_ji] end end "
         f"if type(_fn)=='function' then local _rs=table.pack(_fn(table.unpack(_as))) "
-        f"if _nr==255 then for _ji=1,_rs.n do _cv[_a+_ji-1]=_rs[_ji] end "
+        f"if _nr==255 then "
+        f"local _ji=1 while _ji<=_rs.n or _cv[_a+_ji-1]~=nil do "
+        f"_cv[_a+_ji-1]=_rs[_ji] _ji=_ji+1 end "
         f"elseif _nr>0 then _cv[_a]=_rs[1] end end "
         f"elseif _op=={O('CALL_METHOD')} then "
         f"local _ob=_cv[_a] local _mk=_cst[_b+1] local _na=_c local _mf=_ob[_mk] "
@@ -1576,7 +1608,7 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None):
         f"local _rs=table.pack(_it(_st,_ct)) "
         f"if _rs[1]==nil then _pc=_b+1 "
         f"else for _ji=1,_rs.n do _cv[_a+2+_ji]=_rs[_ji] end _cv[_a+2]=_rs[1] end "
-        f"elseif _op=={O('TFOR_LOOP')} then if _cv[_a]~=nil then _pc=_b+1 end "
+        f"elseif _op=={O('TFOR_LOOP')} then if _cv[_a]==nil then _pc=_b+1 end "
         f"elseif _op=={O('MOVE')} then _cv[_a]=_cv[_b] "
         f"end end end "
 
@@ -1591,7 +1623,7 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None):
         f"if {res_v}[1]==nil then {pc_v}={b_v}+1 "
         f"else for {j_v}=1,{res_v}.n do {vars_v}[{a_v}+2+{j_v}]={res_v}[{j_v}] end {vars_v}[{a_v}+2]={res_v}[1] end "
         f"elseif {op_v}=={O('TFOR_LOOP')} then "
-        f"if {vars_v}[{a_v}]~=nil then {pc_v}={b_v}+1 end "
+        f"if {vars_v}[{a_v}]==nil then {pc_v}={b_v}+1 end "
         f"elseif {op_v}=={O('MOVE')} then {vars_v}[{a_v}]={vars_v}[{b_v}] "
         f"end end end end "
         f"local {fn_v} "
