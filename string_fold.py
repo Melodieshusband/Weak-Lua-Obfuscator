@@ -1,29 +1,52 @@
 import re
 
+def match_long_bracket_open(source, i, n):
+    if source[i] != '[':
+        return None
+    j = i + 1
+    level = 0
+    while j < n and source[j] == '=':
+        level += 1
+        j += 1
+    if j < n and source[j] == '[':
+        return level, j + 1
+    return None
+
+def find_long_bracket_close(source, i, n, level):
+    close = ']' + ('=' * level) + ']'
+    idx = source.find(close, i)
+    if idx == -1:
+        return n, n
+    return idx, idx + len(close)
+
 def extract_strings(source):
     found = []
     i = 0
     n = len(source)
     while i < n:
         if source[i] == '-' and i + 1 < n and source[i+1] == '-':
-            if i + 3 < n and source[i+2] == '[' and source[i+3] == '[':
-                i += 4
-                while i < n and not (source[i] == ']' and i+1 < n and source[i+1] == ']'):
-                    i += 1
-                i += 2
+            bracket = match_long_bracket_open(source, i + 2, n)
+            if bracket is not None:
+                level, content_start = bracket
+                if content_start < n and source[content_start] == '\n':
+                    content_start += 1
+                close_start, close_end = find_long_bracket_close(source, content_start, n, level)
+                i = close_end
             else:
                 while i < n and source[i] != '\n':
                     i += 1
             continue
-        if source[i] == '[' and i + 1 < n and source[i+1] == '[':
+        bracket = match_long_bracket_open(source, i, n)
+        if bracket is not None:
+            level, content_start = bracket
             start = i
-            i += 2
-            s = []
-            while i < n and not (source[i] == ']' and i+1 < n and source[i+1] == ']'):
-                s.append(source[i])
-                i += 1
-            i += 2
-            found.append((start, i, ''.join(s)))
+            cs = content_start
+            if cs < n and source[cs] == '\n':
+                cs += 1
+            close_start, close_end = find_long_bracket_close(source, cs, n, level)
+            value = source[cs:close_start]
+            found.append((start, close_end, value))
+            i = close_end
             continue
         if source[i] in ('"', "'"):
             q = source[i]
@@ -67,3 +90,4 @@ def fold_strings(source, encode_fn, var_k, rng):
         prev = end
     result.append(source[prev:])
     return ''.join(result)
+    
