@@ -172,6 +172,17 @@ def build_anti_tamper(seeds, rng, var_k, encode_fn):
     fn_v    = gen_name()
     ch_v    = gen_name()
     hk_v    = gen_name()
+    lm_v    = gen_name()
+    le_v    = gen_name()
+    lok1_v  = gen_name()
+    lenv1_v = gen_name()
+    lok2_v  = gen_name()
+    lenv2_v = gen_name()
+    lfn_v   = gen_name()
+    ln_v    = gen_name()
+    lk_v    = gen_name()
+    lreq_v  = gen_name()
+    lres_v  = gen_name()
 
     m1 = rng.randint(0x2000, 0xEFFF)
     m2 = rng.randint(0x2000, 0xEFFF)
@@ -189,6 +200,14 @@ def build_anti_tamper(seeds, rng, var_k, encode_fn):
         "ldb", "__debugger", "BreakpointHook",
     ]
 
+    lune_modules = [
+        "@lune/datetime", "@lune/fs", "@lune/luau", "@lune/net",
+        "@lune/process", "@lune/regex", "@lune/roblox", "@lune/serde",
+        "@lune/stdio", "@lune/task",
+        "datetime", "fs", "luau", "net",
+        "process", "regex", "roblox", "serde", "stdio", "task",
+    ]
+
     def enc_call(name):
         enc, cid = encode_fn(name)
         s0 = rng.randint(100000, 2**31 - 1)
@@ -204,6 +223,16 @@ def build_anti_tamper(seeds, rng, var_k, encode_fn):
     exec_checks = " ".join(
         f"if rawget({ev_v},{enc_call(eg)})~=nil then {kill_v}() end"
         for eg in executor_globals
+    )
+
+    lune_check_g = " ".join(
+        f"if {le_v}[{enc_call(m)}]~=nil then {kill_v}() end"
+        for m in lune_modules
+    )
+
+    lune_check_req = " ".join(
+        f"do local {lok1_v},{lres_v}=pcall({lreq_v},{enc_call(m)}) if {lok1_v} and {lres_v}~=nil then {kill_v}() end end"
+        for m in lune_modules
     )
 
     return (
@@ -258,6 +287,21 @@ def build_anti_tamper(seeds, rng, var_k, encode_fn):
         f"if rawget({ev_v},'__BREAKPOINT__')~=nil then {kill_v}() end "
         f"if rawget({ev_v},'__DEBUG__')~=nil then {kill_v}() end "
         f"if rawget({ev_v},'__ATTACHED__')~=nil then {kill_v}() end "
+        f"do local {lreq_v}=require "
+        f"local {lenv1_v}=_G "
+        f"if type({lenv1_v})=='table' then {le_v}={lenv1_v} {lune_check_g} end "
+        f"local {lok2_v},{lenv2_v}=pcall(function() return _ENV end) "
+        f"if {lok2_v} and {lenv2_v} and type({lenv2_v})=='table' and {lenv2_v}~=_G then {le_v}={lenv2_v} {lune_check_g} end "
+        f"do local {lok1_v},{lfn_v}=pcall(function() "
+        f"local {ln_v}=load or loadstring "
+        f"if type({ln_v})~='function' then return nil end "
+        f"local {lk_v}={ln_v}('return _ENV') "
+        f"if type({lk_v})~='function' then return nil end "
+        f"return {lk_v}() end) "
+        f"if {lok1_v} and {lfn_v} and type({lfn_v})=='table' and {lfn_v}~=_G then {le_v}={lfn_v} {lune_check_g} end end "
+        f"if type({lreq_v})=='function' then {lune_check_req} end "
+        f"end "
+        # syn check removed - kills modern executors
     )
 
 def build_runtime_footer(var_Q, var_G):
