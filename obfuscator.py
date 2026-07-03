@@ -77,8 +77,6 @@ class Obfuscator:
         er_var   = gen_name()
         ls_var   = gen_name()
 
-        from crypto import lcg_next, build_alphabet, LCG_MOD
-
         encoded_chunks = []
         for chunk in chunks:
             cid = self.next_call_id()
