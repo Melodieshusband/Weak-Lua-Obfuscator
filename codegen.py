@@ -1,7 +1,7 @@
 import random
 import string
 import secrets
-from crypto import lcg_next, build_alphabet, LCG_MOD
+from crypto import CHACHA_CONST, CHACHA_ROUNDS, MASK32
 
 _used_names = set()
 _name_rng = None
@@ -25,56 +25,97 @@ def gen_name(rng=None):
             return name
 
 def build_runtime_header(seeds, alphabet_seed, var_k, var_Q, var_G, var_B, var_f, var_V, wm_var):
-    lcg1    = gen_name()
-    lcg2    = gen_name()
+    qr_v    = gen_name()
+    blk_v   = gen_name()
+    ks_v    = gen_name()
     shuffle = gen_name()
     alpha_v = gen_name()
     N_v     = gen_name()
     RA_v    = gen_name()
     g3      = gen_name()
-    g5      = gen_name()
+    xorb_v  = gen_name()
     CC_v    = gen_name()
     sb      = gen_name()
     sc      = gen_name()
-    p_v     = gen_name()
-    q_v     = gen_name()
-    r_v     = gen_name()
-    s_v     = gen_name()
-    t_v     = gen_name()
-    u_v     = gen_name()
-    bk_v    = gen_name()
-    a1_v    = gen_name()
-    a2_v    = gen_name()
+    key_v   = gen_name()
+    nb_v    = gen_name()
+    w_v     = gen_name()
+    st_v    = gen_name()
 
-    P  = seeds["P"]
-    Q  = seeds["Q"]
-    R  = seeds["R"]
-    S  = seeds["S"]
-    T  = seeds["T"]
-    U  = seeds["U"]
-    BK = seeds["BK"]
-    A1 = seeds["A1"]
-    A2 = seeds["A2"]
+    key = seeds["KEY"]
+    nonce_base = seeds["NONCE_BASE"]
+    c0, c1, c2, c3 = CHACHA_CONST
+
+    band  = "bit32.band"
+    bxor  = "bit32.bxor"
+    lrot  = "bit32.lrotate"
 
     return (
         f'do ("This file was protected with Weak Obfuscator."):gsub(".+",function(q){wm_var}=q end) end '
         f"return (function(...) return(function({var_Q},{var_G},{var_B},{var_f},{var_k},{var_V}) "
-        f"local {p_v},{q_v},{r_v},{s_v}={P},{Q},{R},{S} "
-        f"local {t_v},{u_v}={T},{U} "
-        f"local {bk_v}={BK} "
-        f"local {a1_v},{a2_v}={A1},{A2} "
+        f"local {key_v}={{{','.join(str(k) for k in key)}}} "
+        f"local {nb_v}={nonce_base} "
         f"local _F=math.floor local {sb}=string.byte local {sc}=string.char "
-        f"local function {lcg1}(s) return(s*{a1_v})%{LCG_MOD} end "
-        f"local function {lcg2}(s) return(s*{a2_v})%{LCG_MOD} end "
-        f"local function {shuffle}(seed) local c={{}} for i=33,126,1 do if i~=34 and(i~=39 and i~=92) then c[#c+1]=string.char(i) end end local v=seed for i=#c,2,-1 do v={lcg1}(v) local j=v%i+1 c[i],c[j]=c[j],c[i] end return table.concat(c) end "
+        f"local function {xorb_v}(a,b) return {bxor}(a,b) end "
+        f"local function {qr_v}({st_v},a,b,c,d) "
+        f"{st_v}[a]=({st_v}[a]+{st_v}[b])%4294967296 "
+        f"{st_v}[d]={lrot}({xorb_v}({st_v}[d],{st_v}[a]),16) "
+        f"{st_v}[c]=({st_v}[c]+{st_v}[d])%4294967296 "
+        f"{st_v}[b]={lrot}({xorb_v}({st_v}[b],{st_v}[c]),12) "
+        f"{st_v}[a]=({st_v}[a]+{st_v}[b])%4294967296 "
+        f"{st_v}[d]={lrot}({xorb_v}({st_v}[d],{st_v}[a]),8) "
+        f"{st_v}[c]=({st_v}[c]+{st_v}[d])%4294967296 "
+        f"{st_v}[b]={lrot}({xorb_v}({st_v}[b],{st_v}[c]),7) "
+        f"end "
+        f"local function {blk_v}(counter,n1,n2,n3) "
+        f"local {st_v}={{{c0},{c1},{c2},{c3},"
+        f"{key_v}[1],{key_v}[2],{key_v}[3],{key_v}[4],{key_v}[5],{key_v}[6],{key_v}[7],{key_v}[8],"
+        f"counter,n1,n2,n3}} "
+        f"local {w_v}={{}} for i=1,16,1 do {w_v}[i]={st_v}[i] end "
+        f"for _=1,{CHACHA_ROUNDS // 2},1 do "
+        f"{qr_v}({w_v},1,5,9,13) {qr_v}({w_v},2,6,10,14) {qr_v}({w_v},3,7,11,15) {qr_v}({w_v},4,8,12,16) "
+        f"{qr_v}({w_v},1,6,11,16) {qr_v}({w_v},2,7,12,13) {qr_v}({w_v},3,8,9,14) {qr_v}({w_v},4,5,10,15) "
+        f"end "
+        f"local out={{}} for i=1,16,1 do out[i]=({w_v}[i]+{st_v}[i])%4294967296 end "
+        f"return out end "
+        f"local function {ks_v}(n1,n2,outlen) "
+        f"local out={{}} local counter=0 local pos=0 "
+        f"while pos<outlen do "
+        f"local words={blk_v}(counter,0,n1,n2) "
+        f"for i=1,16,1 do "
+        f"local wv=words[i] "
+        f"out[pos+1]=wv%256 "
+        f"out[pos+2]=_F(wv/256)%256 "
+        f"out[pos+3]=_F(wv/65536)%256 "
+        f"out[pos+4]=_F(wv/16777216)%256 "
+        f"pos=pos+4 "
+        f"if pos>=outlen then break end "
+        f"end "
+        f"counter=(counter+1)%4294967296 "
+        f"end "
+        f"return out end "
+        f"local function {shuffle}(seed) "
+        f"local c={{}} for i=33,126,1 do if i~=34 and(i~=39 and i~=92) then c[#c+1]=string.char(i) end end "
+        f"local ks={ks_v}(seed,2779096485,#c*4) "
+        f"for i=#c,2,-1 do "
+        f"local base=(i-1)*4 "
+        f"local v=ks[base+1]+ks[base+2]*256+ks[base+3]*65536+ks[base+4]*16777216 "
+        f"local j=v%i+1 "
+        f"c[i],c[j]=c[j],c[i] "
+        f"end "
+        f"return table.concat(c) end "
         f"local {alpha_v}={shuffle}({alphabet_seed}) "
         f"local {N_v}=#{alpha_v} "
         f"local {RA_v}={{}} "
         f"for _ri=1,{N_v},1 do {RA_v}[{sb}({alpha_v},_ri)]=_ri end "
         f"local function {g3}(a) if type(a)~='string' then return nil end local al=#a if al%2~=0 then return nil end local o={{}} for i=1,al,2 do local h={RA_v}[{sb}(a,i)] local l={RA_v}[{sb}(a,i+1)] if not h or not l then return nil end local kk=(h-1)*{N_v}+(l-1) if kk<0 or kk>255 then return nil end o[#o+1]=kk end return o end "
-        f"local function {g5}(E,i0,i1) local o={{}} local s0=(i0+{p_v})%{LCG_MOD} local s1=(i1+{q_v})%{LCG_MOD} local m3={r_v}%256 local m4={s_v}%256 if s0==0 then s0=1 end if s1==0 then s1=1 end for i=1,#E,1 do s0={lcg1}(s0) s1={lcg2}(s1) local kk=((s0+s1)+m3+m4*i)%256 local ct=E[i] o[i]=(ct-kk)%256 s0=(s0+ct)%{LCG_MOD} end return o end "
         f"local {CC_v}={{}} "
-        f"{var_k}=function(a,b1,b2,b3,b4,d1,d2) local ck=b3*{seeds['MK']}+b1 if {CC_v}[ck]~=nil then return {CC_v}[ck] end local d={g3}(a) if not d then return nil end local c0={t_v}+b3 local c1=({u_v}+b4)+{bk_v} local Y={g5}(d,c0,c1) local o={{}} for i=1,#Y,1 do o[i]={sc}(Y[i]%256) end local v=table.concat(o) local result if b1==1 then result=v elseif b1==2 then local n=tonumber(v) result=n==nil and 0 or n elseif b1==3 then result=v=='1' end {CC_v}[ck]=result return result end "
+        f"{var_k}=function(a,b1,b2,b3,b4,d1,d2) local ck=b3*{seeds['MK']}+b1 if {CC_v}[ck]~=nil then return {CC_v}[ck] end "
+        f"local d={g3}(a) if not d then return nil end "
+        f"local nonce_lo=b3%4294967296 local nonce_hi={xorb_v}(b3,{nb_v}) "
+        f"local ks={ks_v}(nonce_lo,nonce_hi,#d) "
+        f"local o={{}} for i=1,#d,1 do o[i]={sc}({xorb_v}(d[i],ks[i])%256) end "
+        f"local v=table.concat(o) local result if b1==1 then result=v elseif b1==2 then local n=tonumber(v) result=n==nil and 0 or n elseif b1==3 then result=v=='1' end {CC_v}[ck]=result return result end "
     )
 
 def build_vm_dispatch(var_V, rng):
@@ -217,8 +258,8 @@ def build_anti_tamper(seeds, rng, var_k, encode_fn):
         f"if rawget({ev_v},'__BREAKPOINT__')~=nil then {kill_v}() end "
         f"if rawget({ev_v},'__DEBUG__')~=nil then {kill_v}() end "
         f"if rawget({ev_v},'__ATTACHED__')~=nil then {kill_v}() end "
-        # syn check removed - kills modern executors
     )
 
 def build_runtime_footer(var_Q, var_G):
     return f"end)(getfenv and getfenv() or _ENV,table.unpack or unpack,{{}},{{}},nil,{{}}) end)(...)"
+    
