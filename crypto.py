@@ -1,50 +1,79 @@
 import secrets
 
-LCG_MOD = 2147483647
+MASK32 = 0xFFFFFFFF
+CHACHA_ROUNDS = 8
+CHACHA_CONST = (0x61707865, 0x3320646e, 0x79622d32, 0x6b206574)
+
+def rotl32(x, n):
+    x &= MASK32
+    return ((x << n) | (x >> (32 - n))) & MASK32
+
+def quarter_round(s, a, b, c, d):
+    s[a] = (s[a] + s[b]) & MASK32
+    s[d] ^= s[a]
+    s[d] = rotl32(s[d], 16)
+    s[c] = (s[c] + s[d]) & MASK32
+    s[b] ^= s[c]
+    s[b] = rotl32(s[b], 12)
+    s[a] = (s[a] + s[b]) & MASK32
+    s[d] ^= s[a]
+    s[d] = rotl32(s[d], 8)
+    s[c] = (s[c] + s[d]) & MASK32
+    s[b] ^= s[c]
+    s[b] = rotl32(s[b], 7)
+
+def chacha_block(key, counter, nonce):
+    state = list(CHACHA_CONST) + list(key) + [counter] + list(nonce)
+    w = state[:]
+    for _ in range(CHACHA_ROUNDS // 2):
+        quarter_round(w, 0, 4, 8, 12)
+        quarter_round(w, 1, 5, 9, 13)
+        quarter_round(w, 2, 6, 10, 14)
+        quarter_round(w, 3, 7, 11, 15)
+        quarter_round(w, 0, 5, 10, 15)
+        quarter_round(w, 1, 6, 11, 12)
+        quarter_round(w, 2, 7, 8, 13)
+        quarter_round(w, 3, 4, 9, 14)
+    return [(w[i] + state[i]) & MASK32 for i in range(16)]
+
+def keystream(key, nonce_lo, nonce_hi, n):
+    out = bytearray()
+    counter = 0
+    while len(out) < n:
+        words = chacha_block(key, counter, (0, nonce_lo, nonce_hi))
+        for wv in words:
+            out += wv.to_bytes(4, "little")
+        counter = (counter + 1) & MASK32
+    return bytes(out[:n])
 
 def make_seeds():
-    def rs():
-        return secrets.randbelow(LCG_MOD - 1) + 1
+    key = tuple(secrets.randbits(32) for _ in range(8))
     return {
-        "P":  rs(), "Q":  rs(), "R":  rs(), "S":  rs(),
-        "T":  rs(), "U":  rs(), "BK": rs(),
-        "A1": secrets.randbelow(65534) + 48271,
-        "A2": secrets.randbelow(65534) + 48271,
+        "KEY": key,
+        "NONCE_BASE": secrets.randbits(32),
         "MK": secrets.randbits(32),
     }
 
-def lcg_next(s, a):
-    return (s * a) % LCG_MOD
-
-def build_alphabet(seed, a1):
+def build_alphabet(seed, key):
     chars = [chr(i) for i in range(33, 127) if i not in (34, 39, 92)]
-    v = seed
-    for i in range(len(chars), 1, -1):
-        v = lcg_next(v, a1)
-        j = v % i
-        chars[i - 1], chars[j] = chars[j], chars[i - 1]
+    ks = keystream(key, seed, 0xA5A5A5A5, len(chars) * 4)
+    for i in range(len(chars) - 1, 0, -1):
+        v = int.from_bytes(ks[i * 4:i * 4 + 4], "little")
+        j = v % (i + 1)
+        chars[i], chars[j] = chars[j], chars[i]
     return "".join(chars)
 
+def derive_nonce(call_id, nonce_base):
+    return (call_id & MASK32), ((call_id ^ nonce_base) & MASK32)
+
 def encode_string(text, call_id, seeds, alphabet_seed):
-    a1 = seeds["A1"]
-    a2 = seeds["A2"]
-    alphabet = build_alphabet(alphabet_seed, a1)
+    key = seeds["KEY"]
+    alphabet = build_alphabet(alphabet_seed, key)
     N = len(alphabet)
-    data = [ord(c) for c in text]
-    s0 = (seeds["T"] + call_id + seeds["P"]) % LCG_MOD
-    s1 = (seeds["U"] + call_id + seeds["BK"] + seeds["Q"]) % LCG_MOD
-    m3 = seeds["R"] % 256
-    m4 = seeds["S"] % 256
-    if s0 == 0: s0 = 1
-    if s1 == 0: s1 = 1
-    encrypted = []
-    for i, byte in enumerate(data, 1):
-        s0 = lcg_next(s0, a1)
-        s1 = lcg_next(s1, a2)
-        k = (s0 + s1 + m3 + m4 * i) % 256
-        enc = (byte + k) % 256
-        encrypted.append(enc)
-        s0 = (s0 + enc) % LCG_MOD
+    data = bytes(ord(c) & 0xFF for c in text)
+    nonce_lo, nonce_hi = derive_nonce(call_id, seeds["NONCE_BASE"])
+    ks = keystream(key, nonce_lo, nonce_hi, len(data))
+    encrypted = bytes(b ^ k for b, k in zip(data, ks))
     result = []
     for b in encrypted:
         hi = b // N
@@ -56,29 +85,19 @@ def encode_string(text, call_id, seeds, alphabet_seed):
     return "".join(result)
 
 def decode_string(encoded, call_id, seeds, alphabet_seed):
-    a1 = seeds["A1"]
-    a2 = seeds["A2"]
-    alphabet = build_alphabet(alphabet_seed, a1)
+    key = seeds["KEY"]
+    alphabet = build_alphabet(alphabet_seed, key)
     N = len(alphabet)
-    ra = {ord(c): i + 1 for i, c in enumerate(alphabet)}
-    pairs = []
+    ra = {c: i for i, c in enumerate(alphabet)}
+    encrypted = bytearray()
     for i in range(0, len(encoded), 2):
-        h = ra.get(ord(encoded[i]))
-        l = ra.get(ord(encoded[i + 1]))
+        h = ra.get(encoded[i])
+        l = ra.get(encoded[i + 1])
         if h is None or l is None:
             return None
-        pairs.append((h - 1) * N + (l - 1))
-    s0 = (seeds["T"] + call_id + seeds["P"]) % LCG_MOD
-    s1 = (seeds["U"] + call_id + seeds["BK"] + seeds["Q"]) % LCG_MOD
-    m3 = seeds["R"] % 256
-    m4 = seeds["S"] % 256
-    if s0 == 0: s0 = 1
-    if s1 == 0: s1 = 1
-    result = []
-    for i, enc in enumerate(pairs, 1):
-        s0 = lcg_next(s0, a1)
-        s1 = lcg_next(s1, a2)
-        k = (s0 + s1 + m3 + m4 * i) % 256
-        result.append(chr((enc - k) % 256))
-        s0 = (s0 + enc) % LCG_MOD
-    return "".join(result)
+        encrypted.append(h * N + l)
+    nonce_lo, nonce_hi = derive_nonce(call_id, seeds["NONCE_BASE"])
+    ks = keystream(key, nonce_lo, nonce_hi, len(encrypted))
+    data = bytes(b ^ k for b, k in zip(encrypted, ks))
+    return "".join(chr(b) for b in data)
+    
