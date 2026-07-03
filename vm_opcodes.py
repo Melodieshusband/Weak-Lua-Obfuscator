@@ -12,6 +12,7 @@ CANONICAL_OPS = {
     'SET_TABLE':    0x09,
     'NEW_TABLE':    0x0A,
     'SET_LIST':     0x0B,
+    'SET_LIST_MULTI': 0x0E,
     'GET_FIELD':    0x0C,
     'SET_FIELD':    0x0D,
     'ADD':          0x10,
