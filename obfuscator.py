@@ -8,6 +8,7 @@ from codegen import (
 )
 from vm import try_compile_vm, bytecode_to_lua
 from string_fold import fold_strings
+from number_fold import fold_numbers
 from cff import flatten_top_level, can_flatten
 
 MIN_CHUNKS = 3
@@ -150,12 +151,14 @@ class Obfuscator:
         )
 
         if use_vm:
-            folded = fold_strings(vm_lua, self.encode, self.var_k, rng)
+            numbered = fold_numbers(vm_lua, rng)
+            folded = fold_strings(numbered, self.encode, self.var_k, rng)
             n_chunks = rng.randint(MIN_CHUNKS, MAX_CHUNKS)
             chunks = split_source(folded, n_chunks)
         else:
             flattened = flatten_top_level(source, rng, gen_name)
-            folded = fold_strings(flattened, self.encode, self.var_k, rng)
+            numbered = fold_numbers(flattened, rng)
+            folded = fold_strings(numbered, self.encode, self.var_k, rng)
             n_chunks = rng.randint(MIN_CHUNKS, MAX_CHUNKS)
             chunks = split_source(folded, n_chunks)
 
@@ -201,7 +204,7 @@ class Obfuscator:
 
         banner = (
             "--[[\n"
-            "  Protected by Weak Obfuscator v2.0\n"
+            "  Protected by Weak Obfuscator v2.1\n"
             "  https://github.com/Melodieshusband/Weak-Lua-Obfuscator\n"
             "]]\n"
         )
