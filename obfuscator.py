@@ -8,6 +8,7 @@ from codegen import (
 )
 from vm import try_compile_vm, bytecode_to_lua
 from string_fold import fold_strings
+from cff import flatten_top_level, can_flatten
 
 MIN_CHUNKS = 3
 MAX_CHUNKS = 7
@@ -155,7 +156,8 @@ class Obfuscator:
             n_chunks = rng.randint(MIN_CHUNKS, MAX_CHUNKS)
             chunks = split_source(folded, n_chunks)
         else:
-            folded = fold_strings(source, self.encode, self.var_k, rng)
+            flattened = flatten_top_level(source, rng, gen_name)
+            folded = fold_strings(flattened, self.encode, self.var_k, rng)
             n_chunks = rng.randint(MIN_CHUNKS, MAX_CHUNKS)
             chunks = split_source(folded, n_chunks)
 
@@ -208,4 +210,4 @@ class Obfuscator:
 
         mode = "VM" if use_vm else "chunks+string-fold"
         return banner + header + body + footer, mode
-        
+
