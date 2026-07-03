@@ -184,6 +184,13 @@ def build_anti_tamper(seeds, rng, var_k, encode_fn):
     lres_v  = gen_name()
     sus_v   = gen_name()
     dc_v    = gen_name()
+    otype_v = gen_name()
+    opcall_v = gen_name()
+    oerror_v = gen_name()
+    ostr_v  = gen_name()
+    odbg_v  = gen_name()
+    dfn_v   = gen_name()
+    dmp_v   = gen_name()
 
     m1 = rng.randint(0x2000, 0xEFFF)
     m2 = rng.randint(0x2000, 0xEFFF)
@@ -257,54 +264,79 @@ def build_anti_tamper(seeds, rng, var_k, encode_fn):
     decoy_message = "Melodie doesn't approve of skidding be a good boy"
     decoy_enc = enc_call(decoy_message)
 
+    def build_kill_v():
+        variant = rng.randint(1, 4)
+        wait_expr = rng.choice([
+            "if task then task.wait(0) elseif coroutine then coroutine.yield() end",
+            "if coroutine then coroutine.yield() elseif task then task.wait(0) end",
+            "if wait then wait(0) elseif task then task.wait(0) end",
+        ])
+        junk1 = rng.randint(1000, 9999)
+        junk2 = rng.randint(1000, 9999)
+        if variant == 1:
+            return f"function() error('',0) local _z=true while _z do {wait_expr} error('',0) end end"
+        elif variant == 2:
+            return f"function() local _k={junk1} while true do _k=_k+1 {wait_expr} if _k>{junk1} then error('',0) end end end"
+        elif variant == 3:
+            return f"function() local _k=0 repeat _k=_k+1 {wait_expr} error('',0) until _k<0 end"
+        else:
+            return f"function() local _f local _g=function() {wait_expr} error('',0) return _f() end _f=_g return _g() end"
+
+    kill_body = build_kill_v()
+
     return (
         f"local {sus_v}=0 "
-        f"local {kill_v} {kill_v}=function() error('',0) local _z=true while _z do if task then task.wait(0) elseif coroutine then coroutine.yield() end error('',0) end end "
+        f"local {kill_v} {kill_v}={kill_body} "
+        f"local {otype_v}=type "
+        f"local {opcall_v}=pcall "
+        f"local {oerror_v}=error "
+        f"local {ostr_v}=tostring "
+        f"local {odbg_v}=debug "
         f"local {db_v}=debug "
-        f"if type(rawget)~='function' then {kill_v}() end "
-        f"if type(rawset)~='function' then {kill_v}() end "
-        f"if type(setmetatable)~='function' then {kill_v}() end "
-        f"if type(getmetatable)~='function' then {kill_v}() end "
-        f"if type(pcall)~='function' then {kill_v}() end "
-        f"if type(xpcall)~='function' then {kill_v}() end "
-        f"if type(error)~='function' then {kill_v}() end "
-        f"if type(type)~='function' then {kill_v}() end "
-        f"if type(tostring)~='function' then {kill_v}() end "
-        f"if type(tonumber)~='function' then {kill_v}() end "
-        f"if type(select)~='function' then {kill_v}() end "
-        f"if type(ipairs)~='function' then {kill_v}() end "
-        f"if type(pairs)~='function' then {kill_v}() end "
-        f"if type(next)~='function' then {kill_v}() end "
-        f"if type(unpack or table.unpack)~='function' then {kill_v}() end "
-        f"if type(string.byte)~='function' then {kill_v}() end "
-        f"if type(string.char)~='function' then {kill_v}() end "
-        f"if type(string.len)~='function' then {kill_v}() end "
-        f"if type(string.sub)~='function' then {kill_v}() end "
-        f"if type(string.rep)~='function' then {kill_v}() end "
-        f"if type(string.find)~='function' then {kill_v}() end "
-        f"if type(string.format)~='function' then {kill_v}() end "
-        f"if type(table.concat)~='function' then {kill_v}() end "
-        f"if type(table.insert)~='function' then {kill_v}() end "
-        f"if type(table.remove)~='function' then {kill_v}() end "
-        f"if type(math.floor)~='function' then {kill_v}() end "
-        f"if type(math.abs)~='function' then {kill_v}() end "
-        f"if type(math.huge)~='number' then {kill_v}() end "
-        f"if type(_VERSION)~='string' then {kill_v}() end "
+        f"if {otype_v}(rawget)~='function' then {kill_v}() end "
+        f"if {otype_v}(rawset)~='function' then {kill_v}() end "
+        f"if {otype_v}(setmetatable)~='function' then {kill_v}() end "
+        f"if {otype_v}(getmetatable)~='function' then {kill_v}() end "
+        f"if {otype_v}(pcall)~='function' then {kill_v}() end "
+        f"if {otype_v}(xpcall)~='function' then {kill_v}() end "
+        f"if {otype_v}(error)~='function' then {kill_v}() end "
+        f"if {otype_v}(type)~='function' then {kill_v}() end "
+        f"if {otype_v}(tostring)~='function' then {kill_v}() end "
+        f"if {otype_v}(tonumber)~='function' then {kill_v}() end "
+        f"if {otype_v}(select)~='function' then {kill_v}() end "
+        f"if {otype_v}(ipairs)~='function' then {kill_v}() end "
+        f"if {otype_v}(pairs)~='function' then {kill_v}() end "
+        f"if {otype_v}(next)~='function' then {kill_v}() end "
+        f"if {otype_v}(unpack or table.unpack)~='function' then {kill_v}() end "
+        f"if {otype_v}(string.byte)~='function' then {kill_v}() end "
+        f"if {otype_v}(string.char)~='function' then {kill_v}() end "
+        f"if {otype_v}(string.len)~='function' then {kill_v}() end "
+        f"if {otype_v}(string.sub)~='function' then {kill_v}() end "
+        f"if {otype_v}(string.rep)~='function' then {kill_v}() end "
+        f"if {otype_v}(string.find)~='function' then {kill_v}() end "
+        f"if {otype_v}(string.format)~='function' then {kill_v}() end "
+        f"if {otype_v}(table.concat)~='function' then {kill_v}() end "
+        f"if {otype_v}(table.insert)~='function' then {kill_v}() end "
+        f"if {otype_v}(table.remove)~='function' then {kill_v}() end "
+        f"if {otype_v}(math.floor)~='function' then {kill_v}() end "
+        f"if {otype_v}(math.abs)~='function' then {kill_v}() end "
+        f"if {otype_v}(math.huge)~='number' then {kill_v}() end "
+        f"if {otype_v}(_VERSION)~='string' then {kill_v}() end "
         f"if not(1/0==math.huge) then {kill_v}() end "
         f"if not(math.huge==math.huge*2) then {kill_v}() end "
         f"if not(0/0~=0/0) then {kill_v}() end "
         f"if not(-1/0==-math.huge) then {kill_v}() end "
         f"if math.abs(-{m1})~={m1} then {kill_v}() end "
         f"if math.floor({m1}+0.9)~={m1} then {kill_v}() end "
-        f"do local {ok_v},{er_v}=pcall(function() error({m1}) end) if {ok_v} then {kill_v}() end if type({er_v})~='string' then {kill_v}() end end "
-        f"do local {ti_v}=os and type(os.clock)=='function' and os.clock or (type(tick)=='function' and tick) or nil local {t0_v}={ti_v} and {ti_v}() or 0 local {acc_v}=0 for _=1,{loop_count} do {acc_v}={acc_v}+1 end local {t1_v}={ti_v} and {ti_v}() or 0 if {acc_v}~={loop_count} then {kill_v}() end if {ti_v} and ({t1_v}-{t0_v})>{timing_limit} then {kill_v}() end end "
-        f"do local {tb_v}={{}} local _trap=false local {mt_v}={{__newindex=function() _trap=true end,__index=function() _trap=true end}} setmetatable({tb_v},{mt_v}) local {ok_v}=pcall(function() {tb_v}[{m2}]={m3} end) setmetatable({tb_v},nil) if not _trap then {kill_v}() end end "
-        f"do local {fn_v}=function(x) return x*{m2}+{m3} end if type({fn_v})~='function' then {kill_v}() end if {fn_v}(0)~={m3} then {kill_v}() end if {fn_v}(1)~={m2}+{m3} then {kill_v}() end local {ok_v},{er_v}=pcall({fn_v},'z') if {ok_v} then {kill_v}() end end "
-        f"do local _n=tostring({m1}+{m2}) if type(_n)~='string' then {kill_v}() end if tonumber(_n)~=({m1}+{m2}) then {kill_v}() end end "
-        f"do local _orig_type=type if _orig_type({m1})~='number' then {kill_v}() end if _orig_type('')~='string' then {kill_v}() end if _orig_type({{}})~='table' then {kill_v}() end if _orig_type(nil)~='nil' then {kill_v}() end if _orig_type(true)~='boolean' then {kill_v}() end if _orig_type(_orig_type)~='function' then {kill_v}() end end "
-        f"do local {ch_v}=tostring({m1}):rep(3) if #{ch_v}~=3*#tostring({m1}) then {kill_v}() end end "
+        f"do local {ok_v},{er_v}={opcall_v}(function() error({m1}) end) if {ok_v} then {kill_v}() end if {otype_v}({er_v})~='string' then {kill_v}() end end "
+        f"do local {ti_v}=os and {otype_v}(os.clock)=='function' and os.clock or ({otype_v}(tick)=='function' and tick) or nil local {t0_v}={ti_v} and {ti_v}() or 0 local {acc_v}=0 for _=1,{loop_count} do {acc_v}={acc_v}+1 end local {t1_v}={ti_v} and {ti_v}() or 0 if {acc_v}~={loop_count} then {kill_v}() end if {ti_v} and ({t1_v}-{t0_v})>{timing_limit} then {kill_v}() end end "
+        f"do local {tb_v}={{}} local _trap=false local {mt_v}={{__newindex=function() _trap=true end,__index=function() _trap=true end}} setmetatable({tb_v},{mt_v}) local {ok_v}={opcall_v}(function() {tb_v}[{m2}]={m3} end) setmetatable({tb_v},nil) if not _trap then {kill_v}() end end "
+        f"do local {fn_v}=function(x) return x*{m2}+{m3} end if {otype_v}({fn_v})~='function' then {kill_v}() end if {fn_v}(0)~={m3} then {kill_v}() end if {fn_v}(1)~={m2}+{m3} then {kill_v}() end local {ok_v},{er_v}={opcall_v}({fn_v},'z') if {ok_v} then {kill_v}() end end "
+        f"do local _n={ostr_v}({m1}+{m2}) if {otype_v}(_n)~='string' then {kill_v}() end if tonumber(_n)~=({m1}+{m2}) then {kill_v}() end end "
+        f"do if {otype_v}({m1})~='number' then {kill_v}() end if {otype_v}('')~='string' then {kill_v}() end if {otype_v}({{}})~='table' then {kill_v}() end if {otype_v}(nil)~='nil' then {kill_v}() end if {otype_v}(true)~='boolean' then {kill_v}() end if {otype_v}({otype_v})~='function' then {kill_v}() end end "
+        f"do local {ch_v}={ostr_v}({m1}):rep(3) if #{ch_v}~=3*#{ostr_v}({m1}) then {kill_v}() end end "
         f"local {ev_v}=(getfenv and getfenv(0)) or _ENV or {{}} "
-        f"if type({ev_v})~='table' then {kill_v}() end "
+        f"if {otype_v}({ev_v})~='table' then {kill_v}() end "
         f"{dc} "
         f"{exec_checks} "
         f"if rawget({ev_v},'__BREAKPOINT__')~=nil then {kill_v}() end "
@@ -323,6 +355,13 @@ def build_anti_tamper(seeds, rng, var_k, encode_fn):
         f"return {lk_v}() end) "
         f"if {lok1_v} and {lfn_v} and type({lfn_v})=='table' and {lfn_v}~=_G then {le_v}={lfn_v} {lune_check_g} {lute_check_g} end end "
         f"if type({lreq_v})=='function' then {lune_check_req} {lute_check_req} end "
+        f"end "
+        f"do local {dmp_v}={otype_v}(string)=='table' and string.dump "
+        f"local {dfn_v}={{{otype_v},{opcall_v},{oerror_v},{ostr_v},tonumber,rawget,rawset,setmetatable,getmetatable,select,ipairs,pairs,next,string.byte,string.char,string.sub,string.find,string.format,table.concat,table.insert,table.remove,math.floor,math.abs}} "
+        f"if {dmp_v} then for _,{fn_v} in ipairs({dfn_v}) do "
+        f"local {ok_v}={opcall_v}({dmp_v},{fn_v}) "
+        f"if {ok_v} then {kill_v}() end "
+        f"end end "
         f"end "
         f"do local {dc_v}={sus_v}>0 "
         f"local {ok_v}=pcall(function() end) "
