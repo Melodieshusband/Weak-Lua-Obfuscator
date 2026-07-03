@@ -172,7 +172,6 @@ def build_anti_tamper(seeds, rng, var_k, encode_fn):
     fn_v    = gen_name()
     ch_v    = gen_name()
     hk_v    = gen_name()
-    lm_v    = gen_name()
     le_v    = gen_name()
     lok1_v  = gen_name()
     lenv1_v = gen_name()
@@ -183,6 +182,8 @@ def build_anti_tamper(seeds, rng, var_k, encode_fn):
     lk_v    = gen_name()
     lreq_v  = gen_name()
     lres_v  = gen_name()
+    sus_v   = gen_name()
+    dc_v    = gen_name()
 
     m1 = rng.randint(0x2000, 0xEFFF)
     m2 = rng.randint(0x2000, 0xEFFF)
@@ -208,6 +209,14 @@ def build_anti_tamper(seeds, rng, var_k, encode_fn):
         "process", "regex", "roblox", "serde", "stdio", "task",
     ]
 
+    lute_modules = [
+        "@lute/fs", "@lute/net", "@lute/task", "@lute/process",
+        "@lute/crypto", "@lute/luau", "@lute/vm", "@lute/time",
+        "@std/fs", "@std/net", "@std/task", "@std/process",
+        "@std/crypto", "@std/luau", "@std/io", "@std/testing",
+        "@std/assert", "@std/lint",
+    ]
+
     def enc_call(name):
         enc, cid = encode_fn(name)
         s0 = rng.randint(100000, 2**31 - 1)
@@ -226,16 +235,30 @@ def build_anti_tamper(seeds, rng, var_k, encode_fn):
     )
 
     lune_check_g = " ".join(
-        f"if {le_v}[{enc_call(m)}]~=nil then {kill_v}() end"
+        f"if {le_v}[{enc_call(m)}]~=nil then {sus_v}={sus_v}+1 end"
         for m in lune_modules
+    )
+
+    lute_check_g = " ".join(
+        f"if {le_v}[{enc_call(m)}]~=nil then {sus_v}={sus_v}+1 end"
+        for m in lute_modules
     )
 
     lune_check_req = " ".join(
-        f"do local {lok1_v},{lres_v}=pcall({lreq_v},{enc_call(m)}) if {lok1_v} and {lres_v}~=nil then {kill_v}() end end"
+        f"do local {lok1_v},{lres_v}=pcall({lreq_v},{enc_call(m)}) if {lok1_v} and {lres_v}~=nil then {sus_v}={sus_v}+1 end end"
         for m in lune_modules
     )
 
+    lute_check_req = " ".join(
+        f"do local {lok1_v},{lres_v}=pcall({lreq_v},{enc_call(m)}) if {lok1_v} and {lres_v}~=nil then {sus_v}={sus_v}+1 end end"
+        for m in lute_modules
+    )
+
+    decoy_message = "Melodie doesn't approve of skidding be a good boy"
+    decoy_enc = enc_call(decoy_message)
+
     return (
+        f"local {sus_v}=0 "
         f"local {kill_v} {kill_v}=function() error('',0) local _z=true while _z do if task then task.wait(0) elseif coroutine then coroutine.yield() end error('',0) end end "
         f"local {db_v}=debug "
         f"if type(rawget)~='function' then {kill_v}() end "
@@ -289,17 +312,21 @@ def build_anti_tamper(seeds, rng, var_k, encode_fn):
         f"if rawget({ev_v},'__ATTACHED__')~=nil then {kill_v}() end "
         f"do local {lreq_v}=require "
         f"local {lenv1_v}=_G "
-        f"if type({lenv1_v})=='table' then {le_v}={lenv1_v} {lune_check_g} end "
+        f"if type({lenv1_v})=='table' then {le_v}={lenv1_v} {lune_check_g} {lute_check_g} end "
         f"local {lok2_v},{lenv2_v}=pcall(function() return _ENV end) "
-        f"if {lok2_v} and {lenv2_v} and type({lenv2_v})=='table' and {lenv2_v}~=_G then {le_v}={lenv2_v} {lune_check_g} end "
+        f"if {lok2_v} and {lenv2_v} and type({lenv2_v})=='table' and {lenv2_v}~=_G then {le_v}={lenv2_v} {lune_check_g} {lute_check_g} end "
         f"do local {lok1_v},{lfn_v}=pcall(function() "
         f"local {ln_v}=load or loadstring "
         f"if type({ln_v})~='function' then return nil end "
         f"local {lk_v}={ln_v}('return _ENV') "
         f"if type({lk_v})~='function' then return nil end "
         f"return {lk_v}() end) "
-        f"if {lok1_v} and {lfn_v} and type({lfn_v})=='table' and {lfn_v}~=_G then {le_v}={lfn_v} {lune_check_g} end end "
-        f"if type({lreq_v})=='function' then {lune_check_req} end "
+        f"if {lok1_v} and {lfn_v} and type({lfn_v})=='table' and {lfn_v}~=_G then {le_v}={lfn_v} {lune_check_g} {lute_check_g} end end "
+        f"if type({lreq_v})=='function' then {lune_check_req} {lute_check_req} end "
+        f"end "
+        f"do local {dc_v}={sus_v}>0 "
+        f"local {ok_v}=pcall(function() end) "
+        f"if {dc_v} then print({decoy_enc}) {kill_v}() end "
         f"end "
         # syn check removed - kills modern executors
     )
