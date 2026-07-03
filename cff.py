@@ -187,15 +187,32 @@ def _strip_leading_comments(stmt):
 
 def _is_unsafe_statement(stmt):
     stripped = _strip_leading_comments(stmt).strip()
-    if _LOCAL_FUNCTION_RE.match(stripped):
-        return True
-    if stripped.startswith('function'):
-        return True
     if stripped.startswith('goto'):
         return True
     if '::' in stripped:
         return True
     return False
+
+
+def _is_function_statement(stmt):
+    stripped = _strip_leading_comments(stmt).strip()
+    if _LOCAL_FUNCTION_RE.match(stripped):
+        return True
+    if stripped.startswith('function'):
+        return True
+    return False
+
+
+def _extract_function_name(stmt):
+    stripped = _strip_leading_comments(stmt).strip()
+    m = _LOCAL_FUNCTION_RE.match(stripped)
+    if m:
+        m2 = re.match(r'^\s*local\s+function\s+(' + _NAME_RE + r')', stripped)
+        return m2.group(1) if m2 else None
+    if stripped.startswith('function'):
+        m2 = re.match(r'^\s*function\s+(' + _NAME_RE + r')', stripped)
+        return m2.group(1) if m2 else None
+    return None
 
 
 def _extract_local_names(stmt):
@@ -205,6 +222,22 @@ def _extract_local_names(stmt):
         return None
     names = [x.strip() for x in m.group(1).split(',')]
     return names
+
+
+def _rewrite_local_function_to_assign(stmt):
+    prefix_len = len(stmt) - len(_strip_leading_comments(stmt))
+    comment_part = stmt[:prefix_len]
+    rest = stmt[prefix_len:]
+    m = re.match(r'^(\s*)local(\s+)function(\s+)(' + _NAME_RE + r')', rest)
+    if not m:
+        return stmt
+    name = m.group(4)
+    before = rest[:m.start()]
+    after_name_end = m.end()
+    rewritten = (before + m.group(1) +
+                 (' ' * (len('local') + len(m.group(2)) + len('function') + len(m.group(3)))) +
+                 name + ' = function' + rest[after_name_end:])
+    return comment_part + rewritten
 
 
 def _rewrite_local_to_assign(stmt):
@@ -249,6 +282,15 @@ def flatten_top_level(source, rng, gen_name_fn):
         stripped = s.strip()
         if stripped.startswith('return'):
             has_top_return = True
+        stripped_nc = _strip_leading_comments(s).strip()
+        if _LOCAL_FUNCTION_RE.match(stripped_nc):
+            fname = _extract_function_name(s)
+            if fname is not None:
+                forward_names.append(fname)
+                stmts.append(_rewrite_local_function_to_assign(s))
+            else:
+                stmts.append(s)
+            continue
         names = _extract_local_names(s)
         if names is not None:
             forward_names.extend(names)
@@ -325,3 +367,4 @@ def flatten_top_level(source, rng, gen_name_fn):
     lines.append("end ")
 
     return "".join(lines)
+  
