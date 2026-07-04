@@ -1431,7 +1431,7 @@ class VMCompileError(Exception):
     pass
 
 
-def try_compile_vm(source, debug=False):
+def try_compile_vm(source, rng=None, debug=False):
     try:
         opmap = make_opmap()
         _patch_global_ops(opmap)
@@ -1440,6 +1440,9 @@ def try_compile_vm(source, debug=False):
         ast = parser.parse()
         compiler = Compiler()
         compiler.compile_chunk(ast)
+        if rng is not None:
+            from bytecode_cff import flatten_bytecode
+            flatten_bytecode(compiler.proto, rng, opmap)
         bytecode = compiler.serialize()
         return bytecode, opmap
     except Exception as e:
