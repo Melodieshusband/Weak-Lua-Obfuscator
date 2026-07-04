@@ -9,7 +9,7 @@ from codegen import (
 from vm import try_compile_vm, bytecode_to_lua
 from string_fold import fold_strings
 from number_fold import fold_numbers
-from cff import flatten_top_level, can_flatten
+from cff import flatten_top_level, flatten_recursive, can_flatten
 
 MIN_CHUNKS = 3
 MAX_CHUNKS = 7
@@ -146,7 +146,7 @@ class Obfuscator:
         if force_fold or not force_vm:
             use_vm = False
         else:
-            bytecode_result = try_compile_vm(source)
+            bytecode_result = try_compile_vm(source, rng=rng)
             if bytecode_result is not None:
                 bytecode, opmap = bytecode_result
                 use_vm = True
@@ -192,7 +192,7 @@ class Obfuscator:
             vmres_v = gen_name()
             payload_stage = f"local {vmres_v}=(function(...) {payload} end)() "
         else:
-            flattened = flatten_top_level(source, rng, gen_name)
+            flattened = flatten_recursive(source, rng, gen_name)
             numbered = fold_numbers(flattened, rng)
             folded = fold_strings(numbered, self.encode, self.var_k, rng)
             n_chunks = rng.randint(MIN_CHUNKS, MAX_CHUNKS)
