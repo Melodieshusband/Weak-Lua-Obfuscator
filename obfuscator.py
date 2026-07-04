@@ -1,6 +1,6 @@
 import random
 import secrets
-from crypto import make_seeds, encode_string
+from crypto import make_seeds, encode_string, encrypt_bytes
 from codegen import (
     reset_names, gen_name,
     build_runtime_header, build_vm_dispatch,
@@ -120,6 +120,25 @@ class Obfuscator:
 
         return "".join(lines)
 
+    def build_vm_data_expr(self, bytecode, prims):
+        cid = self.next_call_id()
+        enc = encrypt_bytes(bytecode, cid, self.seeds)
+        nonce_lo, nonce_hi = self.seeds["NONCE_BASE"], cid
+        packed = ",".join(str(b) for b in enc)
+        arr_v = gen_name()
+        out_v = gen_name()
+        i_v = gen_name()
+        nlo, nhi = cid & 0xFFFFFFFF, (cid ^ self.seeds["NONCE_BASE"]) & 0xFFFFFFFF
+        ks_v = prims["ks"]
+        xorb_v = prims["xorb"]
+        expr = (
+            f"(function() local {arr_v}={{{packed}}} "
+            f"local {out_v}={ks_v}({nlo},{nhi},#{arr_v}) "
+            f"for {i_v}=1,#{arr_v} do {arr_v}[{i_v}]={xorb_v}({arr_v}[{i_v}],{out_v}[{i_v}]) end "
+            f"return {arr_v} end)()"
+        )
+        return expr
+
     def obfuscate(self, force_vm=False, force_fold=False):
         source = self.source
         rng = self.rng
@@ -130,14 +149,13 @@ class Obfuscator:
             bytecode_result = try_compile_vm(source)
             if bytecode_result is not None:
                 bytecode, opmap = bytecode_result
-                vm_lua = bytecode_to_lua(bytecode, rng, gen_name, opmap)
                 use_vm = True
             else:
                 if force_vm:
                     raise RuntimeError("--vm Error")
                 use_vm = False
 
-        header = build_runtime_header(
+        header, prims = build_runtime_header(
             self.seeds, self.alphabet_seed,
             self.var_k, self.var_Q, self.var_G,
             self.var_B, self.var_f, self.var_V,
@@ -149,20 +167,6 @@ class Obfuscator:
         anti_tamper = build_anti_tamper(
             self.seeds, rng, self.var_k, self.encode
         )
-
-        if use_vm:
-            numbered = fold_numbers(vm_lua, rng)
-            folded = fold_strings(numbered, self.encode, self.var_k, rng)
-            n_chunks = rng.randint(MIN_CHUNKS, MAX_CHUNKS)
-            chunks = split_source(folded, n_chunks)
-        else:
-            flattened = flatten_top_level(source, rng, gen_name)
-            numbered = fold_numbers(flattened, rng)
-            folded = fold_strings(numbered, self.encode, self.var_k, rng)
-            n_chunks = rng.randint(MIN_CHUNKS, MAX_CHUNKS)
-            chunks = split_source(folded, n_chunks)
-
-        chunk_loader = self.build_chunk_loader(chunks)
 
         sm_var = gen_name()
         sid1 = rng.randint(1000000,   5000000)
@@ -182,6 +186,19 @@ class Obfuscator:
         s3e = rng.randint(100000, 2**31 - 1)
         k = self.var_k
 
+        if use_vm:
+            data_expr = self.build_vm_data_expr(bytecode, prims)
+            payload = bytecode_to_lua(bytecode, rng, gen_name, opmap, data_expr=data_expr)
+            vmres_v = gen_name()
+            payload_stage = f"local {vmres_v}=(function(...) {payload} end)() "
+        else:
+            flattened = flatten_top_level(source, rng, gen_name)
+            numbered = fold_numbers(flattened, rng)
+            folded = fold_strings(numbered, self.encode, self.var_k, rng)
+            n_chunks = rng.randint(MIN_CHUNKS, MAX_CHUNKS)
+            chunks = split_source(folded, n_chunks)
+            payload_stage = self.build_chunk_loader(chunks)
+
         body = (
             f"{anti_tamper}"
             f"{dispatch_table}"
@@ -192,7 +209,7 @@ class Obfuscator:
             f"{junk_parts} "
             f"end "
             f"elseif {sm_var}=={sid2} then "
-            f"{chunk_loader}"
+            f"{payload_stage}"
             f"{sm_var}={sid3} "
             f"elseif {sm_var}=={sid3} then break "
             f"elseif {sm_var}=={sid4} then "
@@ -209,6 +226,5 @@ class Obfuscator:
             "]]\n"
         )
 
-        mode = "VM" if use_vm else "chunks+string-fold"
+        mode = "VM (no loadstring)" if use_vm else "chunks+string-fold"
         return banner + header + body + footer, mode
-
