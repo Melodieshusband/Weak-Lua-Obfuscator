@@ -116,7 +116,7 @@ def build_runtime_header(seeds, alphabet_seed, var_k, var_Q, var_G, var_B, var_f
         f"local ks={ks_v}(nonce_lo,nonce_hi,#d) "
         f"local o={{}} for i=1,#d,1 do o[i]={sc}({xorb_v}(d[i],ks[i])%256) end "
         f"local v=table.concat(o) local result if b1==1 then result=v elseif b1==2 then local n=tonumber(v) result=n==nil and 0 or n elseif b1==3 then result=v=='1' end {CC_v}[ck]=result return result end "
-    )
+    ), {"ks": ks_v, "xorb": xorb_v, "nb": nb_v, "sc": sc}
 
 def build_vm_dispatch(var_V, rng):
     ops = {
