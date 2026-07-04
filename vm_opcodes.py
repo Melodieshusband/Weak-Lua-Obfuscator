@@ -28,6 +28,12 @@ CANONICAL_OPS = {
     'AND':          0x1A,
     'OR':           0x1B,
     'IDIV':         0x1C,
+    'BAND':         0x1D,
+    'BOR':          0x1E,
+    'BXOR':         0x1F,
+    'BNOT':         0x26,
+    'SHL':          0x27,
+    'SHR':          0x28,
     'EQ':           0x20,
     'NE':           0x21,
     'LT':           0x22,
@@ -66,3 +72,4 @@ def make_opmap():
                 opmap[name] = v
                 break
     return opmap
+    
