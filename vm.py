@@ -1455,10 +1455,7 @@ def _patch_global_ops(opmap):
         g['OP_' + name] = val
 
 
-def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None):
-    data = list(bytecode)
-    encoded = ','.join(str(b) for b in data)
-
+def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None):
     N = gen_name_fn
     data_v    = N(); u16_v     = N(); u16s_v    = N(); ldc_v     = N()
     ldi_v     = N(); ldp_v     = N(); consts_v  = N()
@@ -1513,8 +1510,10 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None):
         lines.append("end")
         return " ".join(lines)
 
+    dexpr = data_expr if data_expr is not None else "{}"
+
     lua = (
-        f"local {data_v}={{{encoded}}} "
+        f"local {data_v}={dexpr} "
         f"local function {u16_v}(d,i) return d[i]+(d[i+1]*256) end "
         f"local function {u16s_v}(d,i) local v=d[i]+(d[i+1]*256) if v>=32768 then v=v-65536 end return v end "
         f"local function {ldc_v}(d,i) "
