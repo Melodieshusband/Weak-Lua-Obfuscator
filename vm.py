@@ -34,6 +34,12 @@ OP_NOT           = _DEFAULT_OPMAP['NOT']
 OP_AND           = _DEFAULT_OPMAP['AND']
 OP_OR            = _DEFAULT_OPMAP['OR']
 OP_IDIV          = _DEFAULT_OPMAP['IDIV']
+OP_BAND          = _DEFAULT_OPMAP['BAND']
+OP_BOR           = _DEFAULT_OPMAP['BOR']
+OP_BXOR          = _DEFAULT_OPMAP['BXOR']
+OP_BNOT          = _DEFAULT_OPMAP['BNOT']
+OP_SHL           = _DEFAULT_OPMAP['SHL']
+OP_SHR           = _DEFAULT_OPMAP['SHR']
 OP_EQ            = _DEFAULT_OPMAP['EQ']
 OP_NE            = _DEFAULT_OPMAP['NE']
 OP_LT            = _DEFAULT_OPMAP['LT']
@@ -79,6 +85,8 @@ def encode_const(val):
     return bytes([TYPE_NIL])
 
 class Instruction:
+    __slots__ = ('op', 'a', 'b', 'c')
+
     def __init__(self, op, a=None, b=None, c=None):
         self.op = op
         self.a = a
@@ -91,6 +99,9 @@ class Instruction:
             if v is not None:
                 b += struct.pack('<H', v & 0xFFFF)
         return b
+
+UPVAL_FROM_LOCAL = 0
+UPVAL_FROM_UPVAL = 1
 
 class FuncProto:
     def __init__(self):
@@ -128,11 +139,19 @@ class FuncProto:
     def pc(self):
         return len(self.instructions)
 
+    def add_upval(self, kind, index):
+        for i, (k, idx) in enumerate(self.upvals):
+            if k == kind and idx == index:
+                return i
+        self.upvals.append((kind, index))
+        return len(self.upvals) - 1
+
     def serialize(self):
-        data = bytes([int(self.is_vararg), self.params, len(self.upvals)])
+        data = bytes([int(self.is_vararg), self.params])
         data += struct.pack('<H', len(self.upvals))
-        for reg in self.upvals:
-            data += struct.pack('<H', reg)
+        for kind, idx in self.upvals:
+            data += bytes([kind])
+            data += struct.pack('<H', idx)
         data += struct.pack('<H', len(self.protos))
         for p in self.protos:
             s = p.serialize()
@@ -146,11 +165,14 @@ class FuncProto:
         return data
 
 class Scope:
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, func_boundary=False):
         self.parent = parent
         self.locals = {}
-        self.reg_counter = parent.reg_counter if parent else [0]
-        self.upval_refs = []
+        if parent and not func_boundary:
+            self.reg_counter = parent.reg_counter
+        else:
+            self.reg_counter = [0]
+        self.func_boundary = func_boundary
 
     def alloc(self, name):
         reg = self.reg_counter[0]
@@ -161,20 +183,24 @@ class Scope:
     def free_to(self, reg):
         self.reg_counter[0] = reg
 
-    def resolve(self, name):
-        if name in self.locals:
-            return ('local', self.locals[name])
-        if self.parent:
-            return self.parent.resolve(name)
+    def resolve_local(self, name):
+        s = self
+        while s is not None:
+            if name in s.locals:
+                return s.locals[name]
+            if s.func_boundary:
+                return None
+            s = s.parent
         return None
 
 class Compiler:
     def __init__(self, parent=None):
         self.proto = FuncProto()
-        self.scope = Scope()
+        self.scope = Scope(func_boundary=True)
         self.parent = parent
         self.break_patches = []
         self.continue_patches = []
+        self.captured_regs = set()
 
     def child(self):
         c = Compiler(parent=self)
@@ -188,15 +214,28 @@ class Compiler:
         self.scope = self.scope.parent
         self.scope.reg_counter[0] = saved_reg
 
+    def emit_close_upvals(self, from_reg):
+        regs = sorted(r for r in self.captured_regs if r >= from_reg)
+        for r in regs:
+            self.emit(OP_CLOSE_UPVAL, r)
+        self.captured_regs -= set(regs)
+
     def resolve(self, name):
-        r = self.scope.resolve(name)
-        if r is not None:
-            return r
-        if self.parent:
-            pr = self.parent.resolve(name)
-            if pr and pr[0] in ('local', 'upval'):
-                return ('upval', pr[1])
-            return pr
+        local_reg = self.scope.resolve_local(name)
+        if local_reg is not None:
+            return ('local', local_reg)
+        if self.parent is None:
+            return None
+        pr = self.parent.resolve(name)
+        if pr is None:
+            return None
+        if pr[0] == 'local':
+            idx = self.proto.add_upval(UPVAL_FROM_LOCAL, pr[1])
+            self.parent.captured_regs.add(pr[1])
+            return ('upval', idx)
+        if pr[0] == 'upval':
+            idx = self.proto.add_upval(UPVAL_FROM_UPVAL, pr[1])
+            return ('upval', idx)
         return None
 
     def alloc(self, name='_'):
@@ -241,8 +280,7 @@ class Compiler:
                 if r[1] != dst:
                     self.emit(OP_MOVE, dst, r[1])
             elif r[0] == 'upval':
-                idx = self._upval_idx(r[1])
-                self.emit(OP_LOAD_UPVAL, dst, idx)
+                self.emit(OP_LOAD_UPVAL, dst, r[1])
         elif t == 'index':
             tmp = self.scope.reg_counter[0]
             self.scope.reg_counter[0] += 2
@@ -270,11 +308,18 @@ class Compiler:
             self._function_expr(node, dst)
         elif t == 'multi':
             self._expr(node['exprs'][0], dst)
-
-    def _upval_idx(self, reg):
-        if reg not in self.proto.upvals:
-            self.proto.upvals.append(reg)
-        return self.proto.upvals.index(reg)
+        elif t == 'paren':
+            inner = node['inner']
+            if inner['type'] == 'call':
+                self._call(inner, dst, 1)
+            elif inner['type'] == 'method_call':
+                self._method_call(inner, dst)
+            elif inner['type'] == 'vararg':
+                self.emit(OP_VARARG, dst, 1)
+            else:
+                self._expr(inner, dst)
+        else:
+            raise SyntaxError(f"Unknown expression node type: {t}")
 
     def _binop(self, node, dst):
         op = node['op']
@@ -308,6 +353,8 @@ class Compiler:
                 '%': OP_MOD, '^': OP_POW, '..': OP_CONCAT,
                 '==': OP_EQ, '~=': OP_NE,
                 '<': OP_LT, '<=': OP_LE, '>': OP_GT, '>=': OP_GE,
+                '&': OP_BAND, '|': OP_BOR, '~': OP_BXOR,
+                '<<': OP_SHL, '>>': OP_SHR,
             }
             self.emit(op_map[op], dst, left_r, right_r)
 
@@ -317,7 +364,7 @@ class Compiler:
         tmp = self.scope.reg_counter[0]
         self.scope.reg_counter[0] += 1
         self._expr(node['operand'], tmp)
-        op_map = {'-': OP_UNM, 'not': OP_NOT, '#': OP_LEN}
+        op_map = {'-': OP_UNM, 'not': OP_NOT, '#': OP_LEN, '~': OP_BNOT}
         self.emit(op_map[node['op']], dst, tmp)
         self.scope.reg_counter[0] = tmp
 
@@ -347,16 +394,20 @@ class Compiler:
 
     def _call_multiret(self, node, base_r):
         if node['type'] == 'call':
-            fn = node['fn']
-            tmp = self.scope.reg_counter[0]
             self.scope.reg_counter[0] = base_r + 1
+            fn = node['fn']
             self._expr(fn, base_r)
             args = node['args']
+            argc = len(args)
             for i, a in enumerate(args):
                 ar = base_r + 1 + i
                 self.scope.reg_counter[0] = ar + 1
-                self._expr(a, ar)
-            self.emit(OP_CALL, base_r, len(args), 255)
+                if i == argc - 1 and a.get('type') in ('call', 'method_call', 'vararg'):
+                    self._call_multiret(a, ar)
+                    argc = -1
+                else:
+                    self._expr(a, ar)
+            self.emit(OP_CALL, base_r, argc if argc >= 0 else 255, 255)
         elif node['type'] == 'method_call':
             self._method_call_multiret(node, base_r)
         elif node['type'] == 'vararg':
@@ -368,11 +419,16 @@ class Compiler:
         obj_r = base
         self._expr(node['obj'], obj_r)
         args = node['args']
+        argc = len(args)
         for i, a in enumerate(args):
             ar = base + 1 + i
             self.scope.reg_counter[0] = ar + 1
-            self._expr(a, ar)
-        self.emit(OP_CALL_METHOD, obj_r, self.K(node['method']), len(args))
+            if i == argc - 1 and a.get('type') in ('call', 'method_call', 'vararg'):
+                self._call_multiret(a, ar)
+                argc = -1
+            else:
+                self._expr(a, ar)
+        self.emit(OP_CALL_METHOD, obj_r, self.K(node['method']), argc if argc >= 0 else 255)
         if dst != obj_r:
             self.emit(OP_MOVE, dst, obj_r)
         self.scope.reg_counter[0] = base
@@ -381,11 +437,16 @@ class Compiler:
         self.scope.reg_counter[0] = base_r + 1
         self._expr(node['obj'], base_r)
         args = node['args']
+        argc = len(args)
         for i, a in enumerate(args):
             ar = base_r + 1 + i
             self.scope.reg_counter[0] = ar + 1
-            self._expr(a, ar)
-        self.emit(OP_CALL_METHOD, base_r, self.K(node['method']), len(args))
+            if i == argc - 1 and a.get('type') in ('call', 'method_call', 'vararg'):
+                self._call_multiret(a, ar)
+                argc = -1
+            else:
+                self._expr(a, ar)
+        self.emit(OP_CALL_METHOD, base_r, self.K(node['method']), (argc if argc >= 0 else 255) | 0x100)
 
     def _table_ctor(self, node, dst):
         self.emit(OP_NEW_TABLE, dst)
@@ -421,15 +482,11 @@ class Compiler:
         child = self.child()
         child.proto.params = len(node['params'])
         child.proto.is_vararg = node.get('is_vararg', False)
-        saved = child.push_scope()
         for p in node['params']:
             child.scope.alloc(p)
-        if node.get('is_vararg'):
-            pass
         child._stmts(node['body'])
         if not child.proto.instructions or child.proto.instructions[-1].op not in (OP_RETURN, OP_RETURN_NONE):
             child.emit(OP_RETURN_NONE, 0)
-        child.pop_scope(saved)
         idx = len(self.proto.protos)
         self.proto.protos.append(child.proto)
         self.emit(OP_CLOSURE, dst, idx)
@@ -445,40 +502,68 @@ class Compiler:
             names = node['names']
             exprs = node.get('values', [])
             regs = []
-            saved = self.scope.reg_counter[0]
             for i, name in enumerate(names):
                 reg = self.scope.reg_counter[0]
                 self.scope.reg_counter[0] += 1
                 regs.append(reg)
-                self.scope.locals[name] = reg
-            for i, name in enumerate(names):
-                reg = regs[i]
-                if i < len(exprs):
-                    e = exprs[i]
-                    if i == len(names) - 1 and e.get('type') in ('call', 'method_call', 'vararg'):
-                        self._call_multiret(e, reg)
+            nexprs = len(exprs)
+            stretched = False
+            for i, e in enumerate(exprs):
+                reg = regs[i] if i < len(regs) else self.scope.reg_counter[0]
+                if i == nexprs - 1 and e.get('type') in ('call', 'method_call', 'vararg'):
+                    if i < len(names) - 1:
+                        need = len(names) - i
+                        tmp = self.scope.reg_counter[0]
+                        self.scope.reg_counter[0] = tmp + need
+                        self._call_multiret(e, tmp)
+                        for k in range(need):
+                            self.emit(OP_MOVE, regs[i + k], tmp + k)
+                        self.scope.reg_counter[0] = tmp
+                        stretched = True
                     else:
                         self._expr(e, reg)
                 else:
-                    self.emit(OP_LOAD_CONST, reg, self.K(None))
+                    if i < len(regs):
+                        self._expr(e, reg)
+                    else:
+                        tmp = self.scope.reg_counter[0]
+                        self.scope.reg_counter[0] = tmp + 1
+                        self._expr(e, tmp)
+                        self.scope.reg_counter[0] = tmp
+            if not stretched:
+                for i in range(nexprs, len(names)):
+                    self.emit(OP_LOAD_CONST, regs[i], self.K(None))
+            for i, name in enumerate(names):
+                self.scope.locals[name] = regs[i]
 
         elif t == 'assign':
             targets = node['targets']
             values = node['values']
             tmp_base = self.scope.reg_counter[0]
+            nvalues = len(values)
+            ntargets = len(targets)
             tmps = []
             for i, v in enumerate(values):
-                tr = tmp_base + i
-                self.scope.reg_counter[0] = tr + 1
-                if i == len(values) - 1 and v.get('type') in ('call', 'method_call', 'vararg'):
+                if i == nvalues - 1 and v.get('type') in ('call', 'method_call', 'vararg') and nvalues < ntargets:
+                    need = ntargets - i
+                    tr = self.scope.reg_counter[0]
+                    self.scope.reg_counter[0] = tr + need
                     self._call_multiret(v, tr)
+                    for k in range(need):
+                        tmps.append(tr + k)
                 else:
-                    self._expr(v, tr)
-                tmps.append(tr)
+                    tr = self.scope.reg_counter[0]
+                    self.scope.reg_counter[0] = tr + 1
+                    if i == nvalues - 1 and v.get('type') in ('call', 'method_call', 'vararg'):
+                        self._call_multiret(v, tr)
+                    else:
+                        self._expr(v, tr)
+                    tmps.append(tr)
 
+            val_base = self.scope.reg_counter[0]
             for i, tgt in enumerate(targets):
                 src = tmps[i] if i < len(tmps) else None
-                val_r = tmp_base + len(values) + i
+                val_r = val_base + i
                 if src is not None:
                     self.scope.reg_counter[0] = val_r + 1
                     self.emit(OP_MOVE, val_r, src)
@@ -494,8 +579,7 @@ class Compiler:
                     elif r[0] == 'local':
                         self.emit(OP_MOVE, r[1], val_r)
                     elif r[0] == 'upval':
-                        idx = self._upval_idx(r[1])
-                        self.emit(OP_SET_UPVAL, idx, val_r)
+                        self.emit(OP_SET_UPVAL, r[1], val_r)
                 elif tt == 'index':
                     tr2 = self.scope.reg_counter[0]
                     self.scope.reg_counter[0] += 2
@@ -524,14 +608,16 @@ class Compiler:
                 self.emit(OP_RETURN_NONE, 0)
                 return
             base = self.scope.reg_counter[0]
+            argc = len(exprs)
             for i, e in enumerate(exprs):
                 r = base + i
                 self.scope.reg_counter[0] = r + 1
-                if i == len(exprs) - 1 and e.get('type') in ('call', 'method_call', 'vararg'):
+                if i == argc - 1 and e.get('type') in ('call', 'method_call', 'vararg'):
                     self._call_multiret(e, r)
+                    argc = -1
                 else:
                     self._expr(e, r)
-            self.emit(OP_RETURN, base, len(exprs))
+            self.emit(OP_RETURN, base, argc if argc >= 0 else 255)
             self.scope.reg_counter[0] = base
 
         elif t == 'do':
@@ -571,18 +657,21 @@ class Compiler:
                         self.emit(OP_SET_GLOBAL, self.K(name), tmp)
                     elif r[0] == 'local':
                         self.emit(OP_MOVE, r[1], tmp)
+                    elif r[0] == 'upval':
+                        self.emit(OP_SET_UPVAL, r[1], tmp)
                 elif len(node['target']) > 1:
                     obj_r = self.scope.reg_counter[0]
                     self.scope.reg_counter[0] += 1
                     r = self.resolve(node['target'][0])
                     if r and r[0] == 'local':
                         self.emit(OP_MOVE, obj_r, r[1])
+                    elif r and r[0] == 'upval':
+                        self.emit(OP_LOAD_UPVAL, obj_r, r[1])
                     else:
                         self.emit(OP_LOAD_GLOBAL, obj_r, self.K(node['target'][0]))
                     for part in node['target'][1:-1]:
                         self.emit(OP_GET_FIELD, obj_r, obj_r, self.K(part))
                     self.emit(OP_SET_FIELD, obj_r, self.K(node['target'][-1]), tmp)
-                    self.scope.reg_counter[0] = tmp
                 self.scope.reg_counter[0] = tmp
 
         elif t == 'local_function':
@@ -594,6 +683,13 @@ class Compiler:
         elif t == 'break':
             j = self.emit(OP_JUMP, 0)
             self.break_patches.append(j)
+
+        elif t == 'continue':
+            j = self.emit(OP_JUMP, 0)
+            self.continue_patches.append(j)
+
+        else:
+            raise SyntaxError(f"Unknown statement node type: {t}")
 
     def _if(self, node):
         end_jumps = []
@@ -636,31 +732,43 @@ class Compiler:
         jf = self.emit(OP_JUMP_FALSE, cond_r, 0)
         self.scope.reg_counter[0] = cond_r
         old_breaks = self.break_patches
+        old_continues = self.continue_patches
         self.break_patches = []
+        self.continue_patches = []
         saved = self.push_scope()
         self._stmts(node['body'])
+        for cp in self.continue_patches:
+            self.patch(cp, a=self.pc())
+        self.emit_close_upvals(saved)
         self.pop_scope(saved)
         self.emit(OP_JUMP, loop_start)
         self.patch(jf, b=self.pc())
         for bp in self.break_patches:
             self.patch(bp, a=self.pc())
         self.break_patches = old_breaks
+        self.continue_patches = old_continues
 
     def _repeat(self, node):
         loop_start = self.pc()
         old_breaks = self.break_patches
+        old_continues = self.continue_patches
         self.break_patches = []
+        self.continue_patches = []
         saved = self.push_scope()
         self._stmts(node['body'])
+        for cp in self.continue_patches:
+            self.patch(cp, a=self.pc())
         cond_r = self.scope.reg_counter[0]
         self.scope.reg_counter[0] += 1
         self._expr(node['cond'], cond_r)
         self.scope.reg_counter[0] = cond_r
+        self.emit_close_upvals(saved)
         self.emit(OP_JUMP_FALSE, cond_r, loop_start)
         self.pop_scope(saved)
         for bp in self.break_patches:
             self.patch(bp, a=self.pc())
         self.break_patches = old_breaks
+        self.continue_patches = old_continues
 
     def _numeric_for(self, node):
         saved_reg = self.scope.reg_counter[0]
@@ -679,8 +787,14 @@ class Compiler:
         self.push_scope()
         self.scope.locals[node['var']] = var_r
         old_breaks = self.break_patches
+        old_continues = self.continue_patches
         self.break_patches = []
+        self.continue_patches = []
         self._stmts(node['body'])
+        cont_target = self.pc()
+        for cp in self.continue_patches:
+            self.patch(cp, a=cont_target)
+        self.emit_close_upvals(var_r)
         self.pop_scope(saved_reg + 4)
         fl = self.emit(OP_FOR_LOOP, init_r, 0)
         self.patch(fp, b=self.pc())
@@ -688,6 +802,7 @@ class Compiler:
         for bp in self.break_patches:
             self.patch(bp, a=self.pc())
         self.break_patches = old_breaks
+        self.continue_patches = old_continues
         self.scope.reg_counter[0] = saved_reg
 
     def _generic_for(self, node):
@@ -698,7 +813,8 @@ class Compiler:
         exprs = node['iters']
         last_idx = len(exprs) - 1
         slots = [iter_r, state_r, ctrl_r]
-        for i in range(3):
+        i = 0
+        while i < 3:
             if i < len(exprs):
                 e = exprs[i]
                 if i == last_idx and e.get('type') in ('call', 'method_call', 'vararg'):
@@ -714,25 +830,33 @@ class Compiler:
                     self._expr(e, slots[i])
             else:
                 self.emit(OP_LOAD_CONST, slots[i], self.K(None))
+            i += 1
         loop_start = self.pc()
         var_regs = []
         for vn in node['vars']:
             vr = self.scope.reg_counter[0]; self.scope.reg_counter[0] += 1
             var_regs.append(vr)
-        tf = self.emit(OP_TFOR_CALL, iter_r, len(node['vars']))
+        tf = self.emit(OP_TFOR_CALL, iter_r, 0, len(node['vars']))
         jf = self.emit(OP_TFOR_LOOP, var_regs[0] if var_regs else ctrl_r, 0)
         self.push_scope()
         for vn, vr in zip(node['vars'], var_regs):
             self.scope.locals[vn] = vr
         old_breaks = self.break_patches
+        old_continues = self.continue_patches
         self.break_patches = []
+        self.continue_patches = []
         self._stmts(node['body'])
+        cont_target = self.pc()
+        for cp in self.continue_patches:
+            self.patch(cp, a=cont_target)
+        self.emit_close_upvals(var_regs[0] if var_regs else ctrl_r + 1)
         self.pop_scope(saved_reg + 3 + len(node['vars']))
         self.emit(OP_JUMP, loop_start)
         self.patch(jf, b=self.pc())
         for bp in self.break_patches:
             self.patch(bp, a=self.pc())
         self.break_patches = old_breaks
+        self.continue_patches = old_continues
         self.scope.reg_counter[0] = saved_reg
 
     def compile_chunk(self, stmts, is_vararg=True):
@@ -746,11 +870,10 @@ class Compiler:
 
 
 KEYWORDS = {
-    'and','break','do','else','elseif','end','false','for','function',
+    'and','break','continue','do','else','elseif','end','false','for','function',
     'if','in','local','nil','not','or','repeat','return','then','true',
     'until','while',
 }
-
 def tokenize(src):
     tokens = []
     i = 0
@@ -829,11 +952,11 @@ def tokenize(src):
             i += 3
             continue
         two = src[i:i+2]
-        if two in ('==','~=','<=','>=','..','//'):
+        if two in ('==','~=','<=','>=','..','//','<<','>>'):
             tokens.append(('OP', two))
             i += 2
             continue
-        if src[i] in '+-*/%^<>=.':
+        if src[i] in '+-*/%^<>=.&|~':
             tokens.append(('OP', src[i]))
             i += 1
             continue
@@ -934,6 +1057,9 @@ class Parser:
             if kw == 'break':
                 self.consume()
                 return {'type': 'break'}
+            if kw == 'continue':
+                self.consume()
+                return {'type': 'continue'}
 
         return self.parse_expr_stmt()
 
@@ -1108,8 +1234,40 @@ class Parser:
         return left
 
     def parse_compare(self):
-        left = self.parse_concat()
+        left = self.parse_bor()
         while self.check('OP') and self.peek()[1] in ('<','<=','>','>=','==','~='):
+            op = self.consume()[1]
+            right = self.parse_bor()
+            left = {'type': 'binop', 'op': op, 'left': left, 'right': right}
+        return left
+
+    def parse_bor(self):
+        left = self.parse_bxor()
+        while self.check('OP', '|'):
+            self.consume()
+            right = self.parse_bxor()
+            left = {'type': 'binop', 'op': '|', 'left': left, 'right': right}
+        return left
+
+    def parse_bxor(self):
+        left = self.parse_band()
+        while self.check('OP', '~'):
+            self.consume()
+            right = self.parse_band()
+            left = {'type': 'binop', 'op': '~', 'left': left, 'right': right}
+        return left
+
+    def parse_band(self):
+        left = self.parse_shift()
+        while self.check('OP', '&'):
+            self.consume()
+            right = self.parse_shift()
+            left = {'type': 'binop', 'op': '&', 'left': left, 'right': right}
+        return left
+
+    def parse_shift(self):
+        left = self.parse_concat()
+        while self.check('OP') and self.peek()[1] in ('<<', '>>'):
             op = self.consume()[1]
             right = self.parse_concat()
             left = {'type': 'binop', 'op': op, 'left': left, 'right': right}
@@ -1149,6 +1307,9 @@ class Parser:
         if self.check('OP', '#'):
             self.consume()
             return {'type': 'unop', 'op': '#', 'operand': self.parse_unary()}
+        if self.check('OP', '~'):
+            self.consume()
+            return {'type': 'unop', 'op': '~', 'operand': self.parse_unary()}
         return self.parse_power()
 
     def parse_power(self):
@@ -1228,6 +1389,8 @@ class Parser:
             self.consume()
             expr = self.parse_expr()
             self.consume('RPAREN')
+            if expr.get('type') in ('call', 'method_call', 'vararg'):
+                return {'type': 'paren', 'inner': expr}
             return expr
         if tok[0] == 'LBRACE':
             return self.parse_table_ctor()
@@ -1264,7 +1427,11 @@ class Parser:
         return {'type': 'table_constructor', 'fields': fields}
 
 
-def try_compile_vm(source):
+class VMCompileError(Exception):
+    pass
+
+
+def try_compile_vm(source, debug=False):
     try:
         opmap = make_opmap()
         _patch_global_ops(opmap)
@@ -1275,8 +1442,12 @@ def try_compile_vm(source):
         compiler.compile_chunk(ast)
         bytecode = compiler.serialize()
         return bytecode, opmap
-    except Exception:
+    except Exception as e:
+        if debug:
+            import traceback
+            traceback.print_exc()
         return None
+
 
 def _patch_global_ops(opmap):
     g = globals()
@@ -1289,18 +1460,12 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None):
     encoded = ','.join(str(b) for b in data)
 
     N = gen_name_fn
-    data_v    = N(); pc_v      = N(); stack_v   = N(); sp_v      = N()
-    vars_v    = N(); op_v      = N(); a_v       = N(); b_v       = N()
-    c_v       = N(); ins_v     = N(); rd_v      = N(); res_v     = N()
-    upvals_v  = N(); u16_v     = N(); u16s_v    = N(); ldc_v     = N()
-    ldi_v     = N(); ldp_v     = N(); exec_v    = N(); consts_v  = N()
-    ci_v      = N(); protos_v  = N(); frame_v   = N(); frames_v  = N()
-    env_v     = N(); genv_v    = N(); mk_v      = N(); fn_v      = N()
-    args_v    = N(); r_v       = N(); i_v       = N(); j_v       = N()
-    t_v       = N(); s_v       = N(); k_v       = N(); v_v       = N()
-    iter_v    = N(); state_v   = N(); ctrl_v    = N(); tmp_v     = N()
-    ok_v      = N(); err_v     = N(); retbase_v = N(); nret_v    = N()
-    obj_v     = N(); mfn_v     = N(); vararg_v  = N(); nargs_v   = N()
+    data_v    = N(); u16_v     = N(); u16s_v    = N(); ldc_v     = N()
+    ldi_v     = N(); ldp_v     = N(); consts_v  = N()
+    protos_v  = N(); env_v     = N(); mk_v      = N(); fn_v      = N()
+    args_v    = N(); i_v       = N(); j_v       = N(); nargs_v   = N()
+    exec_v    = N()
+    ok_v      = N(); err_v     = N()
     ubox_v    = N(); upidx_v   = N()
 
     om = opmap if opmap is not None else _DEFAULT_OPMAP
@@ -1312,23 +1477,25 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None):
 
     def ldi_cases():
         groups_ab2 = [
-            ('LOAD_CONST','LOAD_VAR','SET_VAR','LOAD_GLOBAL','SET_GLOBAL','CLOSURE','CLOSE_UPVAL'),
+            ('LOAD_CONST','LOAD_VAR','SET_VAR','LOAD_GLOBAL','SET_GLOBAL','CLOSURE'),
             ('LOAD_UPVAL','SET_UPVAL'),
             ('RETURN','VARARG'),
             ('JUMP_FALSE','JUMP_TRUE','JUMP_FALSE_NK','JUMP_TRUE_NK'),
-            ('UNM','LEN','NOT'),
-            ('FOR_PREP','FOR_LOOP','TFOR_CALL','TFOR_LOOP'),
+            ('UNM','LEN','NOT','BNOT'),
+            ('FOR_PREP','FOR_LOOP','TFOR_LOOP'),
             ('DUP','MOVE'),
         ]
         groups_ab2c = [
             ('GET_TABLE','SET_TABLE','SET_LIST'),
             ('SET_LIST_MULTI',),
             ('GET_FIELD','SET_FIELD'),
-            ('ADD','SUB','MUL','DIV','MOD','POW','CONCAT','IDIV','AND','OR'),
+            ('ADD','SUB','MUL','DIV','MOD','POW','CONCAT','IDIV','AND','OR',
+             'BAND','BOR','BXOR','SHL','SHR'),
             ('EQ','NE','LT','LE','GT','GE'),
             ('CALL','CALL_METHOD'),
+            ('TFOR_CALL',),
         ]
-        groups_a2 = [('NEW_TABLE',), ('RETURN_NONE',), ('POP',), ('JUMP',)]
+        groups_a2 = [('NEW_TABLE',), ('RETURN_NONE',), ('POP',), ('JUMP',), ('CLOSE_UPVAL',)]
 
         lines = []
         first = True
@@ -1356,11 +1523,14 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None):
         f"elseif t==1 then return d[i]==1,i+1 "
         f"elseif t==2 then "
         f"local bytes={{}} for j=0,7 do bytes[j+1]=d[i+j] end i=i+8 "
-        f"local n=0 local sign=bytes[8]>=128 and 1 or 0 "
+        f"local sign=bytes[8]>=128 and 1 or 0 "
         f"local exp=((bytes[8]%128)*16)+math.floor(bytes[7]/16) "
         f"local mant=bytes[7]%16 "
         f"for j=6,1,-1 do mant=mant*256+bytes[j] end "
-        f"if exp==2047 then return sign==1 and -math.huge or math.huge,i end "
+        f"if exp==2047 then "
+        f"if mant==0 then return (sign==1 and -math.huge or math.huge),i "
+        f"else return (0/0),i end end "
+        f"local n "
         f"if exp==0 then n=mant*(2^(-1074)) "
         f"else n=(1+mant*(2^(-52)))*(2^(exp-1023)) end "
         f"return (sign==1 and -n or n),i "
@@ -1375,10 +1545,14 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None):
         f"{ldi_cases()} "
         f"return {{op,a,b,cc}},i end "
         f"local function {ldp_v}(d,i) "
-        f"local is_vararg=d[i]==1 local params=d[i+1] local nupvals_hdr=d[i+2] i=i+3 "
-        f"local nuregs={u16_v}(d,i) i=i+2 "
-        f"local upval_regs={{}} "
-        f"for _=1,nuregs do upval_regs[_]={u16_v}(d,i) i=i+2 end "
+        f"local is_vararg=d[i]==1 local params=d[i+1] i=i+2 "
+        f"local nupvals={u16_v}(d,i) i=i+2 "
+        f"local updescs={{}} "
+        f"for _=1,nupvals do "
+        f"local kind=d[i] i=i+1 "
+        f"local idx={u16_v}(d,i) i=i+2 "
+        f"updescs[#updescs+1]={{kind=kind,idx=idx}} "
+        f"end "
         f"local nprotos={u16_v}(d,i) i=i+2 "
         f"local protos={{}} "
         f"for _=1,nprotos do "
@@ -1388,246 +1562,170 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None):
         f"end "
         f"local nconsts={u16_v}(d,i) i=i+2 "
         f"local consts={{}} "
-        f"for _=1,nconsts do local cv,ni={ldc_v}(d,i) consts[#consts+1]=cv i=ni end "
+        f"for _ci=1,nconsts do local cv,ni={ldc_v}(d,i) consts[_ci]=cv i=ni end "
         f"local nins={u16_v}(d,i) i=i+2 "
         f"local ins={{}} "
-        f"for _=1,nins do local iv,ni={ldi_v}(d,i) ins[#ins+1]=iv i=ni end "
-        f"return {{is_vararg=is_vararg,params=params,nupvals=nuregs,upval_regs=upval_regs,protos=protos,consts=consts,ins=ins}},i end "
-        f"local {genv_v}=(getfenv and getfenv(0)) or _ENV or _G or {{}} "
+        f"for _ii=1,nins do local iv,ni={ldi_v}(d,i) ins[_ii]=iv i=ni end "
+        f"return {{is_vararg=is_vararg,params=params,updescs=updescs,protos=protos,consts=consts,ins=ins}},i end "
+        f"local {env_v}=(getfenv and getfenv(0)) or _ENV or _G or {{}} "
 
-        f"local function {mk_v}(proto,parent_vars,upval_regs_in) "
-        f"return function(...) "
-        f"local {vars_v}={{}} "
-        f"local {ubox_v}={{}} "
-        f"local {vararg_v}={{...}} "
+        f"local function {exec_v}(proto,{ubox_v},...) "
+        f"local vr={{}} "
+        f"local rb={{}} "
         f"local {args_v}={{...}} "
-        f"for {i_v}=1,proto.params do {vars_v}[{i_v}-1]={args_v}[{i_v}] end "
-        f"if upval_regs_in and parent_vars then "
-        f"for {upidx_v}=1,#upval_regs_in do "
-        f"local _ur=upval_regs_in[{upidx_v}] "
-        f"if {ubox_v}[_ur]==nil then {ubox_v}[_ur]={{v=parent_vars[_ur]}} end "
+        f"local {nargs_v}=select('#',...) "
+        f"local va={{}} "
+        f"if proto.is_vararg then "
+        f"for {i_v}=proto.params+1,{nargs_v} do va[{i_v}-proto.params]={args_v}[{i_v}] end "
         f"end "
-        f"end "
+        f"for {i_v}=1,proto.params do vr[{i_v}-1]={args_v}[{i_v}] end "
         f"local {consts_v}=proto.consts "
-        f"local {ins_v}=proto.ins "
+        f"local ins=proto.ins "
         f"local {protos_v}=proto.protos "
-        f"local {pc_v}=1 "
-        f"while {pc_v}<=#{ ins_v} do "
-        f"local {rd_v}={ins_v}[{pc_v}] "
-        f"local {op_v}={rd_v}[1] "
-        f"local {a_v}={rd_v}[2] "
-        f"local {b_v}={rd_v}[3] "
-        f"local {c_v}={rd_v}[4] "
-        f"{pc_v}={pc_v}+1 "
-        f"if {op_v}=={O('LOAD_CONST')} then {vars_v}[{a_v}]={consts_v}[{b_v}+1] "
-        f"elseif {op_v}=={O('LOAD_VAR')} then {vars_v}[{a_v}]={vars_v}[{b_v}] "
-        f"elseif {op_v}=={O('SET_VAR')} then {vars_v}[{b_v}]={vars_v}[{a_v}] "
-        f"elseif {op_v}=={O('LOAD_GLOBAL')} then local {k_v}={consts_v}[{b_v}+1] {vars_v}[{a_v}]={genv_v}[{k_v}] "
-        f"elseif {op_v}=={O('SET_GLOBAL')} then local {k_v}={consts_v}[{a_v}+1] {genv_v}[{k_v}]={vars_v}[{b_v}] "
-
-        f"elseif {op_v}=={O('LOAD_UPVAL')} then "
-        f"local _ub={ubox_v}[{b_v}] "
-        f"if _ub then {vars_v}[{a_v}]=_ub.v else {vars_v}[{a_v}]=nil end "
-
-        f"elseif {op_v}=={O('SET_UPVAL')} then "
-        f"if {ubox_v}[{a_v}] then {ubox_v}[{a_v}].v={vars_v}[{b_v}] end "
-        f"{vars_v}[{a_v}]={vars_v}[{b_v}] "
-
-        f"elseif {op_v}=={O('GET_TABLE')} then {vars_v}[{a_v}]={vars_v}[{b_v}][{vars_v}[{c_v}]] "
-        f"elseif {op_v}=={O('SET_TABLE')} then {vars_v}[{a_v}][{vars_v}[{b_v}]]={vars_v}[{c_v}] "
-        f"elseif {op_v}=={O('NEW_TABLE')} then {vars_v}[{a_v}]={{}} "
-        f"elseif {op_v}=={O('SET_LIST')} then {vars_v}[{a_v}][{consts_v}[{b_v}+1]]={vars_v}[{c_v}] "
-        f"elseif {op_v}=={O('SET_LIST_MULTI')} then "
-        f"local {j_v}={b_v} local {i_v}={consts_v}[{c_v}+1] "
-        f"while {vars_v}[{j_v}]~=nil do {vars_v}[{a_v}][{i_v}]={vars_v}[{j_v}] {i_v}={i_v}+1 {j_v}={j_v}+1 end "
-        f"elseif {op_v}=={O('GET_FIELD')} then {vars_v}[{a_v}]={vars_v}[{b_v}][{consts_v}[{c_v}+1]] "
-        f"elseif {op_v}=={O('SET_FIELD')} then {vars_v}[{a_v}][{consts_v}[{b_v}+1]]={vars_v}[{c_v}] "
-        f"elseif {op_v}=={O('ADD')} then {vars_v}[{a_v}]={vars_v}[{b_v}]+{vars_v}[{c_v}] "
-        f"elseif {op_v}=={O('SUB')} then {vars_v}[{a_v}]={vars_v}[{b_v}]-{vars_v}[{c_v}] "
-        f"elseif {op_v}=={O('MUL')} then {vars_v}[{a_v}]={vars_v}[{b_v}]*{vars_v}[{c_v}] "
-        f"elseif {op_v}=={O('DIV')} then {vars_v}[{a_v}]={vars_v}[{b_v}]/{vars_v}[{c_v}] "
-        f"elseif {op_v}=={O('MOD')} then {vars_v}[{a_v}]={vars_v}[{b_v}]%{vars_v}[{c_v}] "
-        f"elseif {op_v}=={O('POW')} then {vars_v}[{a_v}]={vars_v}[{b_v}]^{vars_v}[{c_v}] "
-        f"elseif {op_v}=={O('CONCAT')} then {vars_v}[{a_v}]={vars_v}[{b_v}]..{vars_v}[{c_v}] "
-        f"elseif {op_v}=={O('IDIV')} then {vars_v}[{a_v}]=math.floor({vars_v}[{b_v}]/{vars_v}[{c_v}]) "
-        f"elseif {op_v}=={O('UNM')} then {vars_v}[{a_v}]=-{vars_v}[{b_v}] "
-        f"elseif {op_v}=={O('LEN')} then {vars_v}[{a_v}]=#{vars_v}[{b_v}] "
-        f"elseif {op_v}=={O('NOT')} then {vars_v}[{a_v}]=not {vars_v}[{b_v}] "
-        f"elseif {op_v}=={O('AND')} then "
-        f"if not {vars_v}[{b_v}] then {vars_v}[{a_v}]={vars_v}[{b_v}] else {vars_v}[{a_v}]={vars_v}[{c_v}] end "
-        f"elseif {op_v}=={O('OR')} then "
-        f"if {vars_v}[{b_v}] then {vars_v}[{a_v}]={vars_v}[{b_v}] else {vars_v}[{a_v}]={vars_v}[{c_v}] end "
-        f"elseif {op_v}=={O('EQ')} then {vars_v}[{a_v}]=({vars_v}[{b_v}]=={vars_v}[{c_v}]) "
-        f"elseif {op_v}=={O('NE')} then {vars_v}[{a_v}]=({vars_v}[{b_v}]~={vars_v}[{c_v}]) "
-        f"elseif {op_v}=={O('LT')} then {vars_v}[{a_v}]=({vars_v}[{b_v}]<{vars_v}[{c_v}]) "
-        f"elseif {op_v}=={O('LE')} then {vars_v}[{a_v}]=({vars_v}[{b_v}]<={vars_v}[{c_v}]) "
-        f"elseif {op_v}=={O('GT')} then {vars_v}[{a_v}]=({vars_v}[{b_v}]>{vars_v}[{c_v}]) "
-        f"elseif {op_v}=={O('GE')} then {vars_v}[{a_v}]=({vars_v}[{b_v}]>={vars_v}[{c_v}]) "
-        f"elseif {op_v}=={O('JUMP')} then {pc_v}={a_v}+1 "
-        f"elseif {op_v}=={O('JUMP_FALSE')} then if not {vars_v}[{a_v}] then {pc_v}={b_v}+1 end "
-        f"elseif {op_v}=={O('JUMP_TRUE')} then if {vars_v}[{a_v}] then {pc_v}={b_v}+1 end "
-        f"elseif {op_v}=={O('JUMP_FALSE_NK')} then if not {vars_v}[{a_v}] then {pc_v}={b_v}+1 end "
-        f"elseif {op_v}=={O('JUMP_TRUE_NK')} then if {vars_v}[{a_v}] then {pc_v}={b_v}+1 end "
-        f"elseif {op_v}=={O('CALL')} then "
-        f"local {fn_v}={vars_v}[{a_v}] local {nargs_v}={b_v} local {nret_v}={c_v} "
-        f"local {args_v}={{}} "
-        f"if {nargs_v}==255 then local {j_v}={a_v}+1 while {vars_v}[{j_v}]~=nil do {args_v}[#{args_v}+1]={vars_v}[{j_v}] {j_v}={j_v}+1 end "
-        f"else for {j_v}=1,{nargs_v} do {args_v}[{j_v}]={vars_v}[{a_v}+{j_v}] end end "
-        f"if type({fn_v})=='function' then "
-        f"local {res_v}=table.pack({fn_v}(table.unpack({args_v}))) "
-        f"if {nret_v}==255 then "
-        f"local {j_v}=1 while {j_v}<={res_v}.n or {vars_v}[{a_v}+{j_v}-1]~=nil do "
-        f"{vars_v}[{a_v}+{j_v}-1]={res_v}[{j_v}] {j_v}={j_v}+1 end "
-        f"elseif {nret_v}>0 then {vars_v}[{a_v}]={res_v}[1] end end "
-        f"elseif {op_v}=={O('CALL_METHOD')} then "
-        f"local {obj_v}={vars_v}[{a_v}] local {k_v}={consts_v}[{b_v}+1] local {nargs_v}={c_v} "
-        f"local {mfn_v}={obj_v}[{k_v}] "
-        f"local {args_v}={{{obj_v}}} "
-        f"for {j_v}=1,{nargs_v} do {args_v}[#{args_v}+1]={vars_v}[{a_v}+{j_v}] end "
-        f"if type({mfn_v})=='function' then "
-        f"local {res_v}=table.pack({mfn_v}(table.unpack({args_v}))) "
-        f"if {res_v}.n>=1 then {vars_v}[{a_v}]={res_v}[1] end end "
-        f"elseif {op_v}=={O('RETURN')} then "
-        f"local {retbase_v}={a_v} local {nret_v}={b_v} "
-        f"if {nret_v}==1 then return {vars_v}[{retbase_v}] "
-        f"elseif {nret_v}==0 then return "
-        f"else local {res_v}={{}} for {j_v}=0,{nret_v}-1 do {res_v}[{j_v}+1]={vars_v}[{retbase_v}+{j_v}] end return table.unpack({res_v}) end "
-        f"elseif {op_v}=={O('RETURN_NONE')} then return "
-        f"elseif {op_v}=={O('VARARG')} then "
-        f"local {nret_v}={b_v} "
-        f"if {nret_v}==255 then for {j_v}=1,#{vararg_v} do {vars_v}[{a_v}+{j_v}-1]={vararg_v}[{j_v}] end "
-        f"elseif {nret_v}==1 then {vars_v}[{a_v}]={vararg_v}[1] end "
-
-        f"elseif {op_v}=={O('CLOSURE')} then "
-        f"local _cp={protos_v}[{b_v}+1] "
-        f"local _cur_vars={vars_v} "
-        f"local _cur_ubox={ubox_v} "
-        f"local _child_uregs=_cp.upval_regs "
-        f"if _child_uregs and #_child_uregs>0 then "
-        f"for _ui=1,#_child_uregs do "
-        f"local _ur=_child_uregs[_ui] "
-        f"if _cur_ubox[_ur]==nil then "
-        f"_cur_ubox[_ur]={{v=_cur_vars[_ur]}} "
+        f"local function getreg(r) local x=rb[r] if x~=nil then return x.v end return vr[r] end "
+        f"local function setreg(r,val) local x=rb[r] if x~=nil then x.v=val else vr[r]=val end end "
+        f"local function boxreg(r) "
+        f"local x=rb[r] "
+        f"if x==nil then x={{v=vr[r]}} rb[r]=x end "
+        f"return x end "
+        f"local pc=1 "
+        f"while pc<=#ins do "
+        f"local rd=ins[pc] "
+        f"local op=rd[1] local a=rd[2] local b=rd[3] local c=rd[4] "
+        f"pc=pc+1 "
+        f"if op=={O('LOAD_CONST')} then setreg(a,{consts_v}[b+1]) "
+        f"elseif op=={O('LOAD_VAR')} then setreg(a,getreg(b)) "
+        f"elseif op=={O('SET_VAR')} then setreg(b,getreg(a)) "
+        f"elseif op=={O('LOAD_GLOBAL')} then setreg(a,{env_v}[{consts_v}[b+1]]) "
+        f"elseif op=={O('SET_GLOBAL')} then {env_v}[{consts_v}[a+1]]=getreg(b) "
+        f"elseif op=={O('LOAD_UPVAL')} then "
+        f"local ub={ubox_v}[b] "
+        f"if ub then setreg(a,ub.v) else setreg(a,nil) end "
+        f"elseif op=={O('SET_UPVAL')} then "
+        f"local ub={ubox_v}[a] "
+        f"if ub then ub.v=getreg(b) end "
+        f"setreg(a,getreg(b)) "
+        f"elseif op=={O('GET_TABLE')} then setreg(a,getreg(b)[getreg(c)]) "
+        f"elseif op=={O('SET_TABLE')} then getreg(a)[getreg(b)]=getreg(c) "
+        f"elseif op=={O('NEW_TABLE')} then setreg(a,{{}}) "
+        f"elseif op=={O('SET_LIST')} then getreg(a)[{consts_v}[b+1]]=getreg(c) "
+        f"elseif op=={O('SET_LIST_MULTI')} then "
+        f"local jj=b local ii={consts_v}[c+1] "
+        f"local t=getreg(a) "
+        f"while getreg(jj)~=nil do t[ii]=getreg(jj) ii=ii+1 jj=jj+1 end "
+        f"elseif op=={O('GET_FIELD')} then setreg(a,getreg(b)[{consts_v}[c+1]]) "
+        f"elseif op=={O('SET_FIELD')} then getreg(a)[{consts_v}[b+1]]=getreg(c) "
+        f"elseif op=={O('ADD')} then setreg(a,getreg(b)+getreg(c)) "
+        f"elseif op=={O('SUB')} then setreg(a,getreg(b)-getreg(c)) "
+        f"elseif op=={O('MUL')} then setreg(a,getreg(b)*getreg(c)) "
+        f"elseif op=={O('DIV')} then setreg(a,getreg(b)/getreg(c)) "
+        f"elseif op=={O('MOD')} then setreg(a,getreg(b)%getreg(c)) "
+        f"elseif op=={O('POW')} then setreg(a,getreg(b)^getreg(c)) "
+        f"elseif op=={O('CONCAT')} then setreg(a,getreg(b)..getreg(c)) "
+        f"elseif op=={O('IDIV')} then setreg(a,math.floor(getreg(b)/getreg(c))) "
+        f"elseif op=={O('BAND')} then setreg(a,bit32.band(getreg(b),getreg(c))) "
+        f"elseif op=={O('BOR')} then setreg(a,bit32.bor(getreg(b),getreg(c))) "
+        f"elseif op=={O('BXOR')} then setreg(a,bit32.bxor(getreg(b),getreg(c))) "
+        f"elseif op=={O('BNOT')} then setreg(a,bit32.bnot(getreg(b))) "
+        f"elseif op=={O('SHL')} then setreg(a,bit32.lshift(getreg(b),getreg(c))) "
+        f"elseif op=={O('SHR')} then setreg(a,bit32.rshift(getreg(b),getreg(c))) "
+        f"elseif op=={O('UNM')} then setreg(a,-getreg(b)) "
+        f"elseif op=={O('LEN')} then setreg(a,#getreg(b)) "
+        f"elseif op=={O('NOT')} then setreg(a,not getreg(b)) "
+        f"elseif op=={O('AND')} then "
+        f"if not getreg(b) then setreg(a,getreg(b)) else setreg(a,getreg(c)) end "
+        f"elseif op=={O('OR')} then "
+        f"if getreg(b) then setreg(a,getreg(b)) else setreg(a,getreg(c)) end "
+        f"elseif op=={O('EQ')} then setreg(a,(getreg(b)==getreg(c))) "
+        f"elseif op=={O('NE')} then setreg(a,(getreg(b)~=getreg(c))) "
+        f"elseif op=={O('LT')} then setreg(a,(getreg(b)<getreg(c))) "
+        f"elseif op=={O('LE')} then setreg(a,(getreg(b)<=getreg(c))) "
+        f"elseif op=={O('GT')} then setreg(a,(getreg(b)>getreg(c))) "
+        f"elseif op=={O('GE')} then setreg(a,(getreg(b)>=getreg(c))) "
+        f"elseif op=={O('JUMP')} then pc=a+1 "
+        f"elseif op=={O('JUMP_FALSE')} then if not getreg(a) then pc=b+1 end "
+        f"elseif op=={O('JUMP_TRUE')} then if getreg(a) then pc=b+1 end "
+        f"elseif op=={O('JUMP_FALSE_NK')} then if not getreg(a) then pc=b+1 end "
+        f"elseif op=={O('JUMP_TRUE_NK')} then if getreg(a) then pc=b+1 end "
+        f"elseif op=={O('CALL')} then "
+        f"local fnv=getreg(a) local nargs=b local nret=c "
+        f"local callargs={{}} local ncallargs=0 "
+        f"if nargs==255 then "
+        f"local jj=a+1 local kk=1 while getreg(jj)~=nil do callargs[kk]=getreg(jj) jj=jj+1 kk=kk+1 end "
+        f"ncallargs=kk-1 "
+        f"else for jj=1,nargs do callargs[jj]=getreg(a+jj) end ncallargs=nargs end "
+        f"if type(fnv)=='function' then "
+        f"local res=table.pack(fnv(table.unpack(callargs,1,ncallargs))) "
+        f"if nret==255 then "
+        f"for jj=1,res.n do setreg(a+jj-1,res[jj]) end "
+        f"setreg(a+res.n,nil) "
+        f"elseif nret>0 then setreg(a,res[1]) end "
+        f"else error('attempt to call a '..type(fnv)..' value',0) end "
+        f"elseif op=={O('CALL_METHOD')} then "
+        f"local objv=getreg(a) local mkey={consts_v}[b+1] "
+        f"local rawc=c local multi=false "
+        f"if rawc>=256 then multi=true rawc=rawc-256 end "
+        f"local nargs=rawc "
+        f"local mfn=objv[mkey] "
+        f"local callargs={{objv}} local ncallargs=1 "
+        f"if nargs==255 then "
+        f"local jj=a+1 local kk=2 while getreg(jj)~=nil do callargs[kk]=getreg(jj) jj=jj+1 kk=kk+1 end "
+        f"ncallargs=kk-1 "
+        f"else for jj=1,nargs do callargs[jj+1]=getreg(a+jj) end ncallargs=1+nargs end "
+        f"if type(mfn)=='function' then "
+        f"local res=table.pack(mfn(table.unpack(callargs,1,ncallargs))) "
+        f"if multi then "
+        f"for jj=1,res.n do setreg(a+jj-1,res[jj]) end "
+        f"setreg(a+res.n,nil) "
+        f"elseif res.n>=1 then setreg(a,res[1]) end "
+        f"else error('attempt to call a '..type(mfn)..' value',0) end "
+        f"elseif op=={O('RETURN')} then "
+        f"local rbb=a local nret=b "
+        f"if nret==1 then return getreg(rbb) "
+        f"elseif nret==0 then return "
+        f"elseif nret==255 then "
+        f"local res={{}} local jj=0 "
+        f"while getreg(rbb+jj)~=nil do res[jj+1]=getreg(rbb+jj) jj=jj+1 end "
+        f"return table.unpack(res) "
+        f"else local res={{}} for jj=0,nret-1 do res[jj+1]=getreg(rbb+jj) end return table.unpack(res) end "
+        f"elseif op=={O('RETURN_NONE')} then return "
+        f"elseif op=={O('VARARG')} then "
+        f"local nret=b "
+        f"if nret==255 then for jj=1,#va do setreg(a+jj-1,va[jj]) end "
+        f"elseif nret==1 then setreg(a,va[1]) end "
+        f"elseif op=={O('CLOSURE')} then "
+        f"local cp={protos_v}[b+1] "
+        f"local child_ubox={{}} "
+        f"for _ui=1,#cp.updescs do "
+        f"local ud=cp.updescs[_ui] "
+        f"if ud.kind==0 then child_ubox[_ui-1]=boxreg(ud.idx) "
+        f"else child_ubox[_ui-1]={ubox_v}[ud.idx] end "
+        f"end "
+        f"setreg(a,function(...) return {exec_v}(cp,child_ubox,...) end) "
+        f"elseif op=={O('FOR_PREP')} then "
+        f"local iv=getreg(a) local lim=getreg(a+1) local st=getreg(a+2) "
+        f"if not((st>0 and iv<=lim) or (st<0 and iv>=lim)) then pc=b+1 "
+        f"else setreg(a+3,iv) end "
+        f"elseif op=={O('FOR_LOOP')} then "
+        f"local iv=getreg(a+3)+getreg(a+2) "
+        f"local lim=getreg(a+1) local st=getreg(a+2) "
+        f"if (st>0 and iv<=lim) or (st<0 and iv>=lim) then setreg(a+3,iv) pc=b+1 end "
+        f"elseif op=={O('TFOR_CALL')} then "
+        f"local itf=getreg(a) local stt=getreg(a+1) local ctl=getreg(a+2) "
+        f"local res=table.pack(itf(stt,ctl)) "
+        f"for jj=1,c do setreg(a+2+jj,res[jj]) end "
+        f"setreg(a+2,res[1]) "
+        f"elseif op=={O('TFOR_LOOP')} then "
+        f"if getreg(a)==nil then pc=b+1 end "
+        f"elseif op=={O('CLOSE_UPVAL')} then "
+        f"local x=rb[a] if x~=nil then vr[a]=x.v rb[a]=nil end "
+        f"elseif op=={O('MOVE')} then setreg(a,getreg(b)) "
         f"end "
         f"end "
         f"end "
-        f"local _child_ubox={{}} "
-        f"if _child_uregs then "
-        f"for _ui=1,#_child_uregs do "
-        f"local _ur=_child_uregs[_ui] "
-        f"_child_ubox[_ur]=_cur_ubox[_ur] "
-        f"end "
-        f"end "
-        f"local _mk2={mk_v} "
-        f"{vars_v}[{a_v}]=function(...) "
-        f"local _cv={{}} "
-        f"local _ca={{...}} "
-        f"for _pi=1,_cp.params do _cv[_pi-1]=_ca[_pi] end "
-        f"local _ubox2=_child_ubox "
-        f"local _cst=_cp.consts local _ins=_cp.ins local _prt=_cp.protos "
-        f"local _pc=1 local _varg={{...}} "
-        f"while _pc<=#_ins do "
-        f"local _rd=_ins[_pc] local _op=_rd[1] local _a=_rd[2] local _b=_rd[3] local _c=_rd[4] _pc=_pc+1 "
-        f"if _op=={O('LOAD_CONST')} then _cv[_a]=_cst[_b+1] "
-        f"elseif _op=={O('LOAD_VAR')} then _cv[_a]=_cv[_b] "
-        f"elseif _op=={O('SET_VAR')} then _cv[_b]=_cv[_a] "
-        f"elseif _op=={O('LOAD_GLOBAL')} then _cv[_a]={genv_v}[_cst[_b+1]] "
-        f"elseif _op=={O('SET_GLOBAL')} then {genv_v}[_cst[_a+1]]=_cv[_b] "
-        f"elseif _op=={O('LOAD_UPVAL')} then local _ub=_ubox2[_b] if _ub then _cv[_a]=_ub.v else _cv[_a]=nil end "
-        f"elseif _op=={O('SET_UPVAL')} then if _ubox2[_a] then _ubox2[_a].v=_cv[_b] end _cv[_a]=_cv[_b] "
-        f"elseif _op=={O('GET_TABLE')} then _cv[_a]=_cv[_b][_cv[_c]] "
-        f"elseif _op=={O('SET_TABLE')} then _cv[_a][_cv[_b]]=_cv[_c] "
-        f"elseif _op=={O('NEW_TABLE')} then _cv[_a]={{}} "
-        f"elseif _op=={O('SET_LIST')} then _cv[_a][_cst[_b+1]]=_cv[_c] "
-        f"elseif _op=={O('SET_LIST_MULTI')} then "
-        f"local _ji=_b local _ii=_cst[_c+1] "
-        f"while _cv[_ji]~=nil do _cv[_a][_ii]=_cv[_ji] _ii=_ii+1 _ji=_ji+1 end "
-        f"elseif _op=={O('GET_FIELD')} then _cv[_a]=_cv[_b][_cst[_c+1]] "
-        f"elseif _op=={O('SET_FIELD')} then _cv[_a][_cst[_b+1]]=_cv[_c] "
-        f"elseif _op=={O('ADD')} then _cv[_a]=_cv[_b]+_cv[_c] "
-        f"elseif _op=={O('SUB')} then _cv[_a]=_cv[_b]-_cv[_c] "
-        f"elseif _op=={O('MUL')} then _cv[_a]=_cv[_b]*_cv[_c] "
-        f"elseif _op=={O('DIV')} then _cv[_a]=_cv[_b]/_cv[_c] "
-        f"elseif _op=={O('MOD')} then _cv[_a]=_cv[_b]%_cv[_c] "
-        f"elseif _op=={O('POW')} then _cv[_a]=_cv[_b]^_cv[_c] "
-        f"elseif _op=={O('CONCAT')} then _cv[_a]=_cv[_b].._cv[_c] "
-        f"elseif _op=={O('IDIV')} then _cv[_a]=math.floor(_cv[_b]/_cv[_c]) "
-        f"elseif _op=={O('UNM')} then _cv[_a]=-_cv[_b] "
-        f"elseif _op=={O('LEN')} then _cv[_a]=#_cv[_b] "
-        f"elseif _op=={O('NOT')} then _cv[_a]=not _cv[_b] "
-        f"elseif _op=={O('AND')} then if not _cv[_b] then _cv[_a]=_cv[_b] else _cv[_a]=_cv[_c] end "
-        f"elseif _op=={O('OR')} then if _cv[_b] then _cv[_a]=_cv[_b] else _cv[_a]=_cv[_c] end "
-        f"elseif _op=={O('EQ')} then _cv[_a]=(_cv[_b]==_cv[_c]) "
-        f"elseif _op=={O('NE')} then _cv[_a]=(_cv[_b]~=_cv[_c]) "
-        f"elseif _op=={O('LT')} then _cv[_a]=(_cv[_b]<_cv[_c]) "
-        f"elseif _op=={O('LE')} then _cv[_a]=(_cv[_b]<=_cv[_c]) "
-        f"elseif _op=={O('GT')} then _cv[_a]=(_cv[_b]>_cv[_c]) "
-        f"elseif _op=={O('GE')} then _cv[_a]=(_cv[_b]>=_cv[_c]) "
-        f"elseif _op=={O('JUMP')} then _pc=_a+1 "
-        f"elseif _op=={O('JUMP_FALSE')} then if not _cv[_a] then _pc=_b+1 end "
-        f"elseif _op=={O('JUMP_TRUE')} then if _cv[_a] then _pc=_b+1 end "
-        f"elseif _op=={O('JUMP_FALSE_NK')} then if not _cv[_a] then _pc=_b+1 end "
-        f"elseif _op=={O('JUMP_TRUE_NK')} then if _cv[_a] then _pc=_b+1 end "
-        f"elseif _op=={O('CALL')} then "
-        f"local _fn=_cv[_a] local _na=_b local _nr=_c local _as={{}} "
-        f"if _na==255 then local _ji=_a+1 while _cv[_ji]~=nil do _as[#_as+1]=_cv[_ji] _ji=_ji+1 end "
-        f"else for _ji=1,_na do _as[_ji]=_cv[_a+_ji] end end "
-        f"if type(_fn)=='function' then local _rs=table.pack(_fn(table.unpack(_as))) "
-        f"if _nr==255 then "
-        f"local _ji=1 while _ji<=_rs.n or _cv[_a+_ji-1]~=nil do "
-        f"_cv[_a+_ji-1]=_rs[_ji] _ji=_ji+1 end "
-        f"elseif _nr>0 then _cv[_a]=_rs[1] end end "
-        f"elseif _op=={O('CALL_METHOD')} then "
-        f"local _ob=_cv[_a] local _mk=_cst[_b+1] local _na=_c local _mf=_ob[_mk] "
-        f"local _as={{_ob}} for _ji=1,_na do _as[#_as+1]=_cv[_a+_ji] end "
-        f"if type(_mf)=='function' then local _rs=table.pack(_mf(table.unpack(_as))) "
-        f"if _rs.n>=1 then _cv[_a]=_rs[1] end end "
-        f"elseif _op=={O('RETURN')} then "
-        f"local _rb=_a local _nr=_b "
-        f"if _nr==1 then return _cv[_rb] "
-        f"elseif _nr==0 then return "
-        f"else local _rs={{}} for _ji=0,_nr-1 do _rs[_ji+1]=_cv[_rb+_ji] end return table.unpack(_rs) end "
-        f"elseif _op=={O('RETURN_NONE')} then return "
-        f"elseif _op=={O('VARARG')} then "
-        f"if _b==255 then for _ji=1,#_varg do _cv[_a+_ji-1]=_varg[_ji] end "
-        f"elseif _b==1 then _cv[_a]=_varg[1] end "
-        f"elseif _op=={O('CLOSURE')} then "
-        f"local _cp2=_prt[_b+1] local _cv2=_cv local _ub2=_ubox2 "
-        f"local _ur2=_cp2.upval_regs "
-        f"if _ur2 and #_ur2>0 then for _ui=1,#_ur2 do local _ur=_ur2[_ui] "
-        f"if _ub2[_ur]==nil then _ub2[_ur]={{v=_cv2[_ur]}} end end end "
-        f"local _cub2={{}} if _ur2 then for _ui=1,#_ur2 do local _ur=_ur2[_ui] _cub2[_ur]=_ub2[_ur] end end "
-        f"_cv[_a]={mk_v}(_cp2,_cv2,_ur2) "
-        f"elseif _op=={O('FOR_PREP')} then "
-        f"_cv[_a]=_cv[_a]-_cv[_a+2] if not((_cv[_a+2]>0 and (_cv[_a]+_cv[_a+2])<=_cv[_a+1]) or (_cv[_a+2]<0 and (_cv[_a]+_cv[_a+2])>=_cv[_a+1])) then _pc=_b+1 end "
-        f"elseif _op=={O('FOR_LOOP')} then "
-        f"_cv[_a]=_cv[_a]+_cv[_a+2] "
-        f"if (_cv[_a+2]>0 and _cv[_a]<=_cv[_a+1]) or (_cv[_a+2]<0 and _cv[_a]>=_cv[_a+1]) then _cv[_a+3]=_cv[_a] _pc=_b+1 end "
-        f"elseif _op=={O('TFOR_CALL')} then "
-        f"local _it=_cv[_a] local _st=_cv[_a+1] local _ct=_cv[_a+2] "
-        f"local _rs=table.pack(_it(_st,_ct)) "
-        f"if _rs[1]==nil then _pc=_b+1 "
-        f"else for _ji=1,_rs.n do _cv[_a+2+_ji]=_rs[_ji] end _cv[_a+2]=_rs[1] end "
-        f"elseif _op=={O('TFOR_LOOP')} then if _cv[_a]==nil then _pc=_b+1 end "
-        f"elseif _op=={O('MOVE')} then _cv[_a]=_cv[_b] "
-        f"end end end "
 
-        f"elseif {op_v}=={O('FOR_PREP')} then "
-        f"{vars_v}[{a_v}]={vars_v}[{a_v}]-{vars_v}[{a_v}+2] if not(({vars_v}[{a_v}+2]>0 and ({vars_v}[{a_v}]+{vars_v}[{a_v}+2])<={vars_v}[{a_v}+1]) or ({vars_v}[{a_v}+2]<0 and ({vars_v}[{a_v}]+{vars_v}[{a_v}+2])>={vars_v}[{a_v}+1])) then {pc_v}={b_v}+1 end "
-        f"elseif {op_v}=={O('FOR_LOOP')} then "
-        f"{vars_v}[{a_v}]={vars_v}[{a_v}]+{vars_v}[{a_v}+2] "
-        f"if ({vars_v}[{a_v}+2]>0 and {vars_v}[{a_v}]<={vars_v}[{a_v}+1]) or ({vars_v}[{a_v}+2]<0 and {vars_v}[{a_v}]>={vars_v}[{a_v}+1]) then {vars_v}[{a_v}+3]={vars_v}[{a_v}] {pc_v}={b_v}+1 end "
-        f"elseif {op_v}=={O('TFOR_CALL')} then "
-        f"local {iter_v}={vars_v}[{a_v}] local {state_v}={vars_v}[{a_v}+1] local {ctrl_v}={vars_v}[{a_v}+2] "
-        f"local {res_v}=table.pack({iter_v}({state_v},{ctrl_v})) "
-        f"if {res_v}[1]==nil then {pc_v}={b_v}+1 "
-        f"else for {j_v}=1,{res_v}.n do {vars_v}[{a_v}+2+{j_v}]={res_v}[{j_v}] end {vars_v}[{a_v}+2]={res_v}[1] end "
-        f"elseif {op_v}=={O('TFOR_LOOP')} then "
-        f"if {vars_v}[{a_v}]==nil then {pc_v}={b_v}+1 end "
-        f"elseif {op_v}=={O('MOVE')} then {vars_v}[{a_v}]={vars_v}[{b_v}] "
-        f"end end end end "
         f"local {fn_v} "
-        f"do local {tmp_v},{ci_v}={ldp_v}({data_v},1) {fn_v}={mk_v}({tmp_v},nil,nil) end "
+        f"do local {i_v},{j_v}={ldp_v}({data_v},1) {fn_v}=function(...) return {exec_v}({i_v},{{}},...) end end "
         f"return {fn_v}(...) "
     )
     return lua
