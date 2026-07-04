@@ -100,4 +100,9 @@ def decode_string(encoded, call_id, seeds, alphabet_seed):
     ks = keystream(key, nonce_lo, nonce_hi, len(encrypted))
     data = bytes(b ^ k for b, k in zip(encrypted, ks))
     return "".join(chr(b) for b in data)
-    
+
+def encrypt_bytes(data, call_id, seeds):
+    key = seeds["KEY"]
+    nonce_lo, nonce_hi = derive_nonce(call_id, seeds["NONCE_BASE"])
+    ks = keystream(key, nonce_lo, nonce_hi, len(data))
+    return bytes(b ^ k for b, k in zip(data, ks))
