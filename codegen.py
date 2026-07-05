@@ -51,7 +51,7 @@ def build_runtime_header(seeds, alphabet_seed, var_k, var_Q, var_G, var_B, var_f
     lrot  = "bit32.lrotate"
 
     return (
-        f'do ("This file was protected with Weak Obfuscator."):gsub(".+",function(q){wm_var}=q end) end '
+        f'do ("Protected by Melotens Weak Obfuscator."):gsub(".+",function(q){wm_var}=q end) end '
         f"return (function(...) return(function({var_Q},{var_G},{var_B},{var_f},{var_k},{var_V}) "
         f"local {key_v}={{{','.join(str(k) for k in key)}}} "
         f"local {nb_v}={nonce_base} "
@@ -284,6 +284,52 @@ def build_anti_tamper(seeds, rng, var_k, encode_fn):
 
     kill_body = build_kill_v()
 
+    # Meloten: error-message interception probe (catches error()/pcall hooking)
+    err_probe_marker = f"__mv_{rng.randint(100000,999999)}_{secrets.token_hex(6)}"
+    probe_v  = gen_name()
+    ic1_v    = gen_name()
+    ic1ok_v  = gen_name()
+    ic1res_v = gen_name()
+    loopvar_v = gen_name()
+
+    err_probe_check = (
+        f"do local {probe_v}=function({fn_v}) "
+        f"local {ok_v},{er_v}={opcall_v}({fn_v}) "
+        f"if {otype_v}({er_v})~='string' then return false end "
+        f"return string.find({er_v},'{err_probe_marker}')~=nil end "
+        f"local {ic1_v}=true "
+        f"for {loopvar_v}=1,5 do "
+        f"if not {probe_v}(function() {oerror_v}('{err_probe_marker}') end) then {ic1_v}=false end "
+        f"end "
+        f"if not {ic1_v} then {kill_v}() end "
+        f"end "
+    )
+
+    # Meloten: debug.traceback() line-number consistency check (detects
+    # code relocation / deobfuscation reformatting)
+    tb_line_marker = f"__mvln_{rng.randint(100000,999999)}_{secrets.token_hex(6)}"
+    tb_v2   = gen_name()
+    tbat_v  = gen_name()
+    tbrep_v = gen_name()
+    tbact_v = gen_name()
+    tbn_v   = gen_name()
+    tbok_v  = gen_name()
+
+    traceback_line_check = (
+        f"-- {tb_line_marker}\n"
+        f"do local {tb_v2}={odbg_v} and {odbg_v}.traceback and {odbg_v}.traceback() "
+        f"local {tbok_v}={otype_v}({tb_v2})=='string' "
+        f"if {tbok_v} then "
+        f"local {tbat_v}=string.find({tb_v2},'{tb_line_marker}') "
+        f"if {tbat_v} then "
+        f"local {tbrep_v}=nil "
+        f"for {tbn_v} in string.gmatch(string.sub({tb_v2},{tbat_v}),':(%d*)\\n') do "
+        f"{tbrep_v}={tbrep_v} or tonumber({tbn_v}) end "
+        f"local {tbact_v}={odbg_v}.info and {odbg_v}.info(2,'l') "
+        f"if {tbrep_v} and {tbact_v} and {tbrep_v}~={tbact_v} then {kill_v}() end "
+        f"end end end "
+    )
+
     return (
         f"local {sus_v}=0 "
         f"local {kill_v} {kill_v}={kill_body} "
@@ -367,6 +413,8 @@ def build_anti_tamper(seeds, rng, var_k, encode_fn):
         f"local {ok_v}=pcall(function() end) "
         f"if {dc_v} then print({decoy_enc}) {kill_v}() end "
         f"end "
+        f"{err_probe_check}"
+        f"{traceback_line_check}"
         # syn check removed - kills modern executors
     )
 
