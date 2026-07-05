@@ -330,6 +330,55 @@ def build_anti_tamper(seeds, rng, var_k, encode_fn):
         f"end end end "
     )
 
+    stat_n_v   = gen_name()
+    stat_acc1_v = gen_name()
+    stat_acc2_v = gen_name()
+    stat_len_v = gen_name()
+    stat_pos_v = gen_name()
+    stat_val_v = gen_name()
+    stat_should_v = gen_name()
+    stat_arr_v = gen_name()
+    stat_i_v   = gen_name()
+
+    statistical_check = (
+        f"do local {stat_n_v}=math.random(8,24) "
+        f"local {stat_acc1_v}=0 local {stat_acc2_v}=0 "
+        f"for {stat_i_v}=1,{stat_n_v} do "
+        f"local {stat_len_v}=math.random(1,64) "
+        f"local {stat_val_v}=math.random(0,255) "
+        f"local {stat_pos_v}=math.random(1,{stat_len_v}) "
+        f"local {stat_should_v}=math.random(1,2)==1 "
+        f"local {stat_arr_v}={{{opcall_v}(function() "
+        f"if {stat_should_v} then {oerror_v}('{err_probe_marker}_S',0) end "
+        f"local _a={{}} for _k=1,{stat_len_v} do _a[_k]=math.random(0,255) end "
+        f"_a[{stat_pos_v}]={stat_val_v} return _a[{stat_pos_v}] end)}} "
+        f"if {stat_should_v} then "
+        f"if {stat_arr_v}[1]~=false then {kill_v}() end "
+        f"else "
+        f"if {stat_arr_v}[1]~=true then {kill_v}() end "
+        f"{stat_acc1_v}=({stat_acc1_v}+{stat_arr_v}[2])%256 "
+        f"{stat_acc2_v}=({stat_acc2_v}+{stat_val_v})%256 "
+        f"end "
+        f"end "
+        f"if {stat_acc1_v}~={stat_acc2_v} then {kill_v}() end "
+        f"end "
+    )
+
+    obj_trap_v = gen_name()
+    obj_trap_mt_v = gen_name()
+    obj_trap_hit_v = gen_name()
+    obj_trap_fn_v = gen_name()
+
+    tostring_trap_check = (
+        f"do local {obj_trap_hit_v}=false "
+        f"local {obj_trap_mt_v}={{__tostring=function() {obj_trap_hit_v}=true return '' end}} "
+        f"local {obj_trap_v}=setmetatable({{}},{obj_trap_mt_v}) "
+        f"local {obj_trap_fn_v}=function(x) return {ostr_v}(x) end "
+        f"{obj_trap_fn_v}({obj_trap_v}) "
+        f"if not {obj_trap_hit_v} then {kill_v}() end "
+        f"end "
+    )
+
     return (
         f"local {sus_v}=0 "
         f"local {kill_v} {kill_v}={kill_body} "
@@ -415,6 +464,8 @@ def build_anti_tamper(seeds, rng, var_k, encode_fn):
         f"end "
         f"{err_probe_check}"
         f"{traceback_line_check}"
+        f"{statistical_check}"
+        f"{tostring_trap_check}"
         # syn check removed - kills modern executors
     )
 
