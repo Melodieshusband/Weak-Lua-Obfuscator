@@ -1,4 +1,5 @@
 import struct
+import secrets
 from vm_opcodes import make_opmap, CANONICAL_OPS
 
 _DEFAULT_OPMAP = make_opmap()
@@ -93,12 +94,28 @@ class Instruction:
         self.b = b
         self.c = c
 
-    def to_bytes(self):
-        b = bytes([self.op])
+    def to_bytes(self, encoded_op=None):
+        real_op = encoded_op if encoded_op is not None else self.op
+        b = bytes([real_op & 0xFF])
         for v in (self.a, self.b, self.c):
             if v is not None:
                 b += struct.pack('<H', v & 0xFFFF)
         return b
+
+def roll_lcg_step(state):
+    return (state * 1103515245 + 12345) & 0xFF
+
+def encode_opcode_chain(op_list, proto_seed):
+    state = proto_seed & 0xFF
+    prev = proto_seed & 0xFF
+    out = []
+    for op in op_list:
+        state = roll_lcg_step(state)
+        mask = (state ^ ((prev * 31) & 0xFF)) & 0xFF
+        enc = (op ^ mask) & 0xFF
+        out.append(enc)
+        prev = op & 0xFF
+    return out
 
 UPVAL_FROM_LOCAL = 0
 UPVAL_FROM_UPVAL = 1
@@ -160,8 +177,13 @@ class FuncProto:
         for c in self.consts:
             data += encode_const(c)
         data += struct.pack('<H', len(self.instructions))
-        for ins in self.instructions:
-            data += ins.to_bytes()
+        proto_seed = secrets.randbelow(256)
+        data += bytes([proto_seed])
+        encoded_ops = encode_opcode_chain(
+            [ins.op for ins in self.instructions], proto_seed
+        )
+        for ins, enc_op in zip(self.instructions, encoded_ops):
+            data += ins.to_bytes(encoded_op=enc_op)
         return data
 
 class Scope:
@@ -1540,12 +1562,15 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None):
         f"local ln={u16_v}(d,i) i=i+2 "
         f"local s='' for j=0,ln-1 do s=s..string.char(d[i+j]) end "
         f"return s,i+ln end "
-        f"local function {ldi_v}(d,i) "
-        f"local op=d[i] i=i+1 "
+        f"local function {ldi_v}(d,i,rstate,rprev) "
+        f"local raw=d[i] i=i+1 "
+        f"local newstate=(rstate*1103515245+12345)%256 "
+        f"local mask=bit32.bxor(newstate,(rprev*31)%256)%256 "
+        f"local op=bit32.bxor(raw,mask)%256 "
         f"local a,b,cc=nil,nil,nil "
         f"local o=op "
         f"{ldi_cases()} "
-        f"return {{op,a,b,cc}},i end "
+        f"return {{op,a,b,cc}},i,newstate,op end "
         f"local function {ldp_v}(d,i) "
         f"local is_vararg=d[i]==1 local params=d[i+1] i=i+2 "
         f"local nupvals={u16_v}(d,i) i=i+2 "
@@ -1566,8 +1591,13 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None):
         f"local consts={{}} "
         f"for _ci=1,nconsts do local cv,ni={ldc_v}(d,i) consts[_ci]=cv i=ni end "
         f"local nins={u16_v}(d,i) i=i+2 "
+        f"local pseed=d[i] i=i+1 "
         f"local ins={{}} "
-        f"for _ii=1,nins do local iv,ni={ldi_v}(d,i) ins[_ii]=iv i=ni end "
+        f"local rstate=pseed local rprev=pseed "
+        f"for _ii=1,nins do "
+        f"local iv,ni,ns,np={ldi_v}(d,i,rstate,rprev) "
+        f"ins[_ii]=iv i=ni rstate=ns rprev=np "
+        f"end "
         f"return {{is_vararg=is_vararg,params=params,updescs=updescs,protos=protos,consts=consts,ins=ins}},i end "
         f"local {env_v}=(getfenv and getfenv(0)) or _ENV or _G or {{}} "
 
