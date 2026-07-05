@@ -10,6 +10,7 @@ from vm import try_compile_vm, bytecode_to_lua
 from string_fold import fold_strings
 from number_fold import fold_numbers
 from cff import flatten_top_level, flatten_recursive, can_flatten
+from ast_cff import flatten_source as ast_flatten_source
 
 MIN_CHUNKS = 3
 MAX_CHUNKS = 7
@@ -192,7 +193,9 @@ class Obfuscator:
             vmres_v = gen_name()
             payload_stage = f"local {vmres_v}=(function(...) {payload} end)() "
         else:
-            flattened = flatten_recursive(source, rng, gen_name)
+            flattened = ast_flatten_source(source, rng, gen_name)
+            if flattened is None:
+                flattened = source
             numbered = fold_numbers(flattened, rng)
             folded = fold_strings(numbered, self.encode, self.var_k, rng)
             n_chunks = rng.randint(MIN_CHUNKS, MAX_CHUNKS)
