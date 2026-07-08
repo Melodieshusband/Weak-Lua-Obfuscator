@@ -54,24 +54,26 @@ def make_seeds():
         "MK": secrets.randbits(32),
     }
 
-def build_alphabet(seed, key):
+def build_alphabet(key, nonce_base):
     chars = [chr(i) for i in range(33, 127) if i not in (34, 39, 92)]
-    ks = keystream(key, seed, 0xA5A5A5A5, len(chars) * 4)
+    nonce_lo, nonce_hi = derive_nonce(0xA5A5A5A5, key, nonce_base)
+    ks = keystream(key, nonce_lo, nonce_hi, len(chars) * 4)
     for i in range(len(chars) - 1, 0, -1):
         v = int.from_bytes(ks[i * 4:i * 4 + 4], "little")
         j = v % (i + 1)
         chars[i], chars[j] = chars[j], chars[i]
     return "".join(chars)
 
-def derive_nonce(call_id, nonce_base):
-    return (call_id & MASK32), ((call_id ^ nonce_base) & MASK32)
+def derive_nonce(call_id, key, nonce_base):
+    words = chacha_block(key, call_id & MASK32, (nonce_base, 0xC2B2AE35, 0x9E3779B9))
+    return words[0] & MASK32, words[1] & MASK32
 
-def encode_string(text, call_id, seeds, alphabet_seed):
+def encode_string(text, call_id, seeds):
     key = seeds["KEY"]
-    alphabet = build_alphabet(alphabet_seed, key)
+    alphabet = build_alphabet(key, seeds["NONCE_BASE"])
     N = len(alphabet)
     data = bytes(ord(c) & 0xFF for c in text)
-    nonce_lo, nonce_hi = derive_nonce(call_id, seeds["NONCE_BASE"])
+    nonce_lo, nonce_hi = derive_nonce(call_id, key, seeds["NONCE_BASE"])
     ks = keystream(key, nonce_lo, nonce_hi, len(data))
     encrypted = bytes(b ^ k for b, k in zip(data, ks))
     result = []
@@ -84,9 +86,9 @@ def encode_string(text, call_id, seeds, alphabet_seed):
         result.append(alphabet[lo])
     return "".join(result)
 
-def decode_string(encoded, call_id, seeds, alphabet_seed):
+def decode_string(encoded, call_id, seeds):
     key = seeds["KEY"]
-    alphabet = build_alphabet(alphabet_seed, key)
+    alphabet = build_alphabet(key, seeds["NONCE_BASE"])
     N = len(alphabet)
     ra = {c: i for i, c in enumerate(alphabet)}
     encrypted = bytearray()
@@ -96,13 +98,13 @@ def decode_string(encoded, call_id, seeds, alphabet_seed):
         if h is None or l is None:
             return None
         encrypted.append(h * N + l)
-    nonce_lo, nonce_hi = derive_nonce(call_id, seeds["NONCE_BASE"])
+    nonce_lo, nonce_hi = derive_nonce(call_id, key, seeds["NONCE_BASE"])
     ks = keystream(key, nonce_lo, nonce_hi, len(encrypted))
     data = bytes(b ^ k for b, k in zip(encrypted, ks))
     return "".join(chr(b) for b in data)
 
 def encrypt_bytes(data, call_id, seeds):
     key = seeds["KEY"]
-    nonce_lo, nonce_hi = derive_nonce(call_id, seeds["NONCE_BASE"])
+    nonce_lo, nonce_hi = derive_nonce(call_id, key, seeds["NONCE_BASE"])
     ks = keystream(key, nonce_lo, nonce_hi, len(data))
     return bytes(b ^ k for b, k in zip(data, ks))

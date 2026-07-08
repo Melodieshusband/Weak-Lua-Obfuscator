@@ -9,7 +9,7 @@ from codegen import (
 from vm import try_compile_vm, bytecode_to_lua
 from string_fold import fold_strings
 from number_fold import fold_numbers
-from cff import flatten_top_level, flatten_recursive, can_flatten
+
 from ast_cff import flatten_source as ast_flatten_source
 
 MIN_CHUNKS = 3
@@ -29,7 +29,6 @@ class Obfuscator:
         self.source = source
         self.watermark = watermark
         self.seeds = make_seeds()
-        self.alphabet_seed = secrets.randbelow(89999999) + 10000000
         self.call_counter = 0
         self.rng = random.Random(secrets.randbits(128))
         reset_names()
@@ -57,10 +56,10 @@ class Obfuscator:
 
     def encode(self, text):
         call_id = self.next_call_id()
-        encoded = encode_string(text, call_id, self.seeds, self.alphabet_seed)
+        encoded = encode_string(text, call_id, self.seeds)
         if encoded is None:
             call_id = self.next_call_id()
-            encoded = encode_string(text, call_id, self.seeds, self.alphabet_seed)
+            encoded = encode_string(text, call_id, self.seeds)
         return encoded, call_id
 
     def k_call(self, text, ret_type=1):
@@ -70,7 +69,7 @@ class Obfuscator:
         s3 = self.rng.randint(100000, 2**31 - 1)
         return f'{self.var_k}("{encoded}",{ret_type},{s0},{call_id},{call_id},{s2},{s3})'
 
-    def build_chunk_loader(self, chunks):
+    def build_chunk_loader(self, chunks, result_var):
         rng = self.rng
 
         buf_var  = gen_name()
@@ -78,14 +77,15 @@ class Obfuscator:
         ok_var   = gen_name()
         er_var   = gen_name()
         ls_var   = gen_name()
+        pk_var   = gen_name()
 
         encoded_chunks = []
         for chunk in chunks:
             cid = self.next_call_id()
-            enc = encode_string(chunk, cid, self.seeds, self.alphabet_seed)
+            enc = encode_string(chunk, cid, self.seeds)
             if enc is None:
                 cid = self.next_call_id()
-                enc = encode_string(chunk, cid, self.seeds, self.alphabet_seed)
+                enc = encode_string(chunk, cid, self.seeds)
             encoded_chunks.append((enc, cid))
 
         lines = []
@@ -111,12 +111,14 @@ class Obfuscator:
         lines.append(
             f"local {env_var}=setmetatable({{}},{{__index=(getfenv and getfenv(0)) or _ENV or {{}}}}) "
             f"do local _kn={self.k_call(self.var_k, ret_type=1)} if type(_kn)=='string' then {env_var}[_kn]={var_k} end end "
-            f"local {wrap_var}='(function(...)' .. {buf_var} .. ' end)(...)' "
+            f"local {wrap_var}='return (function(...)' .. {buf_var} .. ' end)(...)' "
             f"local {fn_var},{er_var}={ls_var}({wrap_var}) "
             f"if not {fn_var} then error({er_var} or '',0) end "
             f"if setfenv then setfenv({fn_var},{env_var}) end "
-            f"local {ok_var},{er_var}=pcall({fn_var}) "
-            f"if not {ok_var} then error({er_var} or '',0) end "
+            f"local {pk_var}={{pcall({fn_var})}} "
+            f"local {ok_var}={pk_var}[1] "
+            f"if not {ok_var} then error({pk_var}[2] or '',0) end "
+            f"{result_var}={pk_var} "
         )
 
         return "".join(lines)
@@ -124,17 +126,19 @@ class Obfuscator:
     def build_vm_data_expr(self, bytecode, prims):
         cid = self.next_call_id()
         enc = encrypt_bytes(bytecode, cid, self.seeds)
-        nonce_lo, nonce_hi = self.seeds["NONCE_BASE"], cid
         packed = ",".join(str(b) for b in enc)
         arr_v = gen_name()
         out_v = gen_name()
         i_v = gen_name()
-        nlo, nhi = cid & 0xFFFFFFFF, (cid ^ self.seeds["NONCE_BASE"]) & 0xFFFFFFFF
+        nw_v = gen_name()
         ks_v = prims["ks"]
         xorb_v = prims["xorb"]
+        blk_v = prims["blk"]
+        nb_v = prims["nb"]
         expr = (
             f"(function() local {arr_v}={{{packed}}} "
-            f"local {out_v}={ks_v}({nlo},{nhi},#{arr_v}) "
+            f"local {nw_v}={blk_v}({cid}%4294967296,{nb_v},3266489909,2654435769) "
+            f"local {out_v}={ks_v}({nw_v}[1],{nw_v}[2],#{arr_v}) "
             f"for {i_v}=1,#{arr_v} do {arr_v}[{i_v}]={xorb_v}({arr_v}[{i_v}],{out_v}[{i_v}]) end "
             f"return {arr_v} end)()"
         )
@@ -157,7 +161,7 @@ class Obfuscator:
                 use_vm = False
 
         header, prims = build_runtime_header(
-            self.seeds, self.alphabet_seed,
+            self.seeds,
             self.var_k, self.var_Q, self.var_G,
             self.var_B, self.var_f, self.var_V,
             self.wm_var,
@@ -187,11 +191,16 @@ class Obfuscator:
         s3e = rng.randint(100000, 2**31 - 1)
         k = self.var_k
 
+        res_var = gen_name()
+
         if use_vm:
             data_expr = self.build_vm_data_expr(bytecode, prims)
             payload = bytecode_to_lua(bytecode, rng, gen_name, opmap, data_expr=data_expr)
             vmres_v = gen_name()
-            payload_stage = f"local {vmres_v}=(function(...) {payload} end)() "
+            payload_stage = (
+                f"local {vmres_v}={{true,(function(...) {payload} end)()}} "
+                f"{res_var}={vmres_v} "
+            )
         else:
             flattened = ast_flatten_source(source, rng, gen_name)
             if flattened is None:
@@ -200,9 +209,10 @@ class Obfuscator:
             folded = fold_strings(numbered, self.encode, self.var_k, rng)
             n_chunks = rng.randint(MIN_CHUNKS, MAX_CHUNKS)
             chunks = split_source(folded, n_chunks)
-            payload_stage = self.build_chunk_loader(chunks)
+            payload_stage = self.build_chunk_loader(chunks, res_var)
 
         body = (
+            f"local {res_var}={{true}} "
             f"{anti_tamper}"
             f"{dispatch_table}"
             f"local {sm_var}={sid1} "
@@ -218,6 +228,7 @@ class Obfuscator:
             f"elseif {sm_var}=={sid4} then "
             f'error({k}("{err_enc}",1,{s0e},{err_cid},{err_cid},{s2e},{s3e}),2) '
             f"end end "
+            f"return table.unpack({res_var},2) "
         )
 
         footer = build_runtime_footer(self.var_Q, self.var_G)

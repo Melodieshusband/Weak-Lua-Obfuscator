@@ -1,4 +1,5 @@
 import sys
+import re
 from obfuscator import Obfuscator
 
 def main():
@@ -18,7 +19,11 @@ def main():
         sys.exit(1)
 
     input_path  = args[0]
-    output_path = args[1] if len(args) > 1 else input_path.replace(".lua", "_obf.lua")
+    if len(args) > 1:
+        output_path = args[1]
+    else:
+        base = re.sub(r'\.lua$', '', input_path)
+        output_path = base + "_obf.lua"
 
     with open(input_path, "r", encoding="utf-8") as f:
         source = f.read()

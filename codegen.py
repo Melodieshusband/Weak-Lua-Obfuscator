@@ -24,7 +24,7 @@ def gen_name(rng=None):
             _used_names.add(name)
             return name
 
-def build_runtime_header(seeds, alphabet_seed, var_k, var_Q, var_G, var_B, var_f, var_V, wm_var):
+def build_runtime_header(seeds, var_k, var_Q, var_G, var_B, var_f, var_V, wm_var):
     qr_v    = gen_name()
     blk_v   = gen_name()
     ks_v    = gen_name()
@@ -50,11 +50,33 @@ def build_runtime_header(seeds, alphabet_seed, var_k, var_Q, var_G, var_B, var_f
     bxor  = "bit32.bxor"
     lrot  = "bit32.lrotate"
 
+    key_rng = random.Random(secrets.randbits(64))
+
+    def split_field(value):
+        a = key_rng.randint(0, MASK32)
+        b = (value - a) & MASK32
+        c = key_rng.randint(0, MASK32)
+        d = (b ^ c) & MASK32
+        return f"({a}+{bxor}({d},{c}))%4294967296"
+
+    key_field_names = [gen_name() for _ in key]
+    key_field_decls = " ".join(
+        f"local {name}={split_field(val)} " for name, val in zip(key_field_names, key)
+    )
+    key_table_decl = f"local {key_v}={{{','.join(key_field_names)}}} "
+
+    nb_a = key_rng.randint(0, MASK32)
+    nb_b = (nonce_base - nb_a) & MASK32
+    nb_c = key_rng.randint(0, MASK32)
+    nb_d = (nb_b ^ nb_c) & MASK32
+    nb_decl = f"local {nb_v}=({nb_a}+{bxor}({nb_d},{nb_c}))%4294967296 "
+
     return (
         f'do ("Protected by Melotens Weak Obfuscator."):gsub(".+",function(q){wm_var}=q end) end '
         f"return (function(...) return(function({var_Q},{var_G},{var_B},{var_f},{var_k},{var_V}) "
-        f"local {key_v}={{{','.join(str(k) for k in key)}}} "
-        f"local {nb_v}={nonce_base} "
+        f"{key_field_decls}"
+        f"{key_table_decl}"
+        f"{nb_decl}"
         f"local _F=math.floor local {sb}=string.byte local {sc}=string.char "
         f"local function {xorb_v}(a,b) return {bxor}(a,b) end "
         f"local function {qr_v}({st_v},a,b,c,d) "
@@ -94,9 +116,10 @@ def build_runtime_header(seeds, alphabet_seed, var_k, var_Q, var_G, var_B, var_f
         f"counter=(counter+1)%4294967296 "
         f"end "
         f"return out end "
-        f"local function {shuffle}(seed) "
+        f"local function {shuffle}() "
         f"local c={{}} for i=33,126,1 do if i~=34 and(i~=39 and i~=92) then c[#c+1]=string.char(i) end end "
-        f"local ks={ks_v}(seed,2779096485,#c*4) "
+        f"local anw={blk_v}(2779096485,{nb_v},3266489909,2654435769) "
+        f"local ks={ks_v}(anw[1],anw[2],#c*4) "
         f"for i=#c,2,-1 do "
         f"local base=(i-1)*4 "
         f"local v=ks[base+1]+ks[base+2]*256+ks[base+3]*65536+ks[base+4]*16777216 "
@@ -104,7 +127,7 @@ def build_runtime_header(seeds, alphabet_seed, var_k, var_Q, var_G, var_B, var_f
         f"c[i],c[j]=c[j],c[i] "
         f"end "
         f"return table.concat(c) end "
-        f"local {alpha_v}={shuffle}({alphabet_seed}) "
+        f"local {alpha_v}={shuffle}() "
         f"local {N_v}=#{alpha_v} "
         f"local {RA_v}={{}} "
         f"for _ri=1,{N_v},1 do {RA_v}[{sb}({alpha_v},_ri)]=_ri end "
@@ -112,11 +135,12 @@ def build_runtime_header(seeds, alphabet_seed, var_k, var_Q, var_G, var_B, var_f
         f"local {CC_v}={{}} "
         f"{var_k}=function(a,b1,b2,b3,b4,d1,d2) local ck=b3*{seeds['MK']}+b1 if {CC_v}[ck]~=nil then return {CC_v}[ck] end "
         f"local d={g3}(a) if not d then return nil end "
-        f"local nonce_lo=b3%4294967296 local nonce_hi={xorb_v}(b3,{nb_v}) "
+        f"local nwords={blk_v}(b3%4294967296,{nb_v},3266489909,2654435769) "
+        f"local nonce_lo=nwords[1] local nonce_hi=nwords[2] "
         f"local ks={ks_v}(nonce_lo,nonce_hi,#d) "
         f"local o={{}} for i=1,#d,1 do o[i]={sc}({xorb_v}(d[i],ks[i])%256) end "
         f"local v=table.concat(o) local result if b1==1 then result=v elseif b1==2 then local n=tonumber(v) result=n==nil and 0 or n elseif b1==3 then result=v=='1' end {CC_v}[ck]=result return result end "
-    ), {"ks": ks_v, "xorb": xorb_v, "nb": nb_v, "sc": sc}
+    ), {"ks": ks_v, "xorb": xorb_v, "nb": nb_v, "sc": sc, "blk": blk_v}
 
 def build_vm_dispatch(var_V, rng):
     ops = {
