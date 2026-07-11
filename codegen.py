@@ -52,28 +52,105 @@ def build_runtime_header(seeds, var_k, var_Q, var_G, var_B, var_f, var_V, wm_var
 
     key_rng = random.Random(secrets.randbits(64))
 
-    def split_field(value):
-        a = key_rng.randint(0, MASK32)
-        b = (value - a) & MASK32
-        c = key_rng.randint(0, MASK32)
-        d = (b ^ c) & MASK32
-        return f"({a}+{bxor}({d},{c}))%4294967296"
+    drv_v = gen_name()
+    drv_acc_v = gen_name()
+    drv_tick_v = gen_name()
+    drv_seed = key_rng.randint(0, MASK32)
+    drv_mix  = key_rng.randint(0, MASK32) | 1
 
-    key_field_names = [gen_name() for _ in key]
-    key_field_decls = " ".join(
-        f"local {name}={split_field(val)} " for name, val in zip(key_field_names, key)
+    drv_prologue = (
+        f"local {drv_acc_v}={drv_seed} local {drv_tick_v}=0 "
+        f"local function {drv_v}(salt) "
+        f"{drv_tick_v}=({drv_tick_v}+1)%4294967296 "
+        f"{drv_acc_v}={bxor}(({drv_acc_v}+salt+{drv_tick_v}+{drv_mix})%4294967296,{lrot}({drv_acc_v},7)) "
+        f"return {drv_acc_v} end "
     )
-    key_table_decl = f"local {key_v}={{{','.join(key_field_names)}}} "
 
-    nb_a = key_rng.randint(0, MASK32)
-    nb_b = (nonce_base - nb_a) & MASK32
-    nb_c = key_rng.randint(0, MASK32)
-    nb_d = (nb_b ^ nb_c) & MASK32
-    nb_decl = f"local {nb_v}=({nb_a}+{bxor}({nb_d},{nb_c}))%4294967296 "
+    drv_state = {"acc": drv_seed, "tick": 0}
+
+    def drv_predict(salt):
+        drv_state["tick"] = (drv_state["tick"] + 1) & MASK32
+        old_acc = drv_state["acc"]
+        left = (old_acc + salt + drv_state["tick"] + drv_mix) & MASK32
+        rot = ((old_acc << 7) | (old_acc >> 25)) & MASK32
+        new_acc = left ^ rot
+        drv_state["acc"] = new_acc
+        return new_acc
+
+    def scatter_value(value, rot_pool):
+        n_parts = key_rng.randint(4, 6)
+        shares = [key_rng.randint(0, MASK32) for _ in range(n_parts - 1)]
+        acc = 0
+        for s in shares:
+            acc = (acc + s) & MASK32
+        last = (value - acc) & MASK32
+        shares.append(last)
+        key_rng.shuffle(shares)
+
+        names = [gen_name() for _ in shares]
+        decls = []
+        drv_idx = key_rng.randrange(len(shares))
+        for i, (nm, sv) in enumerate(zip(names, shares)):
+            if i == drv_idx and i != 0:
+                salt = key_rng.randint(0, MASK32)
+                output = drv_predict(salt)
+                fixup = (sv - output) & MASK32
+                decls.append(f"local {nm}=({drv_v}({salt})+{fixup})%4294967296 ")
+                continue
+            mode = key_rng.randint(0, 2)
+            if mode == 0 or i == 0:
+                decls.append(f"local {nm}={sv} ")
+            elif mode == 1:
+                pre = (sv ^ key_rng.randint(0, MASK32)) & MASK32
+                mask = pre ^ sv
+                decls.append(f"local {nm}={bxor}({pre},{mask}) ")
+            else:
+                prev = names[i - 1]
+                delta = (sv - rot_pool.get(prev, 0)) & MASK32
+                rot_pool[nm] = sv
+                decls.append(f"local {nm}=({delta}+{rot_pool.get(prev, 0)})%4294967296 ")
+                rot_pool[prev] = rot_pool.get(prev, 0)
+
+        combine_terms = "+".join(names)
+        combine = f"({combine_terms})%4294967296"
+        return "".join(decls), combine
+
+    rot_pool = {}
+    key_field_exprs = []
+
+    def make_decoy():
+        dn = gen_name()
+        if key_rng.random() < 0.35:
+            salt = key_rng.randint(0, MASK32)
+            target = key_rng.randint(0, MASK32)
+            output = drv_predict(salt)
+            fixup = (target - output) & MASK32
+            return f"local {dn}=({drv_v}({salt})+{fixup})%4294967296 "
+        return f"local {dn}={key_rng.randint(0, MASK32)} "
+
+    interleaved = []
+    for val in key:
+        n_here = key_rng.randint(0, 2)
+        for _ in range(n_here):
+            interleaved.append(make_decoy())
+        decl, expr = scatter_value(val, rot_pool)
+        interleaved.append(decl)
+        key_field_exprs.append(expr)
+    n_trailing = key_rng.randint(2, 6)
+    for _ in range(n_trailing):
+        interleaved.append(make_decoy())
+
+    key_field_decls = "".join(interleaved)
+
+    key_table_decl = f"local {key_v}={{{','.join(key_field_exprs)}}} "
+
+    nb_decl_body, nb_expr = scatter_value(nonce_base, rot_pool)
+    nb_decl = f"{nb_decl_body}local {nb_v}={nb_expr} "
 
     return (
         f'do ("Protected by Melotens Weak Obfuscator."):gsub(".+",function(q){wm_var}=q end) end '
         f"return (function(...) return(function({var_Q},{var_G},{var_B},{var_f},{var_k},{var_V}) "
+        f"{drv_prologue}"
         f"{key_field_decls}"
         f"{key_table_decl}"
         f"{nb_decl}"
@@ -223,8 +300,6 @@ def build_anti_tamper(seeds, rng, var_k, encode_fn):
     loop_count   = 100000
 
     executor_globals = [
-        # Убраны стандартные executor API (getgenv, hookfunction, etc.)
-        # которые есть в любом нормальном executor'е и не являются признаком отладки
     ]
 
     debugger_names = [
@@ -238,6 +313,21 @@ def build_anti_tamper(seeds, rng, var_k, encode_fn):
         "@lune/stdio", "@lune/task",
         "datetime", "fs", "luau", "net",
         "process", "regex", "roblox", "serde", "stdio", "task",
+        "@lune/date", "@lune/fs/promises", "@lune/stream", "@lune/url",
+        "@lune/path", "@lune/child_process", "@lune/encoding",
+        "@lune/compression", "@lune/base64", "@lune/random", "@lune/utf8",
+        "@lune/hex", "@lune/format", "@lune/fetch", "@lune/timer",
+        "@lune/cli", "@lune/ini", "@lune/toml", "@lune/yaml",
+        "@lune/discord", "@lune/scheduler", "@lune/cors", "@lune/profiler",
+        "@lune/repl", "@lune/terminal", "@lune/assert", "@lune/bench",
+        "@lune/buffer", "@lune/cache", "@lune/clipboard", "@lune/color",
+        "@lune/config", "@lune/datastore", "@lune/diff", "@lune/dns",
+        "@lune/env", "@lune/event", "@lune/expect", "@lune/glob",
+        "@lune/html", "@lune/http", "@lune/jwt", "@lune/log",
+        "@lune/markdown", "@lune/mime", "@lune/mysql", "@lune/robot",
+        "@lune/semver", "@lune/shell", "@lune/signal", "@lune/socket",
+        "@lune/sqlite", "@lune/test", "@lune/uuid", "@lune/worker",
+        "@lune/crypto",
     ]
 
     lute_modules = [
@@ -246,6 +336,99 @@ def build_anti_tamper(seeds, rng, var_k, encode_fn):
         "@std/fs", "@std/net", "@std/task", "@std/process",
         "@std/crypto", "@std/luau", "@std/io", "@std/testing",
         "@std/assert", "@std/lint",
+        "@lute/date", "@lute/stream", "@lute/url", "@lute/path",
+        "@lute/encoding", "@lute/compression", "@lute/serde",
+        "@lute/base64", "@lute/random", "@lute/utf8", "@lute/hex",
+        "@lute/format", "@lute/timer", "@lute/cli", "@lute/ini",
+        "@lute/toml", "@lute/yaml", "@lute/discord", "@lute/scheduler",
+        "@lute/cors", "@lute/profiler", "@lute/repl", "@lute/terminal",
+        "@lute/roblox", "@lute/assert", "@lute/bench", "@lute/buffer",
+        "@lute/cache", "@lute/clipboard", "@lute/color", "@lute/config",
+        "@lute/datastore", "@lute/diff", "@lute/dns", "@lute/env",
+        "@lute/event", "@lute/expect", "@lute/glob", "@lute/html",
+        "@lute/http", "@lute/jwt", "@lute/log", "@lute/markdown",
+        "@lute/mime", "@lute/mysql", "@lute/regex", "@lute/robot",
+        "@lute/semver", "@lute/shell", "@lute/signal", "@lute/socket",
+        "@lute/sqlite", "@lute/test", "@lute/uuid", "@lute/worker",
+        "@testez", "@jsdotlua/jest",
+    ]
+
+    js_env_globals = [
+        "wally", "rojo", "selene", "darklua", "luau_lsp", "remodel",
+        "tarmac", "stylua", "lemur", "busted", "luaunit", "telescope",
+        "plugin", "fetch", "console", "setTimeout", "setInterval",
+        "Buffer", "AbortController", "AbortSignal", "clearInterval",
+        "clearTimeout", "crypto", "performance", "global", "Headers",
+        "Request", "Response", "TextDecoder", "TextEncoder",
+        "atob", "btoa", "self", "FormData", "Blob", "File",
+        "URLSearchParams", "Event", "CustomEvent", "structuredClone",
+        "__dirname", "__filename", "alert", "confirm", "prompt",
+        "navigator", "location", "history", "window", "document",
+        "XMLHttpRequest", "EventTarget", "MessageChannel",
+        "BroadcastChannel", "queueMicrotask", "reportError",
+        "DOMException", "requestAnimationFrame", "cancelAnimationFrame",
+        "matchMedia", "postMessage", "Worker", "SharedWorker",
+        "ServiceWorker", "IndexedDB", "localStorage", "sessionStorage",
+        "caches", "Cache", "CacheStorage", "globalThis", "URL",
+        "FileReader", "FileList", "FileSystem", "DirectoryEntry",
+        "DOMError", "DOMImplementation", "DOMTokenList",
+        "DocumentFragment", "Element", "HTMLElement", "HTMLDocument",
+        "Node", "NodeList", "MouseEvent", "KeyboardEvent", "FocusEvent",
+        "UIEvent", "WheelEvent", "CompositionEvent", "DragEvent",
+        "ClipboardEvent", "PointerEvent", "TouchEvent", "GamepadEvent",
+        "MediaQueryList", "MediaQueryListEvent",
+        "Screen", "History", "Location", "Navigator", "BarProp",
+        "External", "ApplicationCache", "Storage", "StorageEvent",
+        "CloseEvent", "MessageEvent", "ErrorEvent", "PopStateEvent",
+        "HashChangeEvent", "PageTransitionEvent", "PromiseRejectionEvent",
+        "BeforeUnloadEvent", "SecurityPolicyViolationEvent",
+        "XMLHttpRequestEventTarget", "XMLHttpRequestUpload", "FetchEvent",
+        "ServiceWorkerRegistration", "ServiceWorkerGlobalScope",
+        "WorkerGlobalScope", "DedicatedWorkerGlobalScope",
+        "SharedWorkerGlobalScope", "Worklet", "AudioWorklet",
+        "PaintWorklet", "LayoutWorklet", "AnimationWorklet",
+        "CSS", "CSSStyleDeclaration", "CSSStyleSheet", "StyleSheet",
+        "StyleSheetList", "StyleMedia", "MediaList", "MediaError",
+        "MediaSource", "SourceBuffer", "SourceBufferList", "TextTrack",
+        "TextTrackList", "TextTrackCue", "VTTCue", "VTTRegion",
+        "CanvasRenderingContext2D", "CanvasGradient", "CanvasPattern",
+        "ImageBitmap", "ImageBitmapRenderingContext", "OffscreenCanvas",
+        "HTMLCanvasElement", "HTMLImageElement", "HTMLVideoElement",
+        "HTMLAudioElement", "HTMLMediaElement", "HTMLSourceElement",
+        "HTMLTrackElement", "HTMLFormElement", "HTMLInputElement",
+        "HTMLButtonElement", "HTMLSelectElement", "HTMLOptionElement",
+        "HTMLTextAreaElement", "HTMLLabelElement", "HTMLFieldSetElement",
+        "HTMLLegendElement", "HTMLDataListElement", "HTMLOutputElement",
+        "HTMLProgressElement", "HTMLMeterElement", "HTMLDetailsElement",
+        "HTMLDialogElement", "HTMLMenuElement", "HTMLMenuItemElement",
+        "HTMLSummaryElement", "HTMLDivElement", "HTMLSpanElement",
+        "HTMLHeadingElement", "HTMLParagraphElement", "HTMLPreElement",
+        "HTMLQuoteElement", "HTMLOListElement", "HTMLUListElement",
+        "HTMLLIElement", "HTMLDListElement", "HTMLDTElement",
+        "HTMLDDElement", "HTMLTableElement", "HTMLTableCaptionElement",
+        "HTMLTableColElement", "HTMLTableSectionElement",
+        "HTMLTableRowElement", "HTMLTableCellElement",
+        "HTMLTableDataCellElement", "HTMLTableHeaderCellElement",
+        "HTMLFrameSetElement", "HTMLFrameElement", "HTMLIFrameElement",
+        "HTMLEmbedElement", "HTMLObjectElement", "HTMLParamElement",
+        "HTMLMapElement", "HTMLAreaElement", "HTMLScriptElement",
+        "HTMLNoScriptElement", "HTMLStyleElement", "HTMLLinkElement",
+        "HTMLBaseElement", "HTMLHeadElement", "HTMLTitleElement",
+        "HTMLMetaElement", "HTMLBodyElement", "HTMLHtmlElement",
+        "HTMLUnknownElement",
+        "SVGElement", "SVGGraphicsElement", "SVGSVGElement",
+        "SVGRectElement", "SVGCircleElement", "SVGEllipseElement",
+        "SVGLineElement", "SVGPolylineElement", "SVGPolygonElement",
+        "SVGPathElement", "SVGTextElement", "SVGTSpanElement",
+        "SVGTextPathElement", "SVGImageElement", "SVGForeignObjectElement",
+        "SVGDefsElement", "SVGGElement", "SVGSymbolElement",
+        "SVGUseElement", "SVGMarkerElement", "SVGClipPathElement",
+        "SVGMaskElement", "SVGLinearGradientElement",
+        "SVGRadialGradientElement", "SVGStopElement", "SVGPatternElement",
+        "SVGScriptElement", "SVGStyleElement", "SVGAnimateElement",
+        "SVGAnimateMotionElement", "SVGAnimateTransformElement",
+        "SVGSetElement", "SVGMetadataElement", "SVGViewElement",
+        "SVGSwitchElement", "SVGDescElement", "SVGTitleElement",
     ]
 
     def enc_call(name):
@@ -285,10 +468,15 @@ def build_anti_tamper(seeds, rng, var_k, encode_fn):
         for m in lute_modules
     )
 
+    js_env_check_g = " ".join(
+        f"if {le_v}[{enc_call(m)}]~=nil then {sus_v}={sus_v}+1 end"
+        for m in js_env_globals
+    )
+
     decoy_message = "Melodie doesn't approve of skidding be a good boy"
     decoy_enc = enc_call(decoy_message)
 
-    def build_kill_v():
+    def build_kill_v(spam_v, spam_i_v, spam_n_v, decoy_expr):
         variant = rng.randint(1, 4)
         wait_expr = rng.choice([
             "if task then task.wait(0) elseif coroutine then coroutine.yield() end",
@@ -297,18 +485,25 @@ def build_anti_tamper(seeds, rng, var_k, encode_fn):
         ])
         junk1 = rng.randint(1000, 9999)
         junk2 = rng.randint(1000, 9999)
+        spam_stmt = (
+            f"if not {spam_v} then {spam_v}=true "
+            f"local {spam_n_v}=math.random(5,10) "
+            f"for {spam_i_v}=1,{spam_n_v} do print({decoy_expr}) end end "
+        )
         if variant == 1:
-            return f"function() error('',0) local _z=true while _z do {wait_expr} error('',0) end end"
+            return f"function() {spam_stmt} error('',0) local _z=true while _z do {wait_expr} error('',0) end end"
         elif variant == 2:
-            return f"function() local _k={junk1} while true do _k=_k+1 {wait_expr} if _k>{junk1} then error('',0) end end end"
+            return f"function() {spam_stmt} local _k={junk1} while true do _k=_k+1 {wait_expr} if _k>{junk1} then error('',0) end end end"
         elif variant == 3:
-            return f"function() local _k=0 repeat _k=_k+1 {wait_expr} error('',0) until _k<0 end"
+            return f"function() {spam_stmt} local _k=0 repeat _k=_k+1 {wait_expr} error('',0) until _k<0 end"
         else:
-            return f"function() local _f local _g=function() {wait_expr} error('',0) return _f() end _f=_g return _g() end"
+            return f"function() {spam_stmt} local _f local _g=function() {wait_expr} error('',0) return _f() end _f=_g return _g() end"
 
-    kill_body = build_kill_v()
+    spam_v   = gen_name()
+    spam_i_v = gen_name()
+    spam_n_v = gen_name()
+    kill_body = build_kill_v(spam_v, spam_i_v, spam_n_v, decoy_enc)
 
-    # Meloten: error-message interception probe (catches error()/pcall hooking)
     err_probe_marker = f"__mv_{rng.randint(100000,999999)}_{secrets.token_hex(6)}"
     probe_v  = gen_name()
     ic1_v    = gen_name()
@@ -329,8 +524,6 @@ def build_anti_tamper(seeds, rng, var_k, encode_fn):
         f"end "
     )
 
-    # Meloten: debug.traceback() line-number consistency check (detects
-    # code relocation / deobfuscation reformatting)
     tb_line_marker = f"__mvln_{rng.randint(100000,999999)}_{secrets.token_hex(6)}"
     tb_v2   = gen_name()
     tbat_v  = gen_name()
@@ -388,6 +581,211 @@ def build_anti_tamper(seeds, rng, var_k, encode_fn):
         f"end "
     )
 
+    phys_part_v = gen_name()
+    phys_cam_v = gen_name()
+    phys_ok_v = gen_name()
+    phys_bv_v = gen_name()
+    phys_vel_v = gen_name()
+    phys_bp_v = gen_name()
+    phys_y_v = gen_name()
+    phys_fall_v = gen_name()
+    phys_vy_v = gen_name()
+    phys_g_v = gen_name()
+    phys_lt_v = gen_name()
+    phys_player_v = gen_name()
+    phys_thread_v = gen_name()
+    phys_a_v = gen_name()
+    phys_b_v = gen_name()
+    phys_okmt_v = gen_name()
+    phys_mtval_v = gen_name()
+    phys_part2_v = gen_name()
+    phys_okpart_v = gen_name()
+    phys_oksettings_v = gen_name()
+    phys_settings_v = gen_name()
+
+    roblox_behavior_check = (
+        f"do local {phys_ok_v}={opcall_v}(function() "
+        f"local {phys_part_v}=Instance.new('Part') "
+        f"{phys_part_v}.Shape=Enum.PartType.Cylinder "
+        f"{phys_part_v}.Parent=workspace "
+        f"if {phys_part_v}.Parent~=workspace then {kill_v}() end "
+        f"if {phys_part_v}.Shape~=Enum.PartType.Cylinder then {kill_v}() end "
+        f"{phys_part_v}:Destroy() "
+        f"if not {opcall_v}(function() return workspace.CurrentCamera.CFrame:Inverse() end) then {kill_v}() end "
+        f"if not {opcall_v}(function() local v1=Vector3.new(1,2,3) local v2=Vector3.new(1.0001,2.0001,3.0001) return v1:FuzzyEq(v2) end) then {kill_v}() end "
+        f"local {phys_player_v}=game.Players.LocalPlayer "
+        f"if {otype_v}({phys_player_v})~='userdata' or typeof({phys_player_v})~='Instance' or not {phys_player_v}.Name or not {phys_player_v}.Parent or not {phys_player_v}.Parent.Name then {kill_v}() end "
+        f"local {phys_thread_v}=task.spawn(function() end) "
+        f"task.cancel({phys_thread_v}) "
+        f"if {otype_v}({phys_thread_v})~='thread' then {kill_v}() end "
+        f"local {phys_a_v},{phys_b_v}={opcall_v}(function() loadstring('abc')() end) "
+        f"if {phys_a_v} then {kill_v}() end "
+        f"if not {phys_b_v} then {kill_v}() end "
+        f"if {otype_v}(typeof)~='function' then {kill_v}() end "
+        f"if typeof({{}})~='table' then {kill_v}() end "
+        f"if typeof(game)~='Instance' then {kill_v}() end "
+        f"if not {opcall_v}(function() return {odbg_v}.getinfo(print).what=='C' end) then {kill_v}() end "
+        f"local {phys_okmt_v},{phys_mtval_v}={opcall_v}(function() local t={{}} local mt={{__index={{a=1}}}} setmetatable(t,mt) return t.a end) "
+        f"if not {phys_okmt_v} or {phys_mtval_v}~=1 then {kill_v}() end "
+        f"local {phys_okpart_v},{phys_part2_v}={opcall_v}(function() return Instance.new('Part') end) "
+        f"if not {phys_okpart_v} or typeof({phys_part2_v})~='Instance' then {kill_v}() end "
+        f"local {phys_oksettings_v},{phys_settings_v}={opcall_v}(function() return settings() end) "
+        f"if not {phys_oksettings_v} or {otype_v}({phys_settings_v})~='userdata' then {kill_v}() end "
+        f"local {phys_bv_v}=Instance.new('Part') "
+        f"{phys_bv_v}.Anchored=false "
+        f"{phys_bv_v}.Parent=workspace "
+        f"local {phys_vel_v}=Instance.new('BodyVelocity',{phys_bv_v}) "
+        f"{phys_vel_v}.Velocity=Vector3.new(0,10,0) "
+        f"task.wait(0.2) "
+        f"local _velY={phys_bv_v}.AssemblyLinearVelocity "
+        f"{phys_bv_v}:Destroy() "
+        f"if not (_velY and _velY.Y>1) then {kill_v}() end "
+        f"local {phys_bp_v}=Instance.new('Part') "
+        f"{phys_bp_v}.Position=Vector3.new(0,10,0) "
+        f"{phys_bp_v}.Anchored=false "
+        f"{phys_bp_v}.Parent=workspace "
+        f"local _bp=Instance.new('BodyPosition',{phys_bp_v}) "
+        f"_bp.Position=Vector3.new(0,50,0) "
+        f"_bp.D=1000 _bp.P=10000 "
+        f"_bp.MaxForce=Vector3.new(0,4000,0) "
+        f"task.wait(0.3) "
+        f"local {phys_y_v}={phys_bp_v}.Position.Y "
+        f"{phys_bp_v}:Destroy() "
+        f"if not ({phys_y_v}>20) then {kill_v}() end "
+        f"local {phys_fall_v}=Instance.new('Part') "
+        f"{phys_fall_v}.Anchored=false "
+        f"{phys_fall_v}.Position=Vector3.new(0,20,0) "
+        f"{phys_fall_v}.Parent=workspace "
+        f"task.wait(0.3) "
+        f"local {phys_vy_v}={phys_fall_v}.AssemblyLinearVelocity.Y "
+        f"{phys_fall_v}:Destroy() "
+        f"local {phys_g_v}=-workspace.Gravity*0.3 "
+        f"if not ({phys_vy_v} and math.abs({phys_vy_v}-{phys_g_v})<5) then {kill_v}() end "
+        f"end) "
+        f"if not {phys_ok_v} then {kill_v}() end "
+        f"end "
+    )
+
+    http_v      = gen_name()
+    http_ok_v   = gen_name()
+    j1_ok_v     = gen_name()
+    j1_res_v    = gen_name()
+    j2_ok_v     = gen_name()
+    j3_ok_v     = gen_name()
+    j4_ok_v     = gen_name()
+    part3_v     = gen_name()
+    name_ok_v   = gen_name()
+    name_res_v  = gen_name()
+    grawmt_v    = gen_name()
+    udim_v      = gen_name()
+    coro_v      = gen_name()
+    part4_v     = gen_name()
+    shape1_ok_v = gen_name()
+    shape2_ok_v = gen_name()
+    pkg_v       = gen_name()
+    lt_v        = gen_name()
+    lt_ok_v     = gen_name()
+    lt_ent_v    = gen_name()
+    lt_key_v    = gen_name()
+    lt_val_v    = gen_name()
+    lt_lang_v   = gen_name()
+    lt_exp_v    = gen_name()
+    lt_expl_v   = gen_name()
+
+    lt_langs = ["fr", "es", "de", "pt", "ru"]
+    lt_words = {
+        "greeting": ("Hello", {"fr": "Bonjour", "es": "Hola", "de": "Hallo", "pt": "Ola", "ru": "Privet"}),
+        "farewell": ("Goodbye", {"fr": "Au revoir", "es": "Adios", "de": "Auf Wiedersehen", "pt": "Adeus", "ru": "Do svidaniya"}),
+        "thankyou": ("Thank you", {"fr": "Merci", "es": "Gracias", "de": "Danke", "pt": "Obrigado", "ru": "Spasibo"}),
+    }
+
+    def lt_entries_literal():
+        parts = []
+        for key, (source, vals) in lt_words.items():
+            vpairs = ",".join(f"[{enc_call(k)}]={enc_call(v)}" for k, v in vals.items())
+            vpairs = f"[{enc_call('en')}]={enc_call(source)}," + vpairs
+            parts.append(
+                f"{{[{enc_call('Key')}]={enc_call(key)},[{enc_call('Source')}]={enc_call(source)},[{enc_call('Values')}]={{{vpairs}}}}}"
+            )
+        return "{" + ",".join(parts) + "}"
+
+    def lt_expected_literal():
+        parts = []
+        for key, (_source, vals) in lt_words.items():
+            vpairs = ",".join(f"[{enc_call(k)}]={enc_call(v)}" for k, v in vals.items())
+            parts.append(f"[{enc_call(key)}]={{{vpairs}}}")
+        return "{" + ",".join(parts) + "}"
+
+    extra_sandbox_check = (
+        f"do local {http_ok_v},{http_v}={opcall_v}(function() return game:GetService('HttpService') end) "
+        f"if not {http_ok_v} or not {http_v} then {kill_v}() end "
+        f"local {j1_ok_v},{j1_res_v}={opcall_v}(function() return {http_v}:JSONEncode({{{ostr_v}(1)}}) end) "
+        f"if not {j1_ok_v} then {kill_v}() end "
+        f"local {j2_ok_v}={opcall_v}(function() return {http_v}:JSONDecode({j1_res_v}) end) "
+        f"if not {j2_ok_v} then {kill_v}() end "
+        f"local {j3_ok_v}={opcall_v}(function() return {http_v}:GenerateGUID(false) end) "
+        f"if not {j3_ok_v} then {kill_v}() end "
+        f"local {j4_ok_v}={opcall_v}(function() return {http_v}:UrlEncode('a b') end) "
+        f"if not {j4_ok_v} then {kill_v}() end "
+        f"end "
+        f"do local {part3_v}={opcall_v}(Instance.new,'Part') "
+        f"local {name_ok_v},{name_res_v}={opcall_v}(function() return {part3_v}.Name end) "
+        f"if not {name_ok_v} or {name_res_v}~='Part' then {kill_v}() end "
+        f"end "
+        f"do local {udim_v}=UDim2.fromOffset(10,5) "
+        f"if {udim_v}.X.Offset~=10 or {udim_v}.Y.Offset~=5 then {kill_v}() end "
+        f"end "
+        f"do local {coro_v}={opcall_v}(function() return {odbg_v}.getinfo(coroutine.wrap).what end) "
+        f"local {ok_v},{er_v}={opcall_v}(function() return {odbg_v}.getinfo(coroutine.wrap).what=='C' end) "
+        f"if {ok_v} and not {er_v} then {kill_v}() end "
+        f"end "
+        f"if Enum.PartType.Cylinder.Name~='Cylinder' then {kill_v}() end "
+        f"if Enum.PartType.Cylinder.Value~=2 then {kill_v}() end "
+        f"if {ostr_v}(Enum.PartType.Cylinder.EnumType)~='PartType' then {kill_v}() end "
+        f"do local {part4_v}=Instance.new('Part') "
+        f"local {shape1_ok_v}={opcall_v}(function() {part4_v}.Shape=Enum.PartType.Cylinder end) "
+        f"local {shape2_ok_v}={opcall_v}(function() {part4_v}.Shape='Cylinder' end) "
+        f"if not {shape1_ok_v} or not {shape2_ok_v} then {kill_v}() end "
+        f"{part4_v}:Destroy() "
+        f"end "
+        f"do local {pkg_v}=package "
+        f"if {otype_v}({pkg_v})=='table' then "
+        f"if rawget({pkg_v},{enc_call('lune')}) or rawget({pkg_v},{enc_call('lute')}) or rawget({pkg_v},{enc_call('wally')}) or rawget({pkg_v},{enc_call('rojo')}) or rawget({pkg_v},{enc_call('config')}) then {kill_v}() end "
+        f"end end "
+        f"if os and os.execute~=nil then {kill_v}() end "
+        f"if io and io.open and io.read then {kill_v}() end "
+        f"do local {lt_v}=Instance.new('LocalizationTable') "
+        f"{lt_v}.SourceLocaleId='en' "
+        f"{lt_v}:SetEntries({lt_entries_literal()}) "
+        f"local {lt_exp_v}={lt_expected_literal()} "
+        f"local {lt_ok_v}=true "
+        f"for _,{lt_ent_v} in ipairs({lt_v}:GetEntries()) do "
+        f"local {lt_key_v}={lt_ent_v}.Key "
+        f"local {lt_expl_v}={lt_exp_v}[{lt_key_v}] "
+        f"if not {lt_expl_v} then {lt_ok_v}=false break end "
+        f"for {lt_lang_v},{lt_val_v} in pairs({lt_expl_v}) do "
+        f"if {lt_ent_v}.Values[{lt_lang_v}]~={lt_val_v} then {lt_ok_v}=false break end "
+        f"end "
+        f"if not {lt_ok_v} then break end "
+        f"end "
+        f"{lt_v}:Destroy() "
+        f"if not {lt_ok_v} then {kill_v}() end "
+        f"end "
+    )
+
+    genv_v      = gen_name()
+    genvres_v   = gen_name()
+
+    getfenv_probe_check = (
+        f"if getfenv and setfenv then "
+        f"local {genvres_v}=getfenv(0) or getfenv() "
+        f"if {genvres_v} and ({genvres_v}.lune or {genvres_v}.lute or {genvres_v}.wally or {genvres_v}.rojo or {genvres_v}.process or {genvres_v}.fs or {genvres_v}.io) then {kill_v}() end "
+        f"end "
+        f"if _G.game==nil and _G.workspace==nil and ({opcall_v}(require,{enc_call('non_existent_module')}) or _G.require~=nil) then {kill_v}() end "
+        f"if _G.process and _G.process.exit then {kill_v}() end "
+        f"if _G.script and _G.script.Parent==nil and _G.script.Name==nil then {kill_v}() end "
+    )
+
     obj_trap_v = gen_name()
     obj_trap_mt_v = gen_name()
     obj_trap_hit_v = gen_name()
@@ -405,6 +803,7 @@ def build_anti_tamper(seeds, rng, var_k, encode_fn):
 
     return (
         f"local {sus_v}=0 "
+        f"local {spam_v}=false "
         f"local {kill_v} {kill_v}={kill_body} "
         f"local {otype_v}=type "
         f"local {opcall_v}=pcall "
@@ -463,16 +862,16 @@ def build_anti_tamper(seeds, rng, var_k, encode_fn):
         f"if rawget({ev_v},'__ATTACHED__')~=nil then {kill_v}() end "
         f"do local {lreq_v}=require "
         f"local {lenv1_v}=_G "
-        f"if type({lenv1_v})=='table' then {le_v}={lenv1_v} {lune_check_g} {lute_check_g} end "
+        f"if type({lenv1_v})=='table' then {le_v}={lenv1_v} {lune_check_g} {lute_check_g} {js_env_check_g} end "
         f"local {lok2_v},{lenv2_v}=pcall(function() return _ENV end) "
-        f"if {lok2_v} and {lenv2_v} and type({lenv2_v})=='table' and {lenv2_v}~=_G then {le_v}={lenv2_v} {lune_check_g} {lute_check_g} end "
+        f"if {lok2_v} and {lenv2_v} and type({lenv2_v})=='table' and {lenv2_v}~=_G then {le_v}={lenv2_v} {lune_check_g} {lute_check_g} {js_env_check_g} end "
         f"do local {lok1_v},{lfn_v}=pcall(function() "
         f"local {ln_v}=load or loadstring "
         f"if type({ln_v})~='function' then return nil end "
         f"local {lk_v}={ln_v}('return _ENV') "
         f"if type({lk_v})~='function' then return nil end "
         f"return {lk_v}() end) "
-        f"if {lok1_v} and {lfn_v} and type({lfn_v})=='table' and {lfn_v}~=_G then {le_v}={lfn_v} {lune_check_g} {lute_check_g} end end "
+        f"if {lok1_v} and {lfn_v} and type({lfn_v})=='table' and {lfn_v}~=_G then {le_v}={lfn_v} {lune_check_g} {lute_check_g} {js_env_check_g} end end "
         f"if type({lreq_v})=='function' then {lune_check_req} {lute_check_req} end "
         f"end "
         f"do local {dmp_v}={otype_v}(string)=='table' and string.dump "
@@ -490,7 +889,8 @@ def build_anti_tamper(seeds, rng, var_k, encode_fn):
         f"{traceback_line_check}"
         f"{statistical_check}"
         f"{tostring_trap_check}"
-        # syn check removed - kills modern executors
+        f"{roblox_behavior_check}"
+
     )
 
 def build_runtime_footer(var_Q, var_G):
