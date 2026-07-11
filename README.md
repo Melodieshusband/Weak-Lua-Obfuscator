@@ -2,6 +2,16 @@
 
 A source-level Lua/Luau obfuscator written in Python, designed for Roblox scripts.
 
+## History
+
+This project didn't start out ambitious. The first publicly released version used an LCG (linear congruential generator) cipher with hardcoded seed constants shared across every build, rather than a fresh key generated per run, and its "VM" was really just a dispatch table of hashed inline functions for basic operations — closer to a dispatch obfuscation trick than a real bytecode compiler. It offered close to no real protection, and the name was picked because it was, plainly and honestly, weak.
+
+Then something clicked, and what began as a throwaway project turned into an ongoing effort to make it actually good: a from-scratch VM with a custom bytecode format, a reduced-round ChaCha8 cipher with a fresh key per build, multi-layer anti-tamper checks refined against real executor behavior, control-flow flattening at both the AST and bytecode level. The name never changed, even as the project outgrew it many times over.
+
+## Credits
+
+Built by Melodieshusband, with significant help from Claude (Anthropic).
+
 ## Features
 
 ### VM Mode (working)
