@@ -22,6 +22,9 @@ All strings are encrypted with a reduced-round ChaCha8 stream cipher (ARX constr
 ### Obfuscated Cache Keys
 The internal string cache uses a composite key `call_id * MK + type` where `MK` is a random 32-bit seed per run. Iterating the cache table does not reveal plaintext strings without knowing `MK`.
 
+### Scattered Key Derivation
+Header key material is no longer stored as single obvious constants. Each value is split into 4–6 shares combined through addition, XOR-masking, or rolling deltas, with decoy shares mixed in, and a subset of shares recovered through a small per-build pseudo-random derivation function (`drv_v`) instead of appearing as a literal.
+
 ### Decoder Name Concealment
 The decoder function name is never written as a string literal in the output. It is recovered at runtime by decrypting it through the decoder itself, so static searches for the decoder by name do not work.
 
@@ -34,8 +37,13 @@ All runtime variable names are random sequences of visually identical ASCII char
 ### VM Dispatch Table
 100+ anonymous functions covering arithmetic, comparison, string, and logic operations, inserted with random numeric keys per run.
 
-### Control Flow Flattening (fold mode)
-When not using `--vm`, top-level statements of the source are extracted and rewritten into a `while` state machine with randomized state IDs, shuffled branch order, and unreachable dead branches mixed in.
+### Control Flow Flattening
+Two independent flattening passes, depending on mode:
+
+- **Fold mode** (`ast_cff.py`): a proper AST-based pass over the parsed source (via `luau_ast.py`/`luau_unparse.py`), rewriting function/chunk bodies into a `while`-based dispatcher with randomized state IDs, shuffled block order, and junk branches mixed in. Falls back to the unflattened source only if the AST pass itself throws (e.g. a parse edge case), so `--fold` output is always valid Lua either way.
+- **VM mode** (`bytecode_cff.py`): flattens the compiled bytecode itself at the instruction level — basic blocks are split, reordered behind a dispatcher, and junk instructions are interleaved — independent of and in addition to the VM's own opcode randomization.
+
+The older statement-text-based flattener (`cff.py`) is legacy and is no longer used by either mode.
 
 ### Number Folding
 Numeric literals are rewritten as arithmetic expressions (`a+b`, `b-a`, `a*b`) chosen randomly per literal, so constants don't appear directly in the output.
@@ -43,15 +51,32 @@ Numeric literals are rewritten as arithmetic expressions (`a+b`, `b-a`, `a*b`) c
 ### Anti-Tamper (Roblox/Luau)
 Checks performed before any decryption begins:
 
+- Error-message interception probe: repeatedly triggers `error()` through `pcall` and confirms the message survives unmodified, catching hooked `error`/`pcall`
+- `debug.traceback()` line-number consistency check, catching code that has been relocated or reformatted by deobfuscation tooling
+- Statistical/behavioral consistency check across repeated `pcall` invocations
+- `tostring`/metatable trap: confirms `__tostring` metamethods are honored normally and not intercepted
+- Roblox runtime behavior validation: exercises real engine state (parts, physics, `Enum`, camera, player object) to confirm the script is running inside an actual Roblox client rather than an emulated or partial environment
 - 25+ standard function type checks (`rawget`, `setmetatable`, `pcall`, `string.byte`, etc.)
 - Mathematical invariant checks (`1/0 == math.huge`, `0/0 ~= 0/0`, etc.)
 - Timing check: 100,000 iterations must complete in under 3 seconds
-- Metatable trap test
-- `tostring`/`tonumber` round-trip validation
 - Environment scan for known Lua debuggers: `MobDebug`, `remdebug`, `LuaSocket`, `ldb`, `__debugger`, `BreakpointHook`
 - Global variable checks: `__BREAKPOINT__`, `__DEBUG__`, `__ATTACHED__`
 
 All checked names are encrypted — none appear in plaintext in the output.
+
+Two additional checks (a sandbox/JS-environment global scan and a `getfenv`-based environment probe) exist in the codebase but are disabled by default after producing false positives during testing — see **Executor Compatibility** below.
+
+## Executor Compatibility
+
+All anti-tamper checks in this build were tested and validated on **Delta**. On Delta, this build produces no false-positive kills with the current default check set.
+
+Other executors have not been tested and may behave differently — some executors intentionally spoof or sandbox APIs like `getrawmetatable`, `getfenv`, or `_G` contents for their own security reasons, and the anti-tamper layer may interpret that as tampering. If you see a false-positive kill on an executor other than Delta:
+
+1. Reproduce it with a minimal script (a single `print("hello")`) to confirm the anti-tamper layer itself is the cause, not your actual code.
+2. Bisect `build_anti_tamper` in `codegen.py` by commenting out checks from the final assembly (the block at the bottom of the function) in half, rebuilding, and retesting, narrowing down to the offending check.
+3. Either disable the offending check (comment it out of the final assembly, the same way `extra_sandbox_check` and `getfenv_probe_check` are currently disabled) or adjust its logic for that executor's specific behavior.
+
+This project is open source — if you adapt the anti-tamper layer for other executors, contributions or reports back are welcome.
 
 ## Requirements
 
@@ -78,13 +103,17 @@ Output defaults to `input_obf.lua` if no output path is given.
 ```
 crypto.py        — ChaCha8 stream cipher, alphabet shuffle, encode/decode
 codegen.py       — Runtime header, VM dispatch table, anti-tamper, name generation
-cff.py           — Control Flow Flattening (fold mode)
+luau_ast.py      — Luau lexer/parser producing an AST
+luau_unparse.py  — AST → Luau source printer
+ast_cff.py       — AST-based control flow flattening (--fold mode)
+bytecode_cff.py  — Bytecode-level control flow flattening (--vm mode)
 number_fold.py   — Numeric literal → arithmetic expression rewriting
 obfuscator.py    — Main obfuscation pipeline, chunk splitting, chunk loader
 string_fold.py   — String extraction and in-place encryption
 vm.py            — Lua lexer, parser, compiler, bytecode serializer, interpreter generator
 vm_opcodes.py    — Randomized opcode table generator
 main.py          — CLI entry point
+cff.py           — legacy statement-text flattener, no longer used by either mode
 ```
 
 ## Limitations
@@ -92,7 +121,6 @@ main.py          — CLI entry point
 - Source-level obfuscator — does not modify Roblox bytecode directly
 - Strings are treated as raw bytes 0–255; non-ASCII text (Cyrillic, etc.) is not round-tripped correctly
 - ChaCha8 gives strong per-string confidentiality, but the goal remains reverse-engineering difficulty for a source-level tool, not a general-purpose secure transport
-- Fold-mode's flattening (`cff.py`) works on statement text, not an AST, so it's more fragile on unusual formatting than a true AST pass would be
 - Each run produces a unique output
 
 ## License
