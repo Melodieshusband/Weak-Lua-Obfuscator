@@ -107,10 +107,11 @@ class Obfuscator:
 
         env_var  = gen_name()
         wrap_var = gen_name()
+        kn_var   = gen_name()
         var_k = self.var_k
         lines.append(
             f"local {env_var}=setmetatable({{}},{{__index=(getfenv and getfenv(0)) or _ENV or {{}}}}) "
-            f"do local _kn={self.k_call(self.var_k, ret_type=1)} if type(_kn)=='string' then {env_var}[_kn]={var_k} end end "
+            f"do local {kn_var}={self.k_call(self.var_k, ret_type=1)} if type({kn_var})=='string' then {env_var}[{kn_var}]={var_k} end end "
             f"local {wrap_var}='return (function(...)' .. {buf_var} .. ' end)(...)' "
             f"local {fn_var},{er_var}={ls_var}({wrap_var}) "
             f"if not {fn_var} then error({er_var} or '',0) end "
@@ -181,7 +182,7 @@ class Obfuscator:
 
         junk_sids = [rng.randint(1000000, 16000000) for _ in range(10)]
         junk_parts = " ".join(
-            f"elseif {sm_var}=={sid} then local _d{rng.randint(1000,9999)}={rng.randint(0,65535)}"
+            f"elseif {sm_var}=={sid} then local {gen_name()}={rng.randint(0,65535)}"
             for sid in junk_sids
         )
 

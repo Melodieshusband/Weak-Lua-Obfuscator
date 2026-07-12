@@ -41,6 +41,56 @@ def build_runtime_header(seeds, var_k, var_Q, var_G, var_B, var_f, var_V, wm_var
     nb_v    = gen_name()
     w_v     = gen_name()
     st_v    = gen_name()
+    floor_v = gen_name()
+    outw_v  = gen_name()
+    outks_v = gen_name()
+    cnt_v   = gen_name()
+    pos_v   = gen_name()
+    words_v = gen_name()
+    wv_v    = gen_name()
+    ci_v    = gen_name()
+    anw_v   = gen_name()
+    ksh_v   = gen_name()
+    base_v  = gen_name()
+    valv_v  = gen_name()
+    jv_v    = gen_name()
+    iw_v    = gen_name()
+    iout_v  = gen_name()
+    iks_v   = gen_name()
+    ishuf_v = gen_name()
+    ishuf2_v = gen_name()
+    al_v    = gen_name()
+    hh_v    = gen_name()
+    ll_v    = gen_name()
+    kk_v    = gen_name()
+    dd_v    = gen_name()
+    ig3_v   = gen_name()
+    ck_v    = gen_name()
+    nwords_v = gen_name()
+    nlo_v   = gen_name()
+    nhi_v   = gen_name()
+    nv_v    = gen_name()
+    lu_v    = gen_name()
+    ri_v    = gen_name()
+    par_a   = gen_name()
+    par_b   = gen_name()
+    par_c   = gen_name()
+    par_d   = gen_name()
+    par_counter = gen_name()
+    par_n1  = gen_name()
+    par_n2  = gen_name()
+    par_n3  = gen_name()
+    par_outlen = gen_name()
+    par_ga  = gen_name()
+    par_ka_a  = gen_name()
+    par_ka_b1 = gen_name()
+    par_ka_b2 = gen_name()
+    par_ka_b3 = gen_name()
+    par_ka_b4 = gen_name()
+    par_ka_d1 = gen_name()
+    par_ka_d2 = gen_name()
+    result_v  = gen_name()
+    wm_q_v    = gen_name()
 
     key = seeds["KEY"]
     nonce_base = seeds["NONCE_BASE"]
@@ -55,14 +105,15 @@ def build_runtime_header(seeds, var_k, var_Q, var_G, var_B, var_f, var_V, wm_var
     drv_v = gen_name()
     drv_acc_v = gen_name()
     drv_tick_v = gen_name()
+    drv_salt_v = gen_name()
     drv_seed = key_rng.randint(0, MASK32)
     drv_mix  = key_rng.randint(0, MASK32) | 1
 
     drv_prologue = (
         f"local {drv_acc_v}={drv_seed} local {drv_tick_v}=0 "
-        f"local function {drv_v}(salt) "
+        f"local function {drv_v}({drv_salt_v}) "
         f"{drv_tick_v}=({drv_tick_v}+1)%4294967296 "
-        f"{drv_acc_v}={bxor}(({drv_acc_v}+salt+{drv_tick_v}+{drv_mix})%4294967296,{lrot}({drv_acc_v},7)) "
+        f"{drv_acc_v}={bxor}(({drv_acc_v}+{drv_salt_v}+{drv_tick_v}+{drv_mix})%4294967296,{lrot}({drv_acc_v},7)) "
         f"return {drv_acc_v} end "
     )
 
@@ -148,78 +199,79 @@ def build_runtime_header(seeds, var_k, var_Q, var_G, var_B, var_f, var_V, wm_var
     nb_decl = f"{nb_decl_body}local {nb_v}={nb_expr} "
 
     return (
-        f'do ("Protected by Melotens Weak Obfuscator."):gsub(".+",function(q){wm_var}=q end) end '
+        f'do ("Protected by Melotens Weak Obfuscator."):gsub(".+",function({wm_q_v}){wm_var}={wm_q_v} end) end '
         f"return (function(...) return(function({var_Q},{var_G},{var_B},{var_f},{var_k},{var_V}) "
         f"{drv_prologue}"
         f"{key_field_decls}"
         f"{key_table_decl}"
         f"{nb_decl}"
-        f"local _F=math.floor local {sb}=string.byte local {sc}=string.char "
-        f"local function {xorb_v}(a,b) return {bxor}(a,b) end "
-        f"local function {qr_v}({st_v},a,b,c,d) "
-        f"{st_v}[a]=({st_v}[a]+{st_v}[b])%4294967296 "
-        f"{st_v}[d]={lrot}({xorb_v}({st_v}[d],{st_v}[a]),16) "
-        f"{st_v}[c]=({st_v}[c]+{st_v}[d])%4294967296 "
-        f"{st_v}[b]={lrot}({xorb_v}({st_v}[b],{st_v}[c]),12) "
-        f"{st_v}[a]=({st_v}[a]+{st_v}[b])%4294967296 "
-        f"{st_v}[d]={lrot}({xorb_v}({st_v}[d],{st_v}[a]),8) "
-        f"{st_v}[c]=({st_v}[c]+{st_v}[d])%4294967296 "
-        f"{st_v}[b]={lrot}({xorb_v}({st_v}[b],{st_v}[c]),7) "
+        f"local {floor_v}=math.floor local {sb}=string.byte local {sc}=string.char "
+        f"local function {xorb_v}({par_a},{par_b}) return {bxor}({par_a},{par_b}) end "
+        f"local function {qr_v}({st_v},{par_a},{par_b},{par_c},{par_d}) "
+        f"{st_v}[{par_a}]=({st_v}[{par_a}]+{st_v}[{par_b}])%4294967296 "
+        f"{st_v}[{par_d}]={lrot}({xorb_v}({st_v}[{par_d}],{st_v}[{par_a}]),16) "
+        f"{st_v}[{par_c}]=({st_v}[{par_c}]+{st_v}[{par_d}])%4294967296 "
+        f"{st_v}[{par_b}]={lrot}({xorb_v}({st_v}[{par_b}],{st_v}[{par_c}]),12) "
+        f"{st_v}[{par_a}]=({st_v}[{par_a}]+{st_v}[{par_b}])%4294967296 "
+        f"{st_v}[{par_d}]={lrot}({xorb_v}({st_v}[{par_d}],{st_v}[{par_a}]),8) "
+        f"{st_v}[{par_c}]=({st_v}[{par_c}]+{st_v}[{par_d}])%4294967296 "
+        f"{st_v}[{par_b}]={lrot}({xorb_v}({st_v}[{par_b}],{st_v}[{par_c}]),7) "
         f"end "
-        f"local function {blk_v}(counter,n1,n2,n3) "
+        f"local function {blk_v}({par_counter},{par_n1},{par_n2},{par_n3}) "
         f"local {st_v}={{{c0},{c1},{c2},{c3},"
         f"{key_v}[1],{key_v}[2],{key_v}[3],{key_v}[4],{key_v}[5],{key_v}[6],{key_v}[7],{key_v}[8],"
-        f"counter,n1,n2,n3}} "
-        f"local {w_v}={{}} for i=1,16,1 do {w_v}[i]={st_v}[i] end "
-        f"for _=1,{CHACHA_ROUNDS // 2},1 do "
+        f"{par_counter},{par_n1},{par_n2},{par_n3}}} "
+        f"local {w_v}={{}} for {iw_v}=1,16,1 do {w_v}[{iw_v}]={st_v}[{iw_v}] end "
+        f"for {lu_v}=1,{CHACHA_ROUNDS // 2},1 do "
         f"{qr_v}({w_v},1,5,9,13) {qr_v}({w_v},2,6,10,14) {qr_v}({w_v},3,7,11,15) {qr_v}({w_v},4,8,12,16) "
         f"{qr_v}({w_v},1,6,11,16) {qr_v}({w_v},2,7,12,13) {qr_v}({w_v},3,8,9,14) {qr_v}({w_v},4,5,10,15) "
         f"end "
-        f"local out={{}} for i=1,16,1 do out[i]=({w_v}[i]+{st_v}[i])%4294967296 end "
-        f"return out end "
-        f"local function {ks_v}(n1,n2,outlen) "
-        f"local out={{}} local counter=0 local pos=0 "
-        f"while pos<outlen do "
-        f"local words={blk_v}(counter,0,n1,n2) "
-        f"for i=1,16,1 do "
-        f"local wv=words[i] "
-        f"out[pos+1]=wv%256 "
-        f"out[pos+2]=_F(wv/256)%256 "
-        f"out[pos+3]=_F(wv/65536)%256 "
-        f"out[pos+4]=_F(wv/16777216)%256 "
-        f"pos=pos+4 "
-        f"if pos>=outlen then break end "
+        f"local {outw_v}={{}} for {iout_v}=1,16,1 do {outw_v}[{iout_v}]=({w_v}[{iout_v}]+{st_v}[{iout_v}])%4294967296 end "
+        f"return {outw_v} end "
+        f"local function {ks_v}({par_n1},{par_n2},{par_outlen}) "
+        f"local {outks_v}={{}} local {cnt_v}=0 local {pos_v}=0 "
+        f"while {pos_v}<{par_outlen} do "
+        f"local {words_v}={blk_v}({cnt_v},0,{par_n1},{par_n2}) "
+        f"for {iks_v}=1,16,1 do "
+        f"local {wv_v}={words_v}[{iks_v}] "
+        f"{outks_v}[{pos_v}+1]={wv_v}%256 "
+        f"{outks_v}[{pos_v}+2]={floor_v}({wv_v}/256)%256 "
+        f"{outks_v}[{pos_v}+3]={floor_v}({wv_v}/65536)%256 "
+        f"{outks_v}[{pos_v}+4]={floor_v}({wv_v}/16777216)%256 "
+        f"{pos_v}={pos_v}+4 "
+        f"if {pos_v}>={par_outlen} then break end "
         f"end "
-        f"counter=(counter+1)%4294967296 "
+        f"{cnt_v}=({cnt_v}+1)%4294967296 "
         f"end "
-        f"return out end "
+        f"return {outks_v} end "
         f"local function {shuffle}() "
-        f"local c={{}} for i=33,126,1 do if i~=34 and(i~=39 and i~=92) then c[#c+1]=string.char(i) end end "
-        f"local anw={blk_v}(2779096485,{nb_v},3266489909,2654435769) "
-        f"local ks={ks_v}(anw[1],anw[2],#c*4) "
-        f"for i=#c,2,-1 do "
-        f"local base=(i-1)*4 "
-        f"local v=ks[base+1]+ks[base+2]*256+ks[base+3]*65536+ks[base+4]*16777216 "
-        f"local j=v%i+1 "
-        f"c[i],c[j]=c[j],c[i] "
+        f"local {ci_v}={{}} for {ishuf_v}=33,126,1 do if {ishuf_v}~=34 and({ishuf_v}~=39 and {ishuf_v}~=92) then {ci_v}[#{ci_v}+1]=string.char({ishuf_v}) end end "
+        f"local {anw_v}={blk_v}(2779096485,{nb_v},3266489909,2654435769) "
+        f"local {ksh_v}={ks_v}({anw_v}[1],{anw_v}[2],#{ci_v}*4) "
+        f"for {ishuf2_v}=#{ci_v},2,-1 do "
+        f"local {base_v}=({ishuf2_v}-1)*4 "
+        f"local {valv_v}={ksh_v}[{base_v}+1]+{ksh_v}[{base_v}+2]*256+{ksh_v}[{base_v}+3]*65536+{ksh_v}[{base_v}+4]*16777216 "
+        f"local {jv_v}={valv_v}%{ishuf2_v}+1 "
+        f"{ci_v}[{ishuf2_v}],{ci_v}[{jv_v}]={ci_v}[{jv_v}],{ci_v}[{ishuf2_v}] "
         f"end "
-        f"return table.concat(c) end "
+        f"return table.concat({ci_v}) end "
         f"local {alpha_v}={shuffle}() "
         f"local {N_v}=#{alpha_v} "
         f"local {RA_v}={{}} "
-        f"for _ri=1,{N_v},1 do {RA_v}[{sb}({alpha_v},_ri)]=_ri end "
-        f"local function {g3}(a) if type(a)~='string' then return nil end local al=#a if al%2~=0 then return nil end local o={{}} for i=1,al,2 do local h={RA_v}[{sb}(a,i)] local l={RA_v}[{sb}(a,i+1)] if not h or not l then return nil end local kk=(h-1)*{N_v}+(l-1) if kk<0 or kk>255 then return nil end o[#o+1]=kk end return o end "
+        f"for {ri_v}=1,{N_v},1 do {RA_v}[{sb}({alpha_v},{ri_v})]={ri_v} end "
+        f"local function {g3}({par_ga}) if type({par_ga})~='string' then return nil end local {al_v}=#{par_ga} if {al_v}%2~=0 then return nil end local {ig3_v}={{}} for {iw_v}=1,{al_v},2 do local {hh_v}={RA_v}[{sb}({par_ga},{iw_v})] local {ll_v}={RA_v}[{sb}({par_ga},{iw_v}+1)] if not {hh_v} or not {ll_v} then return nil end local {kk_v}=({hh_v}-1)*{N_v}+({ll_v}-1) if {kk_v}<0 or {kk_v}>255 then return nil end {ig3_v}[#{ig3_v}+1]={kk_v} end return {ig3_v} end "
         f"local {CC_v}={{}} "
-        f"{var_k}=function(a,b1,b2,b3,b4,d1,d2) local ck=b3*{seeds['MK']}+b1 if {CC_v}[ck]~=nil then return {CC_v}[ck] end "
-        f"local d={g3}(a) if not d then return nil end "
-        f"local nwords={blk_v}(b3%4294967296,{nb_v},3266489909,2654435769) "
-        f"local nonce_lo=nwords[1] local nonce_hi=nwords[2] "
-        f"local ks={ks_v}(nonce_lo,nonce_hi,#d) "
-        f"local o={{}} for i=1,#d,1 do o[i]={sc}({xorb_v}(d[i],ks[i])%256) end "
-        f"local v=table.concat(o) local result if b1==1 then result=v elseif b1==2 then local n=tonumber(v) result=n==nil and 0 or n elseif b1==3 then result=v=='1' end {CC_v}[ck]=result return result end "
+        f"{var_k}=function({par_ka_a},{par_ka_b1},{par_ka_b2},{par_ka_b3},{par_ka_b4},{par_ka_d1},{par_ka_d2}) local {ck_v}={par_ka_b3}*{seeds['MK']}+{par_ka_b1} if {CC_v}[{ck_v}]~=nil then return {CC_v}[{ck_v}] end "
+        f"local {dd_v}={g3}({par_ka_a}) if not {dd_v} then return nil end "
+        f"local {nwords_v}={blk_v}({par_ka_b3}%4294967296,{nb_v},3266489909,2654435769) "
+        f"local {nlo_v}={nwords_v}[1] local {nhi_v}={nwords_v}[2] "
+        f"local {ksh_v}={ks_v}({nlo_v},{nhi_v},#{dd_v}) "
+        f"local {ig3_v}={{}} for {iw_v}=1,#{dd_v},1 do {ig3_v}[{iw_v}]={sc}({xorb_v}({dd_v}[{iw_v}],{ksh_v}[{iw_v}])%256) end "
+        f"local {valv_v}=table.concat({ig3_v}) local {result_v} if {par_ka_b1}==1 then {result_v}={valv_v} elseif {par_ka_b1}==2 then local {nv_v}=tonumber({valv_v}) {result_v}={nv_v}==nil and 0 or {nv_v} elseif {par_ka_b1}==3 then {result_v}={valv_v}=='1' end {CC_v}[{ck_v}]={result_v} return {result_v} end "
     ), {"ks": ks_v, "xorb": xorb_v, "nb": nb_v, "sc": sc, "blk": blk_v}
 
 def build_vm_dispatch(var_V, rng):
+    import re
     ops = {
         "add":    ("s,m", "s+m"),
         "sub":    ("s,m", "s-m"),
@@ -253,7 +305,13 @@ def build_vm_dispatch(var_V, rng):
             while h in hashes:
                 h = rng.randint(0x10000000, 0xFFFFFFFF)
             hashes[op_name] = h
-            dispatch_lines.append(f"[{h}]=function({params}) return {expr} end")
+            ps = gen_name()
+            pm = gen_name()
+            real_params = ps if params == "s" else f"{ps},{pm}"
+            real_expr = re.sub(r'\bs\b', ps, expr)
+            if params != "s":
+                real_expr = re.sub(r'\bm\b', pm, real_expr)
+            dispatch_lines.append(f"[{h}]=function({real_params}) return {real_expr} end")
 
     dispatch_table = f"local {var_V}={{{';'.join(dispatch_lines)}}} "
     return dispatch_table, hashes
@@ -265,9 +323,13 @@ def build_anti_tamper(seeds, rng, var_k, encode_fn):
     t1_v    = gen_name()
     ti_v    = gen_name()
     acc_v   = gen_name()
+    loop2_v = gen_name()
     ev_v    = gen_name()
     mt_v    = gen_name()
     tb_v    = gen_name()
+    trap_v  = gen_name()
+    nstr_v  = gen_name()
+    fnparam_x_v = gen_name()
     ok_v    = gen_name()
     er_v    = gen_name()
     fn_v    = gen_name()
@@ -490,14 +552,18 @@ def build_anti_tamper(seeds, rng, var_k, encode_fn):
             f"local {spam_n_v}=math.random(5,10) "
             f"for {spam_i_v}=1,{spam_n_v} do print({decoy_expr}) end end "
         )
+        loop_v = gen_name()
+        cnt2_v = gen_name()
+        f1_v   = gen_name()
+        f2_v   = gen_name()
         if variant == 1:
-            return f"function() {spam_stmt} error('',0) local _z=true while _z do {wait_expr} error('',0) end end"
+            return f"function() {spam_stmt} error('',0) local {loop_v}=true while {loop_v} do {wait_expr} error('',0) end end"
         elif variant == 2:
-            return f"function() {spam_stmt} local _k={junk1} while true do _k=_k+1 {wait_expr} if _k>{junk1} then error('',0) end end end"
+            return f"function() {spam_stmt} local {cnt2_v}={junk1} while true do {cnt2_v}={cnt2_v}+1 {wait_expr} if {cnt2_v}>{junk1} then error('',0) end end end"
         elif variant == 3:
-            return f"function() {spam_stmt} local _k=0 repeat _k=_k+1 {wait_expr} error('',0) until _k<0 end"
+            return f"function() {spam_stmt} local {cnt2_v}=0 repeat {cnt2_v}={cnt2_v}+1 {wait_expr} error('',0) until {cnt2_v}<0 end"
         else:
-            return f"function() {spam_stmt} local _f local _g=function() {wait_expr} error('',0) return _f() end _f=_g return _g() end"
+            return f"function() {spam_stmt} local {f1_v} local {f2_v}=function() {wait_expr} error('',0) return {f1_v}() end {f1_v}={f2_v} return {f2_v}() end"
 
     spam_v   = gen_name()
     spam_i_v = gen_name()
@@ -556,6 +622,8 @@ def build_anti_tamper(seeds, rng, var_k, encode_fn):
     stat_should_v = gen_name()
     stat_arr_v = gen_name()
     stat_i_v   = gen_name()
+    stat_tmp_v = gen_name()
+    stat_j_v   = gen_name()
 
     statistical_check = (
         f"do local {stat_n_v}=math.random(8,24) "
@@ -567,8 +635,8 @@ def build_anti_tamper(seeds, rng, var_k, encode_fn):
         f"local {stat_should_v}=math.random(1,2)==1 "
         f"local {stat_arr_v}={{{opcall_v}(function() "
         f"if {stat_should_v} then {oerror_v}('{err_probe_marker}_S',0) end "
-        f"local _a={{}} for _k=1,{stat_len_v} do _a[_k]=math.random(0,255) end "
-        f"_a[{stat_pos_v}]={stat_val_v} return _a[{stat_pos_v}] end)}} "
+        f"local {stat_tmp_v}={{}} for {stat_j_v}=1,{stat_len_v} do {stat_tmp_v}[{stat_j_v}]=math.random(0,255) end "
+        f"{stat_tmp_v}[{stat_pos_v}]={stat_val_v} return {stat_tmp_v}[{stat_pos_v}] end)}} "
         f"if {stat_should_v} then "
         f"if {stat_arr_v}[1]~=false then {kill_v}() end "
         f"else "
@@ -597,6 +665,12 @@ def build_anti_tamper(seeds, rng, var_k, encode_fn):
     phys_a_v = gen_name()
     phys_b_v = gen_name()
     phys_okmt_v = gen_name()
+    phys_v1_v = gen_name()
+    phys_v2_v = gen_name()
+    phys_mt_v = gen_name()
+    phys_t_v = gen_name()
+    phys_vely_v = gen_name()
+    phys_bp2_v = gen_name()
     phys_mtval_v = gen_name()
     phys_part2_v = gen_name()
     phys_okpart_v = gen_name()
@@ -612,7 +686,7 @@ def build_anti_tamper(seeds, rng, var_k, encode_fn):
         f"if {phys_part_v}.Shape~=Enum.PartType.Cylinder then {kill_v}() end "
         f"{phys_part_v}:Destroy() "
         f"if not {opcall_v}(function() return workspace.CurrentCamera.CFrame:Inverse() end) then {kill_v}() end "
-        f"if not {opcall_v}(function() local v1=Vector3.new(1,2,3) local v2=Vector3.new(1.0001,2.0001,3.0001) return v1:FuzzyEq(v2) end) then {kill_v}() end "
+        f"if not {opcall_v}(function() local {phys_v1_v}=Vector3.new(1,2,3) local {phys_v2_v}=Vector3.new(1.0001,2.0001,3.0001) return {phys_v1_v}:FuzzyEq({phys_v2_v}) end) then {kill_v}() end "
         f"local {phys_player_v}=game.Players.LocalPlayer "
         f"if {otype_v}({phys_player_v})~='userdata' or typeof({phys_player_v})~='Instance' or not {phys_player_v}.Name or not {phys_player_v}.Parent or not {phys_player_v}.Parent.Name then {kill_v}() end "
         f"local {phys_thread_v}=task.spawn(function() end) "
@@ -625,7 +699,7 @@ def build_anti_tamper(seeds, rng, var_k, encode_fn):
         f"if typeof({{}})~='table' then {kill_v}() end "
         f"if typeof(game)~='Instance' then {kill_v}() end "
         f"if not {opcall_v}(function() return {odbg_v}.getinfo(print).what=='C' end) then {kill_v}() end "
-        f"local {phys_okmt_v},{phys_mtval_v}={opcall_v}(function() local t={{}} local mt={{__index={{a=1}}}} setmetatable(t,mt) return t.a end) "
+        f"local {phys_okmt_v},{phys_mtval_v}={opcall_v}(function() local {phys_t_v}={{}} local {phys_mt_v}={{__index={{a=1}}}} setmetatable({phys_t_v},{phys_mt_v}) return {phys_t_v}.a end) "
         f"if not {phys_okmt_v} or {phys_mtval_v}~=1 then {kill_v}() end "
         f"local {phys_okpart_v},{phys_part2_v}={opcall_v}(function() return Instance.new('Part') end) "
         f"if not {phys_okpart_v} or typeof({phys_part2_v})~='Instance' then {kill_v}() end "
@@ -637,17 +711,17 @@ def build_anti_tamper(seeds, rng, var_k, encode_fn):
         f"local {phys_vel_v}=Instance.new('BodyVelocity',{phys_bv_v}) "
         f"{phys_vel_v}.Velocity=Vector3.new(0,10,0) "
         f"task.wait(0.2) "
-        f"local _velY={phys_bv_v}.AssemblyLinearVelocity "
+        f"local {phys_vely_v}={phys_bv_v}.AssemblyLinearVelocity "
         f"{phys_bv_v}:Destroy() "
-        f"if not (_velY and _velY.Y>1) then {kill_v}() end "
+        f"if not ({phys_vely_v} and {phys_vely_v}.Y>1) then {kill_v}() end "
         f"local {phys_bp_v}=Instance.new('Part') "
         f"{phys_bp_v}.Position=Vector3.new(0,10,0) "
         f"{phys_bp_v}.Anchored=false "
         f"{phys_bp_v}.Parent=workspace "
-        f"local _bp=Instance.new('BodyPosition',{phys_bp_v}) "
-        f"_bp.Position=Vector3.new(0,50,0) "
-        f"_bp.D=1000 _bp.P=10000 "
-        f"_bp.MaxForce=Vector3.new(0,4000,0) "
+        f"local {phys_bp2_v}=Instance.new('BodyPosition',{phys_bp_v}) "
+        f"{phys_bp2_v}.Position=Vector3.new(0,50,0) "
+        f"{phys_bp2_v}.D=1000 {phys_bp2_v}.P=10000 "
+        f"{phys_bp2_v}.MaxForce=Vector3.new(0,4000,0) "
         f"task.wait(0.3) "
         f"local {phys_y_v}={phys_bp_v}.Position.Y "
         f"{phys_bp_v}:Destroy() "
@@ -790,12 +864,13 @@ def build_anti_tamper(seeds, rng, var_k, encode_fn):
     obj_trap_mt_v = gen_name()
     obj_trap_hit_v = gen_name()
     obj_trap_fn_v = gen_name()
+    obj_trap_px_v = gen_name()
 
     tostring_trap_check = (
         f"do local {obj_trap_hit_v}=false "
         f"local {obj_trap_mt_v}={{__tostring=function() {obj_trap_hit_v}=true return '' end}} "
         f"local {obj_trap_v}=setmetatable({{}},{obj_trap_mt_v}) "
-        f"local {obj_trap_fn_v}=function(x) return {ostr_v}(x) end "
+        f"local {obj_trap_fn_v}=function({obj_trap_px_v}) return {ostr_v}({obj_trap_px_v}) end "
         f"{obj_trap_fn_v}({obj_trap_v}) "
         f"if not {obj_trap_hit_v} then {kill_v}() end "
         f"end "
@@ -847,10 +922,10 @@ def build_anti_tamper(seeds, rng, var_k, encode_fn):
         f"if math.abs(-{m1})~={m1} then {kill_v}() end "
         f"if math.floor({m1}+0.9)~={m1} then {kill_v}() end "
         f"do local {ok_v},{er_v}={opcall_v}(function() error({m1}) end) if {ok_v} then {kill_v}() end if {otype_v}({er_v})~='string' then {kill_v}() end end "
-        f"do local {ti_v}=os and {otype_v}(os.clock)=='function' and os.clock or ({otype_v}(tick)=='function' and tick) or nil local {t0_v}={ti_v} and {ti_v}() or 0 local {acc_v}=0 for _=1,{loop_count} do {acc_v}={acc_v}+1 end local {t1_v}={ti_v} and {ti_v}() or 0 if {acc_v}~={loop_count} then {kill_v}() end if {ti_v} and ({t1_v}-{t0_v})>{timing_limit} then {kill_v}() end end "
-        f"do local {tb_v}={{}} local _trap=false local {mt_v}={{__newindex=function() _trap=true end,__index=function() _trap=true end}} setmetatable({tb_v},{mt_v}) local {ok_v}={opcall_v}(function() {tb_v}[{m2}]={m3} end) setmetatable({tb_v},nil) if not _trap then {kill_v}() end end "
-        f"do local {fn_v}=function(x) return x*{m2}+{m3} end if {otype_v}({fn_v})~='function' then {kill_v}() end if {fn_v}(0)~={m3} then {kill_v}() end if {fn_v}(1)~={m2}+{m3} then {kill_v}() end local {ok_v},{er_v}={opcall_v}({fn_v},'z') if {ok_v} then {kill_v}() end end "
-        f"do local _n={ostr_v}({m1}+{m2}) if {otype_v}(_n)~='string' then {kill_v}() end if tonumber(_n)~=({m1}+{m2}) then {kill_v}() end end "
+        f"do local {ti_v}=os and {otype_v}(os.clock)=='function' and os.clock or ({otype_v}(tick)=='function' and tick) or nil local {t0_v}={ti_v} and {ti_v}() or 0 local {acc_v}=0 for {loop2_v}=1,{loop_count} do {acc_v}={acc_v}+1 end local {t1_v}={ti_v} and {ti_v}() or 0 if {acc_v}~={loop_count} then {kill_v}() end if {ti_v} and ({t1_v}-{t0_v})>{timing_limit} then {kill_v}() end end "
+        f"do local {tb_v}={{}} local {trap_v}=false local {mt_v}={{__newindex=function() {trap_v}=true end,__index=function() {trap_v}=true end}} setmetatable({tb_v},{mt_v}) local {ok_v}={opcall_v}(function() {tb_v}[{m2}]={m3} end) setmetatable({tb_v},nil) if not {trap_v} then {kill_v}() end end "
+        f"do local {fn_v}=function({fnparam_x_v}) return {fnparam_x_v}*{m2}+{m3} end if {otype_v}({fn_v})~='function' then {kill_v}() end if {fn_v}(0)~={m3} then {kill_v}() end if {fn_v}(1)~={m2}+{m3} then {kill_v}() end local {ok_v},{er_v}={opcall_v}({fn_v},'z') if {ok_v} then {kill_v}() end end "
+        f"do local {nstr_v}={ostr_v}({m1}+{m2}) if {otype_v}({nstr_v})~='string' then {kill_v}() end if tonumber({nstr_v})~=({m1}+{m2}) then {kill_v}() end end "
         f"do if {otype_v}({m1})~='number' then {kill_v}() end if {otype_v}('')~='string' then {kill_v}() end if {otype_v}({{}})~='table' then {kill_v}() end if {otype_v}(nil)~='nil' then {kill_v}() end if {otype_v}(true)~='boolean' then {kill_v}() end if {otype_v}({otype_v})~='function' then {kill_v}() end end "
         f"do local {ch_v}={ostr_v}({m1}):rep(3) if #{ch_v}~=3*#{ostr_v}({m1}) then {kill_v}() end end "
         f"local {ev_v}=(getfenv and getfenv(0)) or _ENV or {{}} "
