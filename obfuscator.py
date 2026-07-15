@@ -239,7 +239,7 @@ class Obfuscator:
 
         banner = (
             "--[[\n"
-            "  Protected by Weak Obfuscator v2.1\n"
+            "  Protected by Weak Obfuscator v2.2\n"
             "  https://github.com/Melodieshusband/Weak-Lua-Obfuscator\n"
             "]]\n"
         )
