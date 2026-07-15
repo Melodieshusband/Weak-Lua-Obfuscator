@@ -1,5 +1,21 @@
 from vm import Instruction
 
+MELODIE_DECOY = "Melodie doesn't approve of skidding be a good boy"
+
+def _build_melodie_trap(proto, opmap, reg_base=0):
+    print_const = proto.add_const("print")
+    decoy_const = proto.add_const(MELODIE_DECOY)
+    r_fn = reg_base
+    r_arg = reg_base + 1
+    ins = [
+        Instruction(opmap['LOAD_GLOBAL'], r_fn, print_const),
+        Instruction(opmap['LOAD_CONST'], r_arg, decoy_const),
+        Instruction(opmap['CALL'], r_fn, 1, 0),
+    ]
+    jump_idx = len(ins)
+    ins.append(Instruction(opmap['JUMP'], 0))
+    return ins, jump_idx
+
 JUMP_A_OPS = {'JUMP'}
 JUMP_B_OPS = {'JUMP_FALSE', 'JUMP_TRUE', 'JUMP_FALSE_NK', 'JUMP_TRUE_NK',
               'FOR_PREP', 'FOR_LOOP', 'TFOR_LOOP'}
@@ -126,6 +142,12 @@ def _flatten_proto(proto, rng, rev_opmap, opmap):
     junk_after_slot = set(slots[:n_junk])
     junk_lengths = {slot: rng.randint(1, 3) for slot in junk_after_slot}
 
+    melodie_slot = None
+    has_print = 'LOAD_GLOBAL' in opmap and 'CALL' in opmap and junk_after_slot
+    if has_print:
+        melodie_slot = rng.choice(list(junk_after_slot))
+        junk_lengths[melodie_slot] = 4
+
     needs_fallthrough_jump = {}
     for bi in range(n_real):
         if bi not in fallthrough_target:
@@ -146,7 +168,8 @@ def _flatten_proto(proto, rng, rev_opmap, opmap):
     layout = []
     for pos in range(n_real + 1):
         if pos in junk_after_slot:
-            layout.append(('junk', junk_lengths[pos], pc))
+            is_melodie = has_print and pos == melodie_slot
+            layout.append(('junk', junk_lengths[pos], pc, is_melodie))
             pc += junk_lengths[pos]
         if pos < n_real:
             bi = order[pos]
@@ -186,8 +209,14 @@ def _flatten_proto(proto, rng, rev_opmap, opmap):
             target_pc = new_start_of_block[target_bi]
             new_instructions[new_pc] = Instruction(opmap['JUMP'], target_pc)
         else:
-            _, length, new_pc = item
-            for off in range(length):
-                new_instructions[new_pc + off] = _make_junk_instruction(rng, opmap, junk_names)
+            _, length, new_pc, is_melodie = item
+            if is_melodie:
+                mel_ins, jump_off = _build_melodie_trap(proto, opmap)
+                mel_ins[jump_off].a = new_pc
+                for off, ins in enumerate(mel_ins):
+                    new_instructions[new_pc + off] = ins
+            else:
+                for off in range(length):
+                    new_instructions[new_pc + off] = _make_junk_instruction(rng, opmap, junk_names)
 
     proto.instructions = new_instructions

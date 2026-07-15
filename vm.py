@@ -1480,7 +1480,7 @@ def _patch_global_ops(opmap):
         g['OP_' + name] = val
 
 
-def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None):
+def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, detect_var=None):
     N = gen_name_fn
     data_v    = N(); u16_v     = N(); u16s_v    = N(); ldc_v     = N()
     ldi_v     = N(); ldp_v     = N(); consts_v  = N()
@@ -1508,6 +1508,7 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None):
     p_rbb = N(); p_getreg = N(); p_setreg = N(); p_boxreg = N(); p_proto = N()
     p_lim = N(); p_st = N()
     p_regparam = N()
+    p_tj1 = N(); p_tj2 = N(); p_tj3 = N()
 
     om = opmap if opmap is not None else _DEFAULT_OPMAP
     def O(name): return om[name]
@@ -1641,6 +1642,15 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None):
         f"return {p_x} end "
         f"local {p_pc}=1 "
         f"while {p_pc}<=#{p_ins} do "
+        + (
+            f"if {detect_var} then "
+            f"local {p_tj1}={rng.randint(1000,9999)} "
+            f"local {p_tj2}={p_tj1}+{rng.randint(1000,9999)} "
+            f"local {p_tj3}=true "
+            f"while {p_tj3} do {p_tj2}={p_tj2}+1 end "
+            f"end "
+            if detect_var else ""
+        ) +
         f"local {p_rd}={p_ins}[{p_pc}] "
         f"local {p_op2}={p_rd}[1] local {p_a2}={p_rd}[2] local {p_b2}={p_rd}[3] local {p_c2}={p_rd}[4] "
         f"{p_pc}={p_pc}+1 "

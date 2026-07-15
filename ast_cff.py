@@ -9,9 +9,10 @@ BLOCK_HOLDER_TYPES = {
 
 
 class FlattenContext:
-    def __init__(self, rng, gen_name_fn):
+    def __init__(self, rng, gen_name_fn, detect_var=None):
         self.rng = rng
         self.gen_name_fn = gen_name_fn
+        self.detect_var = detect_var
 
     def gen(self):
         return self.gen_name_fn(self.rng)
@@ -22,6 +23,15 @@ class FlattenContext:
             if v not in used:
                 used.add(v)
                 return v
+
+    def get_trap_sid(self, used):
+        if self.detect_var is None:
+            return None
+        if getattr(self, '_trap_sid', None) is None:
+            self._trap_sid = self.sid(used)
+        else:
+            used.add(self._trap_sid)
+        return self._trap_sid
 
 
 def contains_goto_or_label(stmts):
@@ -280,6 +290,23 @@ def stmt_to_non_declaring(stmt):
     return stmt
 
 
+def build_trap_case_block(ctx, sm_name, trap_sid):
+    rng = ctx.rng
+    junk_a = ctx.gen()
+    junk_b = ctx.gen()
+    v1 = rng.randint(1, 999)
+    v2 = rng.randint(1, 999)
+    return [
+        N('Local', names=[junk_a], attribs=[None],
+          values=[N('Number', raw=str(v1))]),
+        N('Local', names=[junk_b], attribs=[None],
+          values=[N('Binop', op='+',
+                     left=N('Name', name=junk_a),
+                     right=N('Number', raw=str(v2)))]),
+        N('Assign', targets=[sm_name], values=[N('Number', raw=str(trap_sid))], op='='),
+    ]
+
+
 MIN_JUNK = 4
 MAX_JUNK_MULT = 2
 
@@ -345,6 +372,8 @@ def flatten_block(stmts, ctx, in_loop):
     junk_sids = [ctx.sid(used) for _ in range(n_junk)]
     junk_var = ctx.gen()
 
+    trap_sid = ctx.get_trap_sid(used)
+
     all_target_sids = state_ids + [exit_sid]
 
     first_cond = None
@@ -356,8 +385,17 @@ def flatten_block(stmts, ctx, in_loop):
         blk = list(case_blocks[idx])
         ends_flow = bool(blk) and blk[-1]['type'] in ('Return', 'Break')
         if not ends_flow:
-            blk.append(N('Assign', targets=[sm_name],
-                          values=[N('Number', raw=str(nxt))], op='='))
+            if trap_sid is not None:
+                blk.append(N('If',
+                              cond=N('Name', name=ctx.detect_var),
+                              body=[N('Assign', targets=[sm_name],
+                                      values=[N('Number', raw=str(trap_sid))], op='=')],
+                              elseifs=[],
+                              orelse=[N('Assign', targets=[sm_name],
+                                        values=[N('Number', raw=str(nxt))], op='=')]))
+            else:
+                blk.append(N('Assign', targets=[sm_name],
+                              values=[N('Number', raw=str(nxt))], op='='))
         cond = N('Binop', op='==', left=sm_name, right=N('Number', raw=str(sid)))
         if first_cond is None:
             first_cond, first_body = cond, blk
@@ -374,6 +412,11 @@ def flatten_block(stmts, ctx, in_loop):
             N('Assign', targets=[sm_name], values=[N('Number', raw=str(fake_next))], op='='),
         ]
         elseifs.append((cond, blk))
+
+    if trap_sid is not None:
+        trap_cond = N('Binop', op='==', left=sm_name, right=N('Number', raw=str(trap_sid)))
+        trap_blk = build_trap_case_block(ctx, sm_name, trap_sid)
+        elseifs.append((trap_cond, trap_blk))
 
     if_node = N('If', cond=first_cond, body=first_body, elseifs=elseifs, orelse=None)
 
@@ -402,13 +445,13 @@ def flatten_block(stmts, ctx, in_loop):
     return result
 
 
-def flatten_source(source, rng, gen_name_fn):
+def flatten_source(source, rng, gen_name_fn, detect_var=None):
     try:
         chunk = parse(source)
     except LuauSyntaxError:
         return None
 
-    ctx = FlattenContext(rng, gen_name_fn)
+    ctx = FlattenContext(rng, gen_name_fn, detect_var=detect_var)
     try:
         chunk['body'] = flatten_block(chunk['body'], ctx, in_loop=False)
     except Exception:

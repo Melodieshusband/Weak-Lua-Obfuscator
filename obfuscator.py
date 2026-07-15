@@ -170,8 +170,10 @@ class Obfuscator:
 
         dispatch_table, hashes = build_vm_dispatch(self.var_V, rng)
 
+        detect_var = gen_name()
+
         anti_tamper = build_anti_tamper(
-            self.seeds, rng, self.var_k, self.encode
+            self.seeds, rng, self.var_k, self.encode, detect_var=detect_var
         )
 
         sm_var = gen_name()
@@ -196,14 +198,14 @@ class Obfuscator:
 
         if use_vm:
             data_expr = self.build_vm_data_expr(bytecode, prims)
-            payload = bytecode_to_lua(bytecode, rng, gen_name, opmap, data_expr=data_expr)
+            payload = bytecode_to_lua(bytecode, rng, gen_name, opmap, data_expr=data_expr, detect_var=detect_var)
             vmres_v = gen_name()
             payload_stage = (
                 f"local {vmres_v}={{true,(function(...) {payload} end)()}} "
                 f"{res_var}={vmres_v} "
             )
         else:
-            flattened = ast_flatten_source(source, rng, gen_name)
+            flattened = ast_flatten_source(source, rng, gen_name, detect_var=detect_var)
             if flattened is None:
                 flattened = source
             numbered = fold_numbers(flattened, rng)
@@ -214,6 +216,7 @@ class Obfuscator:
 
         body = (
             f"local {res_var}={{true}} "
+            f"local {detect_var}=false "
             f"{anti_tamper}"
             f"{dispatch_table}"
             f"local {sm_var}={sid1} "

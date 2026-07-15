@@ -316,7 +316,7 @@ def build_vm_dispatch(var_V, rng):
     dispatch_table = f"local {var_V}={{{';'.join(dispatch_lines)}}} "
     return dispatch_table, hashes
 
-def build_anti_tamper(seeds, rng, var_k, encode_fn):
+def build_anti_tamper(seeds, rng, var_k, encode_fn, detect_var=None):
     kill_v  = gen_name()
     db_v    = gen_name()
     t0_v    = gen_name()
@@ -538,7 +538,11 @@ def build_anti_tamper(seeds, rng, var_k, encode_fn):
     decoy_message = "Melodie doesn't approve of skidding be a good boy"
     decoy_enc = enc_call(decoy_message)
 
-    def build_kill_v(spam_v, spam_i_v, spam_n_v, decoy_expr):
+    # "Melodie Loop": the kill-switch body. On detection it spams the same
+    # decoy message on repeat and then spins forever (error/loop variants
+    # below), so the script hangs with a wall of decoy prints instead of
+    # doing anything useful.
+    def build_kill_v(spam_v, spam_i_v, spam_n_v, decoy_expr, detect_var=None):
         variant = rng.randint(1, 4)
         wait_expr = rng.choice([
             "if task then task.wait(0) elseif coroutine then coroutine.yield() end",
@@ -547,7 +551,9 @@ def build_anti_tamper(seeds, rng, var_k, encode_fn):
         ])
         junk1 = rng.randint(1000, 9999)
         junk2 = rng.randint(1000, 9999)
+        set_detect = f"{detect_var}=true " if detect_var else ""
         spam_stmt = (
+            f"{set_detect}"
             f"if not {spam_v} then {spam_v}=true "
             f"local {spam_n_v}=math.random(5,10) "
             f"for {spam_i_v}=1,{spam_n_v} do print({decoy_expr}) end end "
@@ -556,19 +562,20 @@ def build_anti_tamper(seeds, rng, var_k, encode_fn):
         cnt2_v = gen_name()
         f1_v   = gen_name()
         f2_v   = gen_name()
+        melodie_tick = f"print({decoy_expr}) "
         if variant == 1:
-            return f"function() {spam_stmt} error('',0) local {loop_v}=true while {loop_v} do {wait_expr} error('',0) end end"
+            return f"function() {spam_stmt} error('',0) local {loop_v}=true while {loop_v} do {melodie_tick}{wait_expr} error('',0) end end"
         elif variant == 2:
-            return f"function() {spam_stmt} local {cnt2_v}={junk1} while true do {cnt2_v}={cnt2_v}+1 {wait_expr} if {cnt2_v}>{junk1} then error('',0) end end end"
+            return f"function() {spam_stmt} local {cnt2_v}={junk1} while true do {cnt2_v}={cnt2_v}+1 {melodie_tick}{wait_expr} if {cnt2_v}>{junk1} then error('',0) end end end"
         elif variant == 3:
-            return f"function() {spam_stmt} local {cnt2_v}=0 repeat {cnt2_v}={cnt2_v}+1 {wait_expr} error('',0) until {cnt2_v}<0 end"
+            return f"function() {spam_stmt} local {cnt2_v}=0 repeat {cnt2_v}={cnt2_v}+1 {melodie_tick}{wait_expr} error('',0) until {cnt2_v}<0 end"
         else:
-            return f"function() {spam_stmt} local {f1_v} local {f2_v}=function() {wait_expr} error('',0) return {f1_v}() end {f1_v}={f2_v} return {f2_v}() end"
+            return f"function() {spam_stmt} local {f1_v} local {f2_v}=function() {melodie_tick}{wait_expr} error('',0) return {f1_v}() end {f1_v}={f2_v} return {f2_v}() end"
 
     spam_v   = gen_name()
     spam_i_v = gen_name()
     spam_n_v = gen_name()
-    kill_body = build_kill_v(spam_v, spam_i_v, spam_n_v, decoy_enc)
+    kill_body = build_kill_v(spam_v, spam_i_v, spam_n_v, decoy_enc, detect_var=detect_var)
 
     err_probe_marker = f"__mv_{rng.randint(100000,999999)}_{secrets.token_hex(6)}"
     probe_v  = gen_name()
@@ -876,7 +883,7 @@ def build_anti_tamper(seeds, rng, var_k, encode_fn):
         f"end "
     )
 
-    return (
+    result = (
         f"local {sus_v}=0 "
         f"local {spam_v}=false "
         f"local {kill_v} {kill_v}={kill_body} "
@@ -967,6 +974,8 @@ def build_anti_tamper(seeds, rng, var_k, encode_fn):
         f"{roblox_behavior_check}"
 
     )
+
+    return result
 
 def build_runtime_footer(var_Q, var_G):
     return f"end)(getfenv and getfenv() or _ENV,table.unpack or unpack,{{}},{{}},nil,{{}}) end)(...)"
