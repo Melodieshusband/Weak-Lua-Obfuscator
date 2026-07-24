@@ -145,7 +145,7 @@ class Obfuscator:
         )
         return expr
 
-    def obfuscate(self, force_vm=False, force_fold=False):
+    def obfuscate(self, force_vm=False, force_fold=False, anti_tamper_level="full"):
         source = self.source
         rng = self.rng
 
@@ -173,7 +173,8 @@ class Obfuscator:
         detect_var = gen_name()
 
         anti_tamper = build_anti_tamper(
-            self.seeds, rng, self.var_k, self.encode, detect_var=detect_var
+            self.seeds, rng, self.var_k, self.encode, detect_var=detect_var,
+            level=anti_tamper_level,
         )
 
         sm_var = gen_name()
@@ -237,12 +238,19 @@ class Obfuscator:
 
         footer = build_runtime_footer(self.var_Q, self.var_G)
 
+        at_label = {
+            "full": "Full",
+            "minimal": "Minimal",
+            "none": "Disabled",
+        }.get(anti_tamper_level, "Full")
         banner = (
             "--[[\n"
             "  Protected by Weak Obfuscator v2.2\n"
+            f"  Anti-Tamper: {at_label}\n"
             "  https://github.com/Melodieshusband/Weak-Lua-Obfuscator\n"
             "]]\n"
         )
 
         mode = "VM (no loadstring)" if use_vm else "chunks+string-fold"
+        mode = f"{mode}, Anti-Tamper: {at_label}"
         return banner + header + body + footer, mode

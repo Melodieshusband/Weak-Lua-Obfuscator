@@ -2,6 +2,17 @@
 
 A source-level Lua/Luau obfuscator written in Python, designed for Roblox scripts.
 
+> ## ⚠️ Getting a false-positive Anti-Tamper kill on a specific executor?
+> **Use the `--minimal-anti-tamper` flag.** It drops only the small set of checks known to
+> occasionally misfire on executors that hook, sandbox, or spoof `pcall`/`error`/`debug`
+> internals, or that don't emulate real Roblox physics timing closely. Everything else
+> (Lune/Lute/wally/rojo/JS-environment detection, debugger scans, standard type checks,
+> Roblox instance/Enum checks) still runs. See **Anti-Tamper Levels** below.
+>
+> ```bash
+> python main.py input.lua output.lua --minimal-anti-tamper
+> ```
+
 ## History
 
 This project didn't start out ambitious. The first publicly released version used an LCG (linear congruential generator) cipher with hardcoded seed constants shared across every build, rather than a fresh key generated per run, and its "VM" was really just a dispatch table of hashed inline functions for basic operations — closer to a dispatch obfuscation trick than a real bytecode compiler. It offered close to no real protection, and the name was picked because it was, plainly and honestly, weak.
@@ -82,11 +93,26 @@ All anti-tamper checks in this build were tested and validated on **Delta**. On 
 
 Other executors have not been tested and may behave differently — some executors intentionally spoof or sandbox APIs like `getrawmetatable`, `getfenv`, or `_G` contents for their own security reasons, and the anti-tamper layer may interpret that as tampering. If you see a false-positive kill on an executor other than Delta:
 
-1. Reproduce it with a minimal script (a single `print("hello")`) to confirm the anti-tamper layer itself is the cause, not your actual code.
-2. Bisect `build_anti_tamper` in `codegen.py` by commenting out checks from the final assembly (the block at the bottom of the function) in half, rebuilding, and retesting, narrowing down to the offending check.
-3. Either disable the offending check (comment it out of the final assembly, the same way `extra_sandbox_check` and `getfenv_probe_check` are currently disabled) or adjust its logic for that executor's specific behavior.
+1. Try `--minimal-anti-tamper` first (see **Anti-Tamper Levels** below) — this alone resolves most false positives without giving up all protection.
+2. If it still false-positives, reproduce it with a minimal script (a single `print("hello")`) to confirm the anti-tamper layer itself is the cause, not your actual code.
+3. Bisect `build_anti_tamper` in `codegen.py` by commenting out checks from the final assembly (the block at the bottom of the function) in half, rebuilding, and retesting, narrowing down to the offending check.
+4. Either disable the offending check or adjust its logic for that executor's specific behavior.
 
 This project is open source — if you adapt the anti-tamper layer for other executors, contributions or reports back are welcome.
+
+## Anti-Tamper Levels
+
+Three levels are available, controlled by a CLI flag. **Full is the default** — only switch to a lower level if you're actually seeing false-positive kills.
+
+- **`--full-anti-tamper`** (default): every check described above runs. Strongest protection, recommended unless you have a specific compatibility problem.
+- **`--minimal-anti-tamper`**: drops only the checks that are known to occasionally false-positive on executors that hook, sandbox, or spoof `pcall`/`error`/`debug` internals, or that don't emulate real Roblox physics timing closely. Specifically this removes:
+  - The `pcall`/`error` message-integrity probe
+  - The `debug.traceback()` line-consistency check
+  - The statistical/behavioral `pcall` consistency check
+  - The Roblox physics/timing behavior check (`BodyVelocity`/`BodyPosition` timing, `debug.getinfo` internals, `settings()`)
+
+  Everything else stays on: standard function/type checks, math invariants, the `tostring`/metatable trap, Lune/Lute/wally/rojo/JS-environment detection, the debugger name scan, and the `__BREAKPOINT__`/`__DEBUG__`/`__ATTACHED__` global checks. This is the mode to reach for when one specific executor kills your script and you've confirmed it's the anti-tamper layer causing it.
+- **`--no-anti-tamper`**: disables anti-tamper entirely. **Not recommended** — this makes the output significantly easier to deobfuscate, since there's nothing checking whether the runtime environment has been tampered with. Only use this if you have a reason unrelated to executor compatibility.
 
 ## Requirements
 
@@ -100,6 +126,9 @@ python main.py input.lua
 python main.py input.lua output.lua
 python main.py input.lua output.lua --fold
 python main.py input.lua output.lua --vm
+python main.py input.lua output.lua --minimal-anti-tamper
+python main.py input.lua output.lua --vm --minimal-anti-tamper
+python main.py input.lua output.lua --no-anti-tamper
 ```
 
 Output defaults to `input_obf.lua` if no output path is given.
@@ -107,6 +136,7 @@ Output defaults to `input_obf.lua` if no output path is given.
 - No flag / `--fold`: control-flow flattening + number folding + string encryption + chunked loading
 - `--vm`: compiles the script to custom bytecode and runs it on the generated interpreter, still wrapped in string encryption + chunked loading. Falls back to `--fold`-style output if the source fails to compile to bytecode, unless `--vm` was forced explicitly, in which case it errors out instead of silently downgrading
 - `--vm` and `--fold` are mutually exclusive
+- `--full-anti-tamper` / `--minimal-anti-tamper` / `--no-anti-tamper`: control the anti-tamper level (default: full). See **Anti-Tamper Levels** above. Only one of these may be given at a time, and all of them are independent of `--vm`/`--fold`.
 
 ## File Structure
 

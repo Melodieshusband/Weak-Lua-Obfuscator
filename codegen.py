@@ -316,7 +316,22 @@ def build_vm_dispatch(var_V, rng):
     dispatch_table = f"local {var_V}={{{';'.join(dispatch_lines)}}} "
     return dispatch_table, hashes
 
-def build_anti_tamper(seeds, rng, var_k, encode_fn, detect_var=None):
+def build_anti_tamper(seeds, rng, var_k, encode_fn, detect_var=None, level="full"):
+    # level:
+    #   "full"    - every check (default, strongest protection)
+    #   "minimal" - drops only the checks known to false-positive on some
+    #               executors (behavioral/timing/hook-probing checks that
+    #               poke at pcall/error/debug internals or exercise real
+    #               physics timing). Standard runtime/type checks, the
+    #               Lune/Lute/wally/rojo/JS-env detection, the debugger
+    #               name scan, and the Roblox instance/Enum checks are
+    #               NOT affected by this and always run.
+    #   "none"    - no anti-tamper code at all (not recommended)
+    if level not in ("full", "minimal", "none"):
+        level = "full"
+    if level == "none":
+        return ""
+
     kill_v  = gen_name()
     db_v    = gen_name()
     t0_v    = gen_name()
@@ -883,6 +898,16 @@ def build_anti_tamper(seeds, rng, var_k, encode_fn, detect_var=None):
         f"end "
     )
 
+    # Checks known to occasionally false-positive on executors that hook,
+    # sandbox, or spoof pcall/error/debug internals, or that don't emulate
+    # real Roblox physics timing closely. Dropped on level="minimal".
+    risky_checks = (
+        f"{err_probe_check}"
+        f"{traceback_line_check}"
+        f"{statistical_check}"
+        f"{roblox_behavior_check}"
+    ) if level == "full" else ""
+
     result = (
         f"local {sus_v}=0 "
         f"local {spam_v}=false "
@@ -967,11 +992,8 @@ def build_anti_tamper(seeds, rng, var_k, encode_fn, detect_var=None):
         f"local {ok_v}=pcall(function() end) "
         f"if {dc_v} then print({decoy_enc}) {kill_v}() end "
         f"end "
-        f"{err_probe_check}"
-        f"{traceback_line_check}"
-        f"{statistical_check}"
         f"{tostring_trap_check}"
-        f"{roblox_behavior_check}"
+        f"{risky_checks}"
 
     )
 
