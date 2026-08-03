@@ -180,13 +180,68 @@ def build_runtime_header(seeds, var_k, var_Q, var_G, var_B, var_f, var_V, wm_var
         return f"local {dn}={key_rng.randint(0, MASK32)} "
 
     interleaved = []
-    for val in key:
+    for val in key[:-1]:
         n_here = key_rng.randint(0, 2)
         for _ in range(n_here):
             interleaved.append(make_decoy())
         decl, expr = scatter_value(val, rot_pool)
         interleaved.append(decl)
         key_field_exprs.append(expr)
+
+    def scatter_value_standalone(value):
+        n_parts = key_rng.randint(4, 6)
+        shares = [key_rng.randint(0, MASK32) for _ in range(n_parts - 1)]
+        acc = 0
+        for s in shares:
+            acc = (acc + s) & MASK32
+        last = (value - acc) & MASK32
+        shares.append(last)
+        key_rng.shuffle(shares)
+
+        names = [gen_name() for _ in shares]
+        decls = []
+        for i, (nm, sv) in enumerate(zip(names, shares)):
+            mode = key_rng.randint(0, 1)
+            if mode == 0:
+                decls.append(f"local {nm}={sv} ")
+            else:
+                pre = (sv ^ key_rng.randint(0, MASK32)) & MASK32
+                mask = pre ^ sv
+                decls.append(f"local {nm}={bxor}({pre},{mask}) ")
+
+        combine_terms = "+".join(names)
+        combine = f"({combine_terms})%4294967296"
+        return "".join(decls), combine
+
+    boot_last_val = key[-1]
+    boot_decl, boot_expr = scatter_value_standalone(boot_last_val)
+
+    boot_src = f"{boot_decl}return {boot_expr}"
+
+    boot_cipher_shift = key_rng.randint(1, 250)
+    boot_cipher_bytes = bytes((b + boot_cipher_shift) % 256 for b in boot_src.encode("utf-8"))
+    boot_cipher_literal = ",".join(str(b) for b in boot_cipher_bytes)
+
+    boot_ls_v   = gen_name()
+    boot_buf_v  = gen_name()
+    boot_i_v    = gen_name()
+    boot_fn_v   = gen_name()
+    boot_err_v  = gen_name()
+    boot_bytes_v = gen_name()
+
+    boot_loader = (
+        f"local {boot_ls_v}=loadstring or load "
+        f"local {boot_bytes_v}={{{boot_cipher_literal}}} "
+        f"local {boot_buf_v}={{}} "
+        f"for {boot_i_v}=1,#{boot_bytes_v},1 do {boot_buf_v}[{boot_i_v}]={sc}(({boot_bytes_v}[{boot_i_v}]-{boot_cipher_shift})%256) end "
+        f"local {boot_fn_v},{boot_err_v}={boot_ls_v}(table.concat({boot_buf_v})) "
+        f"if not {boot_fn_v} then error({boot_err_v} or '',0) end "
+    )
+
+    boot_result_v = gen_name()
+    boot_call = f"local {boot_result_v}={boot_fn_v}() "
+
+    key_field_exprs.append(boot_result_v)
     n_trailing = key_rng.randint(2, 6)
     for _ in range(n_trailing):
         interleaved.append(make_decoy())
@@ -203,6 +258,9 @@ def build_runtime_header(seeds, var_k, var_Q, var_G, var_B, var_f, var_V, wm_var
         f"return (function(...) return(function({var_Q},{var_G},{var_B},{var_f},{var_k},{var_V}) "
         f"{drv_prologue}"
         f"{key_field_decls}"
+        f"local {sc}=string.char "
+        f"{boot_loader}"
+        f"{boot_call}"
         f"{key_table_decl}"
         f"{nb_decl}"
         f"local {floor_v}=math.floor local {sb}=string.byte local {sc}=string.char "
@@ -620,6 +678,31 @@ def build_anti_tamper(seeds, rng, var_k, encode_fn, detect_var=None, level="full
     tbn_v   = gen_name()
     tbok_v  = gen_name()
 
+    idc_f1_v  = gen_name()
+    idc_f2_v  = gen_name()
+    idc_s1a_v = gen_name()
+    idc_s1b_v = gen_name()
+    idc_s2a_v = gen_name()
+    idc_s2b_v = gen_name()
+    idc_ok1_v = gen_name()
+    idc_ok2_v = gen_name()
+    idc_l1_v  = gen_name()
+    idc_l2_v  = gen_name()
+
+    identity_consistency_check = (
+        f"do local {idc_f1_v}=function() end local {idc_f2_v}=function() end "
+        f"local {idc_s1a_v}={ostr_v}({idc_f1_v}) local {idc_s2a_v}={ostr_v}({idc_f2_v}) "
+        f"local {idc_s1b_v}={ostr_v}({idc_f1_v}) local {idc_s2b_v}={ostr_v}({idc_f2_v}) "
+        f"if {idc_s1a_v}~={idc_s1b_v} then {kill_v}() end "
+        f"if {idc_s2a_v}~={idc_s2b_v} then {kill_v}() end "
+        f"if {idc_s1a_v}=={idc_s2a_v} then {kill_v}() end "
+        f"if {odbg_v} and {odbg_v}.info then "
+        f"local {idc_ok1_v},{idc_l1_v}={opcall_v}({odbg_v}.info,{idc_f1_v},'l') "
+        f"local {idc_ok2_v},{idc_l2_v}={opcall_v}({odbg_v}.info,{idc_f1_v},'l') "
+        f"if {idc_ok1_v} and {idc_ok2_v} and {otype_v}({idc_l1_v})=='number' and {otype_v}({idc_l2_v})=='number' and {idc_l1_v}~={idc_l2_v} then {kill_v}() end "
+        f"end end "
+    )
+
     traceback_line_check = (
         f"-- {tb_line_marker}\n"
         f"do local {tb_v2}={odbg_v} and {odbg_v}.traceback and {odbg_v}.traceback() "
@@ -904,6 +987,7 @@ def build_anti_tamper(seeds, rng, var_k, encode_fn, detect_var=None, level="full
     risky_checks = (
         f"{err_probe_check}"
         f"{traceback_line_check}"
+        f"{identity_consistency_check}"
         f"{statistical_check}"
         f"{roblox_behavior_check}"
     ) if level == "full" else ""
