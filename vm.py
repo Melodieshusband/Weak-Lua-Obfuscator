@@ -95,8 +95,20 @@ class Instruction:
 def roll_lcg_step(state):
     return mltn.roll_lcg_step(state)
 
-def encode_opcode_chain(op_list, proto_seed):
-    return mltn.encode_opcode_chain(op_list, proto_seed)
+def encode_opcode_chain(op_list, proto_seed, marker=None):
+    return mltn.encode_opcode_chain(op_list, proto_seed, marker)
+
+REPEAT_MARKER = None
+DICT_MARKER = None
+
+def encode_stream_with_state(values, state, prev):
+    out = []
+    for v in values:
+        state, mask = mltn.next_byte_mask(state, prev)
+        enc = (v ^ mask) & 0xFF
+        out.append(enc)
+        prev = v & 0xFF
+    return out, state, prev
 
 UPVAL_FROM_LOCAL = 0
 UPVAL_FROM_UPVAL = 1
@@ -163,11 +175,33 @@ class FuncProto:
         data += mltn.write_uvarint(len(self.instructions))
         proto_seed = mltn.gen_seed()
         data += bytes([proto_seed])
-        encoded_ops = encode_opcode_chain(
-            [ins.op for ins in self.instructions], proto_seed
+
+        op_list = [ins.op for ins in self.instructions]
+        marker, dict_marker = (
+            (REPEAT_MARKER, DICT_MARKER)
+            if REPEAT_MARKER is not None and DICT_MARKER is not None
+            else mltn.pick_two_markers(op_list)
         )
-        for ins, enc_op in zip(self.instructions, encoded_ops):
-            data += ins.to_bytes(encoded_op=enc_op)
+        data += bytes([marker, dict_marker])
+
+        rle_stream = mltn.rle_encode_ops(op_list, marker)
+        atoms = mltn._split_atoms(rle_stream, marker)
+        dictionary = mltn.build_dictionary(atoms)
+        dict_encoded = mltn.dict_encode_atoms(atoms, dictionary, dict_marker)
+        dict_body = mltn.serialize_dictionary(dictionary, marker)
+
+        state = proto_seed & 0xFF
+        prev = proto_seed & 0xFF
+        enc_ops, state, prev = encode_stream_with_state(dict_encoded, state, prev)
+        enc_dict, state, prev = encode_stream_with_state(list(dict_body), state, prev)
+
+        data += mltn.write_uvarint(len(enc_ops))
+        data += bytes(enc_ops)
+        data += mltn.write_uvarint(len(enc_dict))
+        data += bytes(enc_dict)
+
+        for ins in self.instructions:
+            data += mltn.encode_instruction_fields(ins.a, ins.b, ins.c)
         return data
 
 class Scope:
@@ -1462,6 +1496,9 @@ def _patch_global_ops(opmap):
     g = globals()
     for name, val in opmap.items():
         g['OP_' + name] = val
+    marker, dict_marker = mltn.pick_two_markers(opmap.values())
+    g['REPEAT_MARKER'] = marker
+    g['DICT_MARKER'] = dict_marker
 
 
 def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, detect_var=None):
@@ -1495,6 +1532,15 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
     p_tj1 = N(); p_tj2 = N(); p_tj3 = N()
     p_cblen = N(); p_cbb = N(); p_cbi = N(); p_pseed2 = N(); p_rstate2 = N(); p_rprev2 = N()
     p_smv = N()
+    dec_v = N()
+    p_marker = N(); p_dmarker = N(); p_opslen = N(); p_dictlen = N()
+    p_opsbytes = N(); p_dictbytes = N(); p_rst = N(); p_rpv = N()
+    p_dictionary = N(); p_dn = N(); p_dplen = N(); p_dflat = N(); p_dfi = N(); p_dpat = N()
+    p_flatstream = N(); p_fi = N(); p_ops = N(); p_didx = N(); p_dcount = N(); p_dk = N()
+    p_rlei = N(); p_rop = N(); p_rcount = N(); p_rk = N()
+    p_out = N()
+    p_fi = N()
+    p_rv = N()
 
     om = opmap if opmap is not None else _DEFAULT_OPMAP
     def O(name): return om[name]
@@ -1584,15 +1630,22 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
         f"local {p_ln},{p_i}={uv_v}({p_d},{p_i}) "
         f"local {p_s}='' for {p_j}=0,{p_ln}-1 do {p_s}={p_s}..string.char({p_d}[{p_i}+{p_j}]) end "
         f"return {p_s},{p_i}+{p_ln} end "
-        f"local function {ldi_v}({p_d},{p_i},{p_rstate},{p_rprev}) "
-        f"local {p_raw}={p_d}[{p_i}] {p_i}={p_i}+1 "
-        f"local {p_newstate}=({p_rstate}*1103515245+12345)%256 "
-        f"local {p_mask}=bit32.bxor({p_newstate},({p_rprev}*31)%256)%256 "
-        f"local {p_op}=bit32.bxor({p_raw},{p_mask})%256 "
+        f"local function {dec_v}({p_d},{p_i},{p_ln},{p_rst},{p_rpv}) "
+        f"local {p_out}={{}} "
+        f"for {p_j}=0,{p_ln}-1 do "
+        f"local {p_raw}={p_d}[{p_i}+{p_j}] "
+        f"local {p_newstate}=({p_rst}*1103515245+12345)%256 "
+        f"local {p_mask}=bit32.bxor({p_newstate},({p_rpv}*31)%256)%256 "
+        f"local {p_rv}=bit32.bxor({p_raw},{p_mask})%256 "
+        f"{p_out}[{p_j}+1]={p_rv} "
+        f"{p_rst}={p_newstate} {p_rpv}={p_rv} "
+        f"end "
+        f"return {p_out},{p_rst},{p_rpv} end "
+        f"local function {ldi_v}({p_d},{p_i},{p_op}) "
         f"local {p_a},{p_b},{p_cc}=nil,nil,nil "
         f"local {p_o}={p_op} "
         f"{ldi_cases()} "
-        f"return {{{p_op},{p_a},{p_b},{p_cc}}},{p_i},{p_newstate},{p_op} end "
+        f"return {{{p_op},{p_a},{p_b},{p_cc}}},{p_i} end "
         f"local function {ldp_v}({p_d},{p_i}) "
         f"local {p_isvararg}={p_d}[{p_i}]==1 local {p_params}={p_d}[{p_i}+1] {p_i}={p_i}+2 "
         f"local {p_nupvals} {p_nupvals},{p_i}={uv_v}({p_d},{p_i}) "
@@ -1627,11 +1680,54 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
         f"for {p_ci}=1,{p_nconsts} do local {p_cv},{p_ni}={ldc_v}({p_cbb},{p_cbi}) {p_consts}[{p_ci}]={p_cv} {p_cbi}={p_ni} end "
         f"local {p_nins} {p_nins},{p_i}={uv_v}({p_d},{p_i}) "
         f"local {p_pseed2}={p_d}[{p_i}] {p_i}={p_i}+1 "
+        f"local {p_marker}={p_d}[{p_i}] {p_i}={p_i}+1 "
+        f"local {p_dmarker}={p_d}[{p_i}] {p_i}={p_i}+1 "
+        f"local {p_opslen} {p_opslen},{p_i}={uv_v}({p_d},{p_i}) "
+        f"local {p_opsbytes},{p_rst},{p_rpv}={dec_v}({p_d},{p_i},{p_opslen},{p_pseed2},{p_pseed2}) "
+        f"{p_i}={p_i}+{p_opslen} "
+        f"local {p_dictlen} {p_dictlen},{p_i}={uv_v}({p_d},{p_i}) "
+        f"local {p_dictbytes},{p_rst},{p_rpv}={dec_v}({p_d},{p_i},{p_dictlen},{p_rst},{p_rpv}) "
+        f"{p_i}={p_i}+{p_dictlen} "
+        f"local {p_dn} {p_dn},{p_dfi}={uv_v}({p_dictbytes},1) "
+        f"local {p_dictionary}={{}} "
+        f"for {p_dk}=1,{p_dn} do "
+        f"local {p_dplen} {p_dplen},{p_dfi}={uv_v}({p_dictbytes},{p_dfi}) "
+        f"local {p_dpat}={{}} "
+        f"for {p_j}=1,{p_dplen} do {p_dpat}[{p_j}]={p_dictbytes}[{p_dfi}] {p_dfi}={p_dfi}+1 end "
+        f"{p_dictionary}[{p_dk}]={p_dpat} "
+        f"end "
+        f"local {p_flatstream}={{}} "
+        f"{p_fi}=1 "
+        f"while {p_fi}<=#{p_opsbytes} do "
+        f"local {p_v}={p_opsbytes}[{p_fi}] "
+        f"if {p_v}=={p_dmarker} then "
+        f"local {p_didx}={p_opsbytes}[{p_fi}+1] "
+        f"local {p_dpat}={p_dictionary}[{p_didx}+1] "
+        f"for {p_j}=1,#{p_dpat} do {p_flatstream}[#{p_flatstream}+1]={p_dpat}[{p_j}] end "
+        f"{p_fi}={p_fi}+3 "
+        f"else "
+        f"{p_flatstream}[#{p_flatstream}+1]={p_v} "
+        f"{p_fi}={p_fi}+1 "
+        f"end "
+        f"end "
+        f"local {p_ops}={{}} "
+        f"{p_rlei}=1 "
+        f"while #{p_ops}<{p_nins} and {p_rlei}<=#{p_flatstream} do "
+        f"local {p_v}={p_flatstream}[{p_rlei}] "
+        f"if {p_v}=={p_marker} then "
+        f"local {p_rop}={p_flatstream}[{p_rlei}+1] "
+        f"local {p_rcount}={p_flatstream}[{p_rlei}+2] "
+        f"for {p_rk}=1,{p_rcount} do if #{p_ops}>={p_nins} then break end {p_ops}[#{p_ops}+1]={p_rop} end "
+        f"{p_rlei}={p_rlei}+3 "
+        f"else "
+        f"{p_ops}[#{p_ops}+1]={p_v} "
+        f"{p_rlei}={p_rlei}+1 "
+        f"end "
+        f"end "
         f"local {p_ins}={{}} "
-        f"local {p_rstate2}={p_pseed2} local {p_rprev2}={p_pseed2} "
         f"for {p_ii}=1,{p_nins} do "
-        f"local {p_iv},{p_ni},{p_ns},{p_np}={ldi_v}({p_d},{p_i},{p_rstate2},{p_rprev2}) "
-        f"{p_ins}[{p_ii}]={p_iv} {p_i}={p_ni} {p_rstate2}={p_ns} {p_rprev2}={p_np} "
+        f"local {p_iv},{p_ni}={ldi_v}({p_d},{p_i},{p_ops}[{p_ii}]) "
+        f"{p_ins}[{p_ii}]={p_iv} {p_i}={p_ni} "
         f"end "
         f"return {{is_vararg={p_isvararg},params={p_params},updescs={p_updescs},protos={p_protos},consts={p_consts},ins={p_ins}}},{p_i} end "
         f"local {env_v}=(getfenv and getfenv(0)) or _ENV or _G or {{}} "
