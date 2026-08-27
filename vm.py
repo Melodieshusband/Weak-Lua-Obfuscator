@@ -1,6 +1,7 @@
 import struct
 import secrets
 from vm_opcodes import make_opmap, CANONICAL_OPS
+import mltn
 
 _DEFAULT_OPMAP = make_opmap()
 
@@ -67,23 +68,14 @@ OP_POP           = _DEFAULT_OPMAP['POP']
 OP_DUP           = _DEFAULT_OPMAP['DUP']
 OP_MOVE          = _DEFAULT_OPMAP['MOVE']
 
-TYPE_NIL    = 0
-TYPE_BOOL   = 1
-TYPE_NUMBER = 2
-TYPE_STRING = 3
-TYPE_FUNC   = 4
+TYPE_NIL    = mltn.TYPE_NIL
+TYPE_BOOL   = mltn.TYPE_BOOL
+TYPE_NUMBER = mltn.TYPE_NUMBER
+TYPE_STRING = mltn.TYPE_STRING
+TYPE_FUNC   = mltn.TYPE_FUNC
 
 def encode_const(val):
-    if val is None:
-        return bytes([TYPE_NIL])
-    if isinstance(val, bool):
-        return bytes([TYPE_BOOL, 1 if val else 0])
-    if isinstance(val, (int, float)):
-        return bytes([TYPE_NUMBER]) + struct.pack('<d', float(val))
-    if isinstance(val, str):
-        enc = val.encode('utf-8')
-        return bytes([TYPE_STRING]) + struct.pack('<H', len(enc)) + enc
-    return bytes([TYPE_NIL])
+    return mltn.encode_const_plain(val)
 
 class Instruction:
     __slots__ = ('op', 'a', 'b', 'c')
@@ -97,25 +89,14 @@ class Instruction:
     def to_bytes(self, encoded_op=None):
         real_op = encoded_op if encoded_op is not None else self.op
         b = bytes([real_op & 0xFF])
-        for v in (self.a, self.b, self.c):
-            if v is not None:
-                b += struct.pack('<H', v & 0xFFFF)
+        b += mltn.encode_instruction_fields(self.a, self.b, self.c)
         return b
 
 def roll_lcg_step(state):
-    return (state * 1103515245 + 12345) & 0xFF
+    return mltn.roll_lcg_step(state)
 
 def encode_opcode_chain(op_list, proto_seed):
-    state = proto_seed & 0xFF
-    prev = proto_seed & 0xFF
-    out = []
-    for op in op_list:
-        state = roll_lcg_step(state)
-        mask = (state ^ ((prev * 31) & 0xFF)) & 0xFF
-        enc = (op ^ mask) & 0xFF
-        out.append(enc)
-        prev = op & 0xFF
-    return out
+    return mltn.encode_opcode_chain(op_list, proto_seed)
 
 UPVAL_FROM_LOCAL = 0
 UPVAL_FROM_UPVAL = 1
@@ -165,19 +146,22 @@ class FuncProto:
 
     def serialize(self):
         data = bytes([int(self.is_vararg), self.params])
-        data += struct.pack('<H', len(self.upvals))
+        data += mltn.write_uvarint(len(self.upvals))
         for kind, idx in self.upvals:
             data += bytes([kind])
-            data += struct.pack('<H', idx)
-        data += struct.pack('<H', len(self.protos))
+            data += mltn.write_uvarint(idx)
+        data += mltn.write_uvarint(len(self.protos))
         for p in self.protos:
             s = p.serialize()
             data += struct.pack('<I', len(s)) + s
-        data += struct.pack('<H', len(self.consts))
-        for c in self.consts:
-            data += encode_const(c)
-        data += struct.pack('<H', len(self.instructions))
-        proto_seed = secrets.randbelow(256)
+        const_seed = mltn.gen_seed()
+        const_block = mltn.encode_const_block(self.consts, const_seed)
+        data += mltn.write_uvarint(len(self.consts))
+        data += bytes([const_seed])
+        data += mltn.write_uvarint(len(const_block))
+        data += const_block
+        data += mltn.write_uvarint(len(self.instructions))
+        proto_seed = mltn.gen_seed()
         data += bytes([proto_seed])
         encoded_ops = encode_opcode_chain(
             [ins.op for ins in self.instructions], proto_seed
@@ -1509,13 +1493,17 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
     p_lim = N(); p_st = N()
     p_regparam = N()
     p_tj1 = N(); p_tj2 = N(); p_tj3 = N()
+    p_cblen = N(); p_cbb = N(); p_cbi = N(); p_pseed2 = N(); p_rstate2 = N(); p_rprev2 = N()
+    p_smv = N()
 
     om = opmap if opmap is not None else _DEFAULT_OPMAP
     def O(name): return om[name]
 
-    AB2  = f"{p_a}={u16_v}({p_d},{p_i}) {p_i}={p_i}+2 {p_b}={u16_v}({p_d},{p_i}) {p_i}={p_i}+2 "
-    AB2C = f"{p_a}={u16_v}({p_d},{p_i}) {p_i}={p_i}+2 {p_b}={u16_v}({p_d},{p_i}) {p_i}={p_i}+2 {p_cc}={u16_v}({p_d},{p_i}) {p_i}={p_i}+2 "
-    A2   = f"{p_a}={u16_v}({p_d},{p_i}) {p_i}={p_i}+2 "
+    uv_v = N()
+
+    AB2  = f"{p_a},{p_i}={uv_v}({p_d},{p_i}) {p_b},{p_i}={uv_v}({p_d},{p_i}) "
+    AB2C = f"{p_a},{p_i}={uv_v}({p_d},{p_i}) {p_b},{p_i}={uv_v}({p_d},{p_i}) {p_cc},{p_i}={uv_v}({p_d},{p_i}) "
+    A2   = f"{p_a},{p_i}={uv_v}({p_d},{p_i}) "
 
     def ldi_cases():
         groups_ab2 = [
@@ -1561,6 +1549,15 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
         f"local {data_v}={dexpr} "
         f"local function {u16_v}({p_d},{p_i}) return {p_d}[{p_i}]+({p_d}[{p_i}+1]*256) end "
         f"local function {u16s_v}({p_d},{p_i}) local {p_v}={p_d}[{p_i}]+({p_d}[{p_i}+1]*256) if {p_v}>=32768 then {p_v}={p_v}-65536 end return {p_v} end "
+        f"local function {uv_v}({p_d},{p_i}) "
+        f"local {p_res}=0 local {p_st}=0 "
+        f"while true do "
+        f"local {p_x}={p_d}[{p_i}] {p_i}={p_i}+1 "
+        f"{p_res}={p_res}+bit32.lshift(bit32.band({p_x},0x7F),{p_st}) "
+        f"if bit32.band({p_x},0x80)==0 then break end "
+        f"{p_st}={p_st}+7 "
+        f"end "
+        f"return {p_res},{p_i} end "
         f"local function {ldc_v}({p_d},{p_i}) "
         f"local {p_t}={p_d}[{p_i}] {p_i}={p_i}+1 "
         f"if {p_t}==0 then return nil,{p_i} "
@@ -1579,7 +1576,12 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
         f"else {p_n}=(1+{p_mant}*(2^(-52)))*(2^({p_exp}-1023)) end "
         f"return ({p_sign}==1 and -{p_n} or {p_n}),{p_i} "
         f"end "
-        f"local {p_ln}={u16_v}({p_d},{p_i}) {p_i}={p_i}+2 "
+        f"if {p_t}==5 then "
+        f"local {p_smv}={p_d}[{p_i}] {p_i}={p_i}+1 "
+        f"if {p_smv}>=128 then {p_smv}={p_smv}-256 end "
+        f"return {p_smv},{p_i} "
+        f"end "
+        f"local {p_ln},{p_i}={uv_v}({p_d},{p_i}) "
         f"local {p_s}='' for {p_j}=0,{p_ln}-1 do {p_s}={p_s}..string.char({p_d}[{p_i}+{p_j}]) end "
         f"return {p_s},{p_i}+{p_ln} end "
         f"local function {ldi_v}({p_d},{p_i},{p_rstate},{p_rprev}) "
@@ -1593,30 +1595,43 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
         f"return {{{p_op},{p_a},{p_b},{p_cc}}},{p_i},{p_newstate},{p_op} end "
         f"local function {ldp_v}({p_d},{p_i}) "
         f"local {p_isvararg}={p_d}[{p_i}]==1 local {p_params}={p_d}[{p_i}+1] {p_i}={p_i}+2 "
-        f"local {p_nupvals}={u16_v}({p_d},{p_i}) {p_i}={p_i}+2 "
+        f"local {p_nupvals} {p_nupvals},{p_i}={uv_v}({p_d},{p_i}) "
         f"local {p_updescs}={{}} "
         f"for {p_loopu}=1,{p_nupvals} do "
         f"local {p_kind}={p_d}[{p_i}] {p_i}={p_i}+1 "
-        f"local {p_idx}={u16_v}({p_d},{p_i}) {p_i}={p_i}+2 "
+        f"local {p_idx} {p_idx},{p_i}={uv_v}({p_d},{p_i}) "
         f"{p_updescs}[#{p_updescs}+1]={{kind={p_kind},idx={p_idx}}} "
         f"end "
-        f"local {p_nprotos}={u16_v}({p_d},{p_i}) {p_i}={p_i}+2 "
+        f"local {p_nprotos} {p_nprotos},{p_i}={uv_v}({p_d},{p_i}) "
         f"local {p_protos}={{}} "
         f"for {p_loopp}=1,{p_nprotos} do "
         f"local {p_sz}={p_d}[{p_i}]+({p_d}[{p_i}+1]*256)+({p_d}[{p_i}+2]*65536)+({p_d}[{p_i}+3]*16777216) {p_i}={p_i}+4 "
         f"local {p_p},{p_ni}={ldp_v}({p_d},{p_i}) {p_i}={p_ni} "
         f"{p_protos}[#{p_protos}+1]={p_p} "
         f"end "
-        f"local {p_nconsts}={u16_v}({p_d},{p_i}) {p_i}={p_i}+2 "
-        f"local {p_consts}={{}} "
-        f"for {p_ci}=1,{p_nconsts} do local {p_cv},{p_ni}={ldc_v}({p_d},{p_i}) {p_consts}[{p_ci}]={p_cv} {p_i}={p_ni} end "
-        f"local {p_nins}={u16_v}({p_d},{p_i}) {p_i}={p_i}+2 "
+        f"local {p_nconsts} {p_nconsts},{p_i}={uv_v}({p_d},{p_i}) "
         f"local {p_pseed}={p_d}[{p_i}] {p_i}={p_i}+1 "
-        f"local {p_ins}={{}} "
+        f"local {p_cblen} {p_cblen},{p_i}={uv_v}({p_d},{p_i}) "
+        f"local {p_cbb}={{}} "
         f"local {p_rstate}={p_pseed} local {p_rprev}={p_pseed} "
+        f"for {p_ci}=1,{p_cblen} do "
+        f"local {p_newstate}=({p_rstate}*1103515245+12345)%256 "
+        f"local {p_mask}=bit32.bxor({p_newstate},({p_rprev}*31)%256)%256 "
+        f"local {p_rawc}=bit32.bxor({p_d}[{p_i}+{p_ci}-1],{p_mask})%256 "
+        f"{p_cbb}[{p_ci}]={p_rawc} "
+        f"{p_rstate}={p_newstate} {p_rprev}={p_mask} "
+        f"end "
+        f"{p_i}={p_i}+{p_cblen} "
+        f"local {p_cbi}=1 "
+        f"local {p_consts}={{}} "
+        f"for {p_ci}=1,{p_nconsts} do local {p_cv},{p_ni}={ldc_v}({p_cbb},{p_cbi}) {p_consts}[{p_ci}]={p_cv} {p_cbi}={p_ni} end "
+        f"local {p_nins} {p_nins},{p_i}={uv_v}({p_d},{p_i}) "
+        f"local {p_pseed2}={p_d}[{p_i}] {p_i}={p_i}+1 "
+        f"local {p_ins}={{}} "
+        f"local {p_rstate2}={p_pseed2} local {p_rprev2}={p_pseed2} "
         f"for {p_ii}=1,{p_nins} do "
-        f"local {p_iv},{p_ni},{p_ns},{p_np}={ldi_v}({p_d},{p_i},{p_rstate},{p_rprev}) "
-        f"{p_ins}[{p_ii}]={p_iv} {p_i}={p_ni} {p_rstate}={p_ns} {p_rprev}={p_np} "
+        f"local {p_iv},{p_ni},{p_ns},{p_np}={ldi_v}({p_d},{p_i},{p_rstate2},{p_rprev2}) "
+        f"{p_ins}[{p_ii}]={p_iv} {p_i}={p_ni} {p_rstate2}={p_ns} {p_rprev2}={p_np} "
         f"end "
         f"return {{is_vararg={p_isvararg},params={p_params},updescs={p_updescs},protos={p_protos},consts={p_consts},ins={p_ins}}},{p_i} end "
         f"local {env_v}=(getfenv and getfenv(0)) or _ENV or _G or {{}} "
