@@ -1,7 +1,7 @@
 import secrets
 
 MASK32 = 0xFFFFFFFF
-CHACHA_ROUNDS = 8
+CHACHA_ROUNDS = 20
 CHACHA_CONST = (0x61707865, 0x3320646e, 0x79622d32, 0x6b206574)
 
 def rotl32(x, n):
@@ -108,3 +108,4 @@ def encrypt_bytes(data, call_id, seeds):
     nonce_lo, nonce_hi = derive_nonce(call_id, key, seeds["NONCE_BASE"])
     ks = keystream(key, nonce_lo, nonce_hi, len(data))
     return bytes(b ^ k for b, k in zip(data, ks))
+    
