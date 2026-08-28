@@ -2,6 +2,7 @@ import struct
 import secrets
 
 MLTN_MAGIC = b'MLTN'
+MELODIE_DECOY = "Melodie doesn't approve of skidding be a good boy"
 MLTN_VERSION = 1
 
 TYPE_NIL      = 0
