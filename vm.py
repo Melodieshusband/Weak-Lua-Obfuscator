@@ -1514,6 +1514,7 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
 
     p_d = N(); p_i = N(); p_v = N(); p_t = N(); p_j = N(); p_s = N()
     p_bytes = N(); p_sign = N(); p_exp = N(); p_mant = N(); p_n = N(); p_ln = N()
+    p_f32b = N(); p_f32sign = N(); p_f32exp = N(); p_f32mant = N(); p_f32n = N()
     p_raw = N(); p_newstate = N(); p_mask = N(); p_op = N(); p_a = N(); p_b = N(); p_cc = N(); p_o = N()
     p_rstate = N(); p_rprev = N()
     p_isvararg = N(); p_params = N(); p_nupvals = N(); p_updescs = N(); p_kind = N(); p_idx = N()
@@ -1646,6 +1647,19 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
         f"local {p_smv}={p_d}[{p_i}] {p_i}={p_i}+1 "
         f"if {p_smv}>=128 then {p_smv}={p_smv}-256 end "
         f"return {p_smv},{p_i} "
+        f"end "
+        f"if {p_t}==6 then "
+        f"local {p_f32b}={{}} for {p_j}=0,3 do {p_f32b}[{p_j}+1]={p_d}[{p_i}+{p_j}] end {p_i}={p_i}+4 "
+        f"local {p_f32sign}={p_f32b}[4]>=128 and 1 or 0 "
+        f"local {p_f32exp}=(({p_f32b}[4]%128)*2)+math.floor({p_f32b}[3]/128) "
+        f"local {p_f32mant}=(({p_f32b}[3]%128)*65536)+({p_f32b}[2]*256)+{p_f32b}[1] "
+        f"if {p_f32exp}==255 then "
+        f"if {p_f32mant}==0 then return ({p_f32sign}==1 and -math.huge or math.huge),{p_i} "
+        f"else return (0/0),{p_i} end end "
+        f"local {p_f32n} "
+        f"if {p_f32exp}==0 then {p_f32n}={p_f32mant}*(2^(-149)) "
+        f"else {p_f32n}=(1+{p_f32mant}*(2^(-23)))*(2^({p_f32exp}-127)) end "
+        f"return ({p_f32sign}==1 and -{p_f32n} or {p_f32n}),{p_i} "
         f"end "
         f"local {p_ln},{p_i}={uv_v}({p_d},{p_i}) "
         f"local {p_s}='' for {p_j}=0,{p_ln}-1 do {p_s}={p_s}..string.char({p_d}[{p_i}+{p_j}]) end "

@@ -10,6 +10,7 @@ TYPE_NUMBER   = 2
 TYPE_STRING   = 3
 TYPE_FUNC     = 4
 TYPE_SMALLINT = 5
+TYPE_FLOAT32  = 6
 
 def write_uvarint(n):
     out = bytearray()
@@ -256,7 +257,14 @@ def encode_const_plain(val):
     if isinstance(val, int) and -128 <= val <= 127:
         return bytes([TYPE_SMALLINT, val & 0xFF])
     if isinstance(val, (int, float)):
-        return bytes([TYPE_NUMBER]) + struct.pack('<d', float(val))
+        fval = float(val)
+        try:
+            f32_roundtrip = struct.unpack('<f', struct.pack('<f', fval))[0]
+        except OverflowError:
+            f32_roundtrip = None
+        if f32_roundtrip == fval and fval == fval:
+            return bytes([TYPE_FLOAT32]) + struct.pack('<f', fval)
+        return bytes([TYPE_NUMBER]) + struct.pack('<d', fval)
     if isinstance(val, str):
         enc = val.encode('utf-8')
         return bytes([TYPE_STRING]) + write_uvarint(len(enc)) + enc
