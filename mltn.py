@@ -11,6 +11,7 @@ TYPE_STRING   = 3
 TYPE_FUNC     = 4
 TYPE_SMALLINT = 5
 TYPE_FLOAT32  = 6
+TYPE_STRREF   = 7
 
 def write_uvarint(n):
     out = bytearray()
@@ -249,7 +250,7 @@ def encode_opcode_chain(op_list, proto_seed, marker=None, dict_marker=None, dict
         prev = op & 0xFF
     return out
 
-def encode_const_plain(val):
+def encode_const_plain(val, string_pool_index=None):
     if val is None:
         return bytes([TYPE_NIL])
     if isinstance(val, bool):
@@ -266,14 +267,38 @@ def encode_const_plain(val):
             return bytes([TYPE_FLOAT32]) + struct.pack('<f', fval)
         return bytes([TYPE_NUMBER]) + struct.pack('<d', fval)
     if isinstance(val, str):
+        if string_pool_index is not None:
+            return bytes([TYPE_STRREF]) + write_uvarint(string_pool_index)
         enc = val.encode('utf-8')
         return bytes([TYPE_STRING]) + write_uvarint(len(enc)) + enc
     return bytes([TYPE_NIL])
 
-def encode_const_block(consts, const_seed):
+def build_string_pool(all_strings):
+    seen = {}
+    pool = []
+    for s in all_strings:
+        if s not in seen:
+            seen[s] = len(pool)
+            pool.append(s)
+    return pool, seen
+
+def encode_string_pool_block(pool, pool_seed):
+    body = bytearray()
+    body += write_uvarint(len(pool))
+    for s in pool:
+        enc = s.encode('utf-8')
+        body += write_uvarint(len(enc))
+        body += enc
+    cipher = MltnCipherStream(pool_seed)
+    return cipher.process(bytes(body))
+
+def encode_const_block(consts, const_seed, string_index_map=None):
     body = bytearray()
     for c in consts:
-        body += encode_const_plain(c)
+        if string_index_map is not None and isinstance(c, str):
+            body += encode_const_plain(c, string_pool_index=string_index_map[c])
+        else:
+            body += encode_const_plain(c)
     cipher = MltnCipherStream(const_seed)
     return cipher.process(bytes(body))
 

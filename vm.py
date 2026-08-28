@@ -156,7 +156,14 @@ class FuncProto:
         self.upvals.append((kind, index))
         return len(self.upvals) - 1
 
-    def serialize(self):
+    def collect_strings(self, acc):
+        for c in self.consts:
+            if isinstance(c, str):
+                acc.append(c)
+        for p in self.protos:
+            p.collect_strings(acc)
+
+    def serialize(self, string_index_map=None):
         data = bytes([int(self.is_vararg), self.params])
         data += mltn.write_uvarint(len(self.upvals))
         for kind, idx in self.upvals:
@@ -164,11 +171,11 @@ class FuncProto:
             data += mltn.write_uvarint(idx)
         data += mltn.write_enc_uvarint(len(self.protos))
         for p in self.protos:
-            s = p.serialize()
+            s = p.serialize(string_index_map=string_index_map)
             data += mltn.write_enc_uvarint(len(s))
             data += s
         const_seed = mltn.gen_seed()
-        const_block = mltn.encode_const_block(self.consts, const_seed)
+        const_block = mltn.encode_const_block(self.consts, const_seed, string_index_map=string_index_map)
         data += mltn.write_enc_uvarint(len(self.consts))
         data += bytes([const_seed])
         data += mltn.write_uvarint(len(const_block))
@@ -203,6 +210,50 @@ class FuncProto:
 
         for ins in self.instructions:
             data += mltn.encode_instruction_fields(ins.a, ins.b, ins.c)
+        return data
+
+    def serialize_legacy(self):
+        # Pre-MLTN format: fixed-width u16 fields, plaintext strings/numbers,
+        # only opcodes are LCG-encrypted. Not wired into the CLI - kept here
+        # for size/behavior comparison against the MLTN-compressed format.
+        def legacy_encode_const(val):
+            if val is None:
+                return bytes([0])
+            if isinstance(val, bool):
+                return bytes([1, 1 if val else 0])
+            if isinstance(val, (int, float)):
+                return bytes([2]) + struct.pack('<d', float(val))
+            if isinstance(val, str):
+                enc = val.encode('utf-8')
+                return bytes([3]) + struct.pack('<H', len(enc)) + enc
+            return bytes([0])
+
+        def legacy_instruction_bytes(op, a, b, c):
+            out = bytes([op & 0xFF])
+            for v in (a, b, c):
+                if v is not None:
+                    out += struct.pack('<H', v & 0xFFFF)
+            return out
+
+        data = bytes([int(self.is_vararg), self.params])
+        data += struct.pack('<H', len(self.upvals))
+        for kind, idx in self.upvals:
+            data += bytes([kind]) + struct.pack('<H', idx)
+        data += struct.pack('<H', len(self.protos))
+        for p in self.protos:
+            s = p.serialize_legacy()
+            data += struct.pack('<I', len(s)) + s
+        data += struct.pack('<H', len(self.consts))
+        for c in self.consts:
+            data += legacy_encode_const(c)
+        data += struct.pack('<H', len(self.instructions))
+        proto_seed = mltn.gen_seed()
+        data += bytes([proto_seed])
+        encoded_ops = mltn.encode_opcode_chain(
+            [ins.op for ins in self.instructions], proto_seed
+        )
+        for ins, enc_op in zip(self.instructions, encoded_ops):
+            data += legacy_instruction_bytes(enc_op, ins.a, ins.b, ins.c)
         return data
 
 class Scope:
@@ -907,7 +958,22 @@ class Compiler:
             self.emit(OP_RETURN_NONE, 0)
 
     def serialize(self):
-        return self.proto.serialize()
+        all_strings = []
+        self.proto.collect_strings(all_strings)
+        pool, string_index_map = mltn.build_string_pool(all_strings)
+        pool_seed = mltn.gen_seed()
+        pool_block = mltn.encode_string_pool_block(pool, pool_seed)
+
+        body = self.proto.serialize(string_index_map=string_index_map)
+
+        header = bytes([pool_seed])
+        header += mltn.write_uvarint(len(pool_block))
+        header += pool_block
+        return header + body
+
+    def serialize_legacy(self):
+        # Pre-MLTN format, not wired into CLI. See FuncProto.serialize_legacy.
+        return self.proto.serialize_legacy()
 
 
 KEYWORDS = {
@@ -1512,7 +1578,7 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
     ok_v      = N(); err_v     = N()
     ubox_v    = N(); upidx_v   = N()
 
-    p_d = N(); p_i = N(); p_v = N(); p_t = N(); p_j = N(); p_s = N()
+    p_d = N(); p_i = N(); p_v = N(); p_t = N(); p_j = N(); p_s = N(); p_k = N()
     p_bytes = N(); p_sign = N(); p_exp = N(); p_mant = N(); p_n = N(); p_ln = N()
     p_f32b = N(); p_f32sign = N(); p_f32exp = N(); p_f32mant = N(); p_f32n = N()
     p_raw = N(); p_newstate = N(); p_mask = N(); p_op = N(); p_a = N(); p_b = N(); p_cc = N(); p_o = N()
@@ -1535,6 +1601,9 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
     p_tj1 = N(); p_tj2 = N(); p_tj3 = N()
     p_cblen = N(); p_cbb = N(); p_cbi = N(); p_pseed2 = N(); p_rstate2 = N(); p_rprev2 = N()
     p_smv = N()
+    p_strref = N(); p_strpool = N(); p_poolseed = N(); p_poollen = N(); p_poolraw = N()
+    p_poolcount = N(); p_poolidx = N(); p_poolslen = N(); p_poolstr = N(); p_poolst = N(); p_poolpv = N()
+    p_bodystart = N(); p_pst = N(); p_ppv = N(); p_ns = N(); p_mk = N()
     dec_v = N()
     p_marker = N(); p_dmarker = N(); p_opslen = N(); p_dictlen = N()
     p_opsbytes = N(); p_dictbytes = N(); p_rst = N(); p_rpv = N()
@@ -1610,6 +1679,32 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
         f"{p_st}={p_st}+7 "
         f"end "
         f"return {p_res},{p_i} end "
+        f"local {p_strpool} "
+        f"local {p_bodystart} "
+        f"do "
+        f"local {p_poolseed}={data_v}[1] "
+        f"local {p_poollen},{p_poolst}={uv_v}({data_v},2) "
+        f"local {p_poolraw}={{}} "
+        f"local {p_pst}={p_poolseed} local {p_ppv}={p_poolseed} "
+        f"for {p_j}=0,{p_poollen}-1 do "
+        f"local {p_ns}=({p_pst}*1103515245+12345)%256 "
+        f"local {p_mk}=bit32.bxor({p_ns},({p_ppv}*31)%256)%256 "
+        f"{p_poolraw}[{p_j}+1]=bit32.bxor({data_v}[{p_poolst}+{p_j}],{p_mk})%256 "
+        f"{p_pst}={p_ns} {p_ppv}={p_mk} "
+        f"end "
+        f"local {p_poolidx}=1 "
+        f"local {p_poolcount} {p_poolcount},{p_poolidx}={uv_v}({p_poolraw},{p_poolidx}) "
+        f"{p_strpool}={{}} "
+        f"for {p_j}=1,{p_poolcount} do "
+        f"local {p_poolslen},{p_ni}={uv_v}({p_poolraw},{p_poolidx}) "
+        f"{p_poolidx}={p_ni} "
+        f"local {p_poolstr}='' "
+        f"for {p_k}=0,{p_poolslen}-1 do {p_poolstr}={p_poolstr}..string.char({p_poolraw}[{p_poolidx}+{p_k}]) end "
+        f"{p_poolidx}={p_poolidx}+{p_poolslen} "
+        f"{p_strpool}[{p_j}]={p_poolstr} "
+        f"end "
+        f"{p_bodystart}={p_poolst}+{p_poollen} "
+        f"end "
         f"local function {euv_v}({p_d},{p_i}) "
         f"local {p_eseed}={p_d}[{p_i}] {p_i}={p_i}+1 "
         f"local {p_estate}={p_eseed} local {p_eprev}={p_eseed} "
@@ -1647,6 +1742,10 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
         f"local {p_smv}={p_d}[{p_i}] {p_i}={p_i}+1 "
         f"if {p_smv}>=128 then {p_smv}={p_smv}-256 end "
         f"return {p_smv},{p_i} "
+        f"end "
+        f"if {p_t}==7 then "
+        f"local {p_strref},{p_i}={uv_v}({p_d},{p_i}) "
+        f"return {p_strpool}[{p_strref}+1],{p_i} "
         f"end "
         f"if {p_t}==6 then "
         f"local {p_f32b}={{}} for {p_j}=0,3 do {p_f32b}[{p_j}+1]={p_d}[{p_i}+{p_j}] end {p_i}={p_i}+4 "
@@ -1938,7 +2037,7 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
         f"end "
 
         f"local {fn_v} "
-        f"do local {i_v},{j_v}={ldp_v}({data_v},1) {fn_v}=function(...) return {exec_v}({i_v},{{}},...) end end "
+        f"do local {i_v},{j_v}={ldp_v}({data_v},{p_bodystart}) {fn_v}=function(...) return {exec_v}({i_v},{{}},...) end end "
         f"return {fn_v}(...) "
     )
     return lua
