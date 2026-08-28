@@ -2,6 +2,7 @@ import struct
 import secrets
 from vm_opcodes import make_opmap, CANONICAL_OPS
 import mltn
+import mld
 
 _DEFAULT_OPMAP = make_opmap()
 
@@ -100,6 +101,7 @@ def encode_opcode_chain(op_list, proto_seed, marker=None):
 
 REPEAT_MARKER = None
 DICT_MARKER = None
+FIELD_DICT_MARKER = None
 
 def encode_stream_with_state(values, state, prev):
     out = []
@@ -172,6 +174,72 @@ class FuncProto:
         data += mltn.write_enc_uvarint(len(self.protos))
         for p in self.protos:
             s = p.serialize(string_index_map=string_index_map)
+            data += mltn.write_enc_uvarint(len(s))
+            data += s
+        const_seed = mltn.gen_seed()
+        const_block = mltn.encode_const_block(self.consts, const_seed, string_index_map=string_index_map)
+        data += mltn.write_enc_uvarint(len(self.consts))
+        data += bytes([const_seed])
+        data += mltn.write_uvarint(len(const_block))
+        data += const_block
+        data += mltn.write_enc_uvarint(len(self.instructions))
+        proto_seed = mltn.gen_seed()
+        data += bytes([proto_seed])
+
+        op_values = [ins.op for ins in self.instructions]
+        field_dict_marker = (
+            FIELD_DICT_MARKER if FIELD_DICT_MARKER is not None
+            else mld.pick_field_dict_marker(op_values)
+        )
+        new_op_stream, field_bytes, field_dict_body = mld.encode_instructions_with_field_dict(
+            self.instructions, op_values, field_dict_marker
+        )
+        data += bytes([field_dict_marker])
+
+        marker, dict_marker = (
+            (REPEAT_MARKER, DICT_MARKER)
+            if REPEAT_MARKER is not None and DICT_MARKER is not None
+            else mltn.pick_two_markers(op_values + [field_dict_marker])
+        )
+        data += bytes([marker, dict_marker])
+
+        rle_stream = mltn.rle_encode_ops(new_op_stream, marker, dict_marker)
+        atoms = mltn._split_atoms(rle_stream, marker)
+        dictionary = mltn.build_dictionary(atoms)
+        dict_encoded = mltn.dict_encode_atoms(atoms, dictionary, dict_marker)
+        dict_body = mltn.serialize_dictionary(dictionary, marker)
+
+        state = proto_seed & 0xFF
+        prev = proto_seed & 0xFF
+        enc_ops, state, prev = encode_stream_with_state(dict_encoded, state, prev)
+        enc_dict, state, prev = encode_stream_with_state(list(dict_body), state, prev)
+        enc_fdict, state, prev = encode_stream_with_state(list(field_dict_body), state, prev)
+        enc_fields, state, prev = encode_stream_with_state(list(field_bytes), state, prev)
+
+        data += mltn.write_uvarint(len(enc_ops))
+        data += bytes(enc_ops)
+        data += mltn.write_uvarint(len(enc_dict))
+        data += bytes(enc_dict)
+        data += mltn.write_uvarint(len(enc_fdict))
+        data += bytes(enc_fdict)
+        data += mltn.write_uvarint(len(enc_fields))
+        data += bytes(enc_fields)
+        return data
+
+    def serialize_mltn_only(self, string_index_map=None):
+        # MLTN without MLD: varints, encrypted counters, encrypted const block,
+        # string pool dedup, opcode RLE+dictionary compression - but instruction
+        # register fields (a,b,c) are plain varints, uncompressed by any dictionary.
+        # Not wired into the CLI - kept for comparison against full serialize()
+        # (MLTN+MLD) and serialize_legacy() (no compression at all).
+        data = bytes([int(self.is_vararg), self.params])
+        data += mltn.write_uvarint(len(self.upvals))
+        for kind, idx in self.upvals:
+            data += bytes([kind])
+            data += mltn.write_uvarint(idx)
+        data += mltn.write_enc_uvarint(len(self.protos))
+        for p in self.protos:
+            s = p.serialize_mltn_only(string_index_map=string_index_map)
             data += mltn.write_enc_uvarint(len(s))
             data += s
         const_seed = mltn.gen_seed()
@@ -971,6 +1039,21 @@ class Compiler:
         header += pool_block
         return header + body
 
+    def serialize_mltn_only(self):
+        # MLTN without MLD, not wired into CLI. See FuncProto.serialize_mltn_only.
+        all_strings = []
+        self.proto.collect_strings(all_strings)
+        pool, string_index_map = mltn.build_string_pool(all_strings)
+        pool_seed = mltn.gen_seed()
+        pool_block = mltn.encode_string_pool_block(pool, pool_seed)
+
+        body = self.proto.serialize_mltn_only(string_index_map=string_index_map)
+
+        header = bytes([pool_seed])
+        header += mltn.write_uvarint(len(pool_block))
+        header += pool_block
+        return header + body
+
     def serialize_legacy(self):
         # Pre-MLTN format, not wired into CLI. See FuncProto.serialize_legacy.
         return self.proto.serialize_legacy()
@@ -1566,6 +1649,10 @@ def _patch_global_ops(opmap):
     marker, dict_marker = mltn.pick_two_markers(opmap.values())
     g['REPEAT_MARKER'] = marker
     g['DICT_MARKER'] = dict_marker
+    field_dict_marker = mld.pick_field_dict_marker(
+        list(opmap.values()) + [marker, dict_marker]
+    )
+    g['FIELD_DICT_MARKER'] = field_dict_marker
 
 
 def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, detect_var=None):
@@ -1613,6 +1700,526 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
     p_out = N()
     p_fi = N()
     p_rv = N()
+    p_fdictmarker = N(); p_fielddictlen = N(); p_fielddictbytes = N(); p_fielddict = N()
+    p_fdn = N(); p_fdfi = N(); p_fdop = N(); p_fdflen = N(); p_fdfields = N(); p_fdk = N()
+    p_fieldslen = N(); p_fieldsbytes = N(); p_fpos = N()
+    p_logops = N(); p_lk = N(); p_lo = N(); p_fdidx = N(); p_fdent = N()
+
+    om = opmap if opmap is not None else _DEFAULT_OPMAP
+    def O(name): return om[name]
+
+    uv_v = N()
+    euv_v = N()
+    p_eseed = N(); p_estate = N(); p_eprev = N(); p_eres = N(); p_esh = N()
+    p_eraw = N(); p_enewstate = N(); p_emask = N(); p_eb = N()
+
+    AB2  = f"{p_a},{p_i}={uv_v}({p_d},{p_i}) {p_b},{p_i}={uv_v}({p_d},{p_i}) "
+    AB2C = f"{p_a},{p_i}={uv_v}({p_d},{p_i}) {p_b},{p_i}={uv_v}({p_d},{p_i}) {p_cc},{p_i}={uv_v}({p_d},{p_i}) "
+    A2   = f"{p_a},{p_i}={uv_v}({p_d},{p_i}) "
+
+    def ldi_cases():
+        groups_ab2 = [
+            ('LOAD_CONST','LOAD_VAR','SET_VAR','LOAD_GLOBAL','SET_GLOBAL','CLOSURE'),
+            ('LOAD_UPVAL','SET_UPVAL'),
+            ('RETURN','VARARG'),
+            ('JUMP_FALSE','JUMP_TRUE','JUMP_FALSE_NK','JUMP_TRUE_NK'),
+            ('UNM','LEN','NOT','BNOT'),
+            ('FOR_PREP','FOR_LOOP','TFOR_LOOP'),
+            ('DUP','MOVE'),
+        ]
+        groups_ab2c = [
+            ('GET_TABLE','SET_TABLE','SET_LIST'),
+            ('SET_LIST_MULTI',),
+            ('GET_FIELD','SET_FIELD'),
+            ('ADD','SUB','MUL','DIV','MOD','POW','CONCAT','IDIV','AND','OR',
+             'BAND','BOR','BXOR','SHL','SHR'),
+            ('EQ','NE','LT','LE','GT','GE'),
+            ('CALL','CALL_METHOD'),
+            ('TFOR_CALL',),
+        ]
+        groups_a2 = [('NEW_TABLE',), ('RETURN_NONE',), ('POP',), ('JUMP',), ('CLOSE_UPVAL',)]
+
+        lines = []
+        first = True
+        for grp in groups_ab2:
+            cond = " or ".join(f"{p_o}=={O(n)}" for n in grp)
+            kw = "if" if first else "elseif"
+            lines.append(f"{kw} {cond} then {AB2}")
+            first = False
+        for grp in groups_ab2c:
+            cond = " or ".join(f"{p_o}=={O(n)}" for n in grp)
+            lines.append(f"elseif {cond} then {AB2C}")
+        for grp in groups_a2:
+            cond = " or ".join(f"{p_o}=={O(n)}" for n in grp)
+            lines.append(f"elseif {cond} then {A2}")
+        lines.append("end")
+        return " ".join(lines)
+
+    dexpr = data_expr if data_expr is not None else "{}"
+
+    lua = (
+        f"local {data_v}={dexpr} "
+        f"local function {u16_v}({p_d},{p_i}) return {p_d}[{p_i}]+({p_d}[{p_i}+1]*256) end "
+        f"local function {u16s_v}({p_d},{p_i}) local {p_v}={p_d}[{p_i}]+({p_d}[{p_i}+1]*256) if {p_v}>=32768 then {p_v}={p_v}-65536 end return {p_v} end "
+        f"local function {uv_v}({p_d},{p_i}) "
+        f"local {p_res}=0 local {p_st}=0 "
+        f"while true do "
+        f"local {p_x}={p_d}[{p_i}] {p_i}={p_i}+1 "
+        f"{p_res}={p_res}+bit32.lshift(bit32.band({p_x},0x7F),{p_st}) "
+        f"if bit32.band({p_x},0x80)==0 then break end "
+        f"{p_st}={p_st}+7 "
+        f"end "
+        f"return {p_res},{p_i} end "
+        f"local {p_strpool} "
+        f"local {p_bodystart} "
+        f"do "
+        f"local {p_poolseed}={data_v}[1] "
+        f"local {p_poollen},{p_poolst}={uv_v}({data_v},2) "
+        f"local {p_poolraw}={{}} "
+        f"local {p_pst}={p_poolseed} local {p_ppv}={p_poolseed} "
+        f"for {p_j}=0,{p_poollen}-1 do "
+        f"local {p_ns}=({p_pst}*1103515245+12345)%256 "
+        f"local {p_mk}=bit32.bxor({p_ns},({p_ppv}*31)%256)%256 "
+        f"{p_poolraw}[{p_j}+1]=bit32.bxor({data_v}[{p_poolst}+{p_j}],{p_mk})%256 "
+        f"{p_pst}={p_ns} {p_ppv}={p_mk} "
+        f"end "
+        f"local {p_poolidx}=1 "
+        f"local {p_poolcount} {p_poolcount},{p_poolidx}={uv_v}({p_poolraw},{p_poolidx}) "
+        f"{p_strpool}={{}} "
+        f"for {p_j}=1,{p_poolcount} do "
+        f"local {p_poolslen},{p_ni}={uv_v}({p_poolraw},{p_poolidx}) "
+        f"{p_poolidx}={p_ni} "
+        f"local {p_poolstr}='' "
+        f"for {p_k}=0,{p_poolslen}-1 do {p_poolstr}={p_poolstr}..string.char({p_poolraw}[{p_poolidx}+{p_k}]) end "
+        f"{p_poolidx}={p_poolidx}+{p_poolslen} "
+        f"{p_strpool}[{p_j}]={p_poolstr} "
+        f"end "
+        f"{p_bodystart}={p_poolst}+{p_poollen} "
+        f"end "
+        f"local function {euv_v}({p_d},{p_i}) "
+        f"local {p_eseed}={p_d}[{p_i}] {p_i}={p_i}+1 "
+        f"local {p_estate}={p_eseed} local {p_eprev}={p_eseed} "
+        f"local {p_eres}=0 local {p_esh}=0 "
+        f"while true do "
+        f"local {p_eraw}={p_d}[{p_i}] {p_i}={p_i}+1 "
+        f"local {p_enewstate}=({p_estate}*1103515245+12345)%256 "
+        f"local {p_emask}=bit32.bxor({p_enewstate},({p_eprev}*31)%256)%256 "
+        f"local {p_eb}=bit32.bxor({p_eraw},{p_emask})%256 "
+        f"{p_estate}={p_enewstate} {p_eprev}={p_emask} "
+        f"{p_eres}={p_eres}+bit32.lshift(bit32.band({p_eb},0x7F),{p_esh}) "
+        f"if bit32.band({p_eb},0x80)==0 then break end "
+        f"{p_esh}={p_esh}+7 "
+        f"end "
+        f"return {p_eres},{p_i} end "
+        f"local function {ldc_v}({p_d},{p_i}) "
+        f"local {p_t}={p_d}[{p_i}] {p_i}={p_i}+1 "
+        f"if {p_t}==0 then return nil,{p_i} "
+        f"elseif {p_t}==1 then return {p_d}[{p_i}]==1,{p_i}+1 "
+        f"elseif {p_t}==2 then "
+        f"local {p_bytes}={{}} for {p_j}=0,7 do {p_bytes}[{p_j}+1]={p_d}[{p_i}+{p_j}] end {p_i}={p_i}+8 "
+        f"local {p_sign}={p_bytes}[8]>=128 and 1 or 0 "
+        f"local {p_exp}=(({p_bytes}[8]%128)*16)+math.floor({p_bytes}[7]/16) "
+        f"local {p_mant}={p_bytes}[7]%16 "
+        f"for {p_j}=6,1,-1 do {p_mant}={p_mant}*256+{p_bytes}[{p_j}] end "
+        f"if {p_exp}==2047 then "
+        f"if {p_mant}==0 then return ({p_sign}==1 and -math.huge or math.huge),{p_i} "
+        f"else return (0/0),{p_i} end end "
+        f"local {p_n} "
+        f"if {p_exp}==0 then {p_n}={p_mant}*(2^(-1074)) "
+        f"else {p_n}=(1+{p_mant}*(2^(-52)))*(2^({p_exp}-1023)) end "
+        f"return ({p_sign}==1 and -{p_n} or {p_n}),{p_i} "
+        f"end "
+        f"if {p_t}==5 then "
+        f"local {p_smv}={p_d}[{p_i}] {p_i}={p_i}+1 "
+        f"if {p_smv}>=128 then {p_smv}={p_smv}-256 end "
+        f"return {p_smv},{p_i} "
+        f"end "
+        f"if {p_t}==7 then "
+        f"local {p_strref},{p_i}={uv_v}({p_d},{p_i}) "
+        f"return {p_strpool}[{p_strref}+1],{p_i} "
+        f"end "
+        f"if {p_t}==6 then "
+        f"local {p_f32b}={{}} for {p_j}=0,3 do {p_f32b}[{p_j}+1]={p_d}[{p_i}+{p_j}] end {p_i}={p_i}+4 "
+        f"local {p_f32sign}={p_f32b}[4]>=128 and 1 or 0 "
+        f"local {p_f32exp}=(({p_f32b}[4]%128)*2)+math.floor({p_f32b}[3]/128) "
+        f"local {p_f32mant}=(({p_f32b}[3]%128)*65536)+({p_f32b}[2]*256)+{p_f32b}[1] "
+        f"if {p_f32exp}==255 then "
+        f"if {p_f32mant}==0 then return ({p_f32sign}==1 and -math.huge or math.huge),{p_i} "
+        f"else return (0/0),{p_i} end end "
+        f"local {p_f32n} "
+        f"if {p_f32exp}==0 then {p_f32n}={p_f32mant}*(2^(-149)) "
+        f"else {p_f32n}=(1+{p_f32mant}*(2^(-23)))*(2^({p_f32exp}-127)) end "
+        f"return ({p_f32sign}==1 and -{p_f32n} or {p_f32n}),{p_i} "
+        f"end "
+        f"local {p_ln},{p_i}={uv_v}({p_d},{p_i}) "
+        f"local {p_s}='' for {p_j}=0,{p_ln}-1 do {p_s}={p_s}..string.char({p_d}[{p_i}+{p_j}]) end "
+        f"return {p_s},{p_i}+{p_ln} end "
+        f"local function {dec_v}({p_d},{p_i},{p_ln},{p_rst},{p_rpv}) "
+        f"local {p_out}={{}} "
+        f"for {p_j}=0,{p_ln}-1 do "
+        f"local {p_raw}={p_d}[{p_i}+{p_j}] "
+        f"local {p_newstate}=({p_rst}*1103515245+12345)%256 "
+        f"local {p_mask}=bit32.bxor({p_newstate},({p_rpv}*31)%256)%256 "
+        f"local {p_rv}=bit32.bxor({p_raw},{p_mask})%256 "
+        f"{p_out}[{p_j}+1]={p_rv} "
+        f"{p_rst}={p_newstate} {p_rpv}={p_rv} "
+        f"end "
+        f"return {p_out},{p_rst},{p_rpv} end "
+        f"local function {ldi_v}({p_d},{p_i},{p_op}) "
+        f"local {p_a},{p_b},{p_cc}=nil,nil,nil "
+        f"local {p_o}={p_op} "
+        f"{ldi_cases()} "
+        f"return {{{p_op},{p_a},{p_b},{p_cc}}},{p_i} end "
+        f"local function {ldp_v}({p_d},{p_i}) "
+        f"local {p_isvararg}={p_d}[{p_i}]==1 local {p_params}={p_d}[{p_i}+1] {p_i}={p_i}+2 "
+        f"local {p_nupvals} {p_nupvals},{p_i}={uv_v}({p_d},{p_i}) "
+        f"local {p_updescs}={{}} "
+        f"for {p_loopu}=1,{p_nupvals} do "
+        f"local {p_kind}={p_d}[{p_i}] {p_i}={p_i}+1 "
+        f"local {p_idx} {p_idx},{p_i}={uv_v}({p_d},{p_i}) "
+        f"{p_updescs}[#{p_updescs}+1]={{kind={p_kind},idx={p_idx}}} "
+        f"end "
+        f"local {p_nprotos} {p_nprotos},{p_i}={euv_v}({p_d},{p_i}) "
+        f"local {p_protos}={{}} "
+        f"for {p_loopp}=1,{p_nprotos} do "
+        f"local {p_sz} {p_sz},{p_i}={euv_v}({p_d},{p_i}) "
+        f"local {p_p},{p_ni}={ldp_v}({p_d},{p_i}) {p_i}={p_ni} "
+        f"{p_protos}[#{p_protos}+1]={p_p} "
+        f"end "
+        f"local {p_nconsts} {p_nconsts},{p_i}={euv_v}({p_d},{p_i}) "
+        f"local {p_pseed}={p_d}[{p_i}] {p_i}={p_i}+1 "
+        f"local {p_cblen} {p_cblen},{p_i}={uv_v}({p_d},{p_i}) "
+        f"local {p_cbb}={{}} "
+        f"local {p_rstate}={p_pseed} local {p_rprev}={p_pseed} "
+        f"for {p_ci}=1,{p_cblen} do "
+        f"local {p_newstate}=({p_rstate}*1103515245+12345)%256 "
+        f"local {p_mask}=bit32.bxor({p_newstate},({p_rprev}*31)%256)%256 "
+        f"local {p_rawc}=bit32.bxor({p_d}[{p_i}+{p_ci}-1],{p_mask})%256 "
+        f"{p_cbb}[{p_ci}]={p_rawc} "
+        f"{p_rstate}={p_newstate} {p_rprev}={p_mask} "
+        f"end "
+        f"{p_i}={p_i}+{p_cblen} "
+        f"local {p_cbi}=1 "
+        f"local {p_consts}={{}} "
+        f"for {p_ci}=1,{p_nconsts} do local {p_cv},{p_ni}={ldc_v}({p_cbb},{p_cbi}) {p_consts}[{p_ci}]={p_cv} {p_cbi}={p_ni} end "
+        f"local {p_nins} {p_nins},{p_i}={euv_v}({p_d},{p_i}) "
+        f"local {p_pseed2}={p_d}[{p_i}] {p_i}={p_i}+1 "
+        f"local {p_fdictmarker}={p_d}[{p_i}] {p_i}={p_i}+1 "
+        f"local {p_marker}={p_d}[{p_i}] {p_i}={p_i}+1 "
+        f"local {p_dmarker}={p_d}[{p_i}] {p_i}={p_i}+1 "
+        f"local {p_opslen} {p_opslen},{p_i}={uv_v}({p_d},{p_i}) "
+        f"local {p_opsbytes},{p_rst},{p_rpv}={dec_v}({p_d},{p_i},{p_opslen},{p_pseed2},{p_pseed2}) "
+        f"{p_i}={p_i}+{p_opslen} "
+        f"local {p_dictlen} {p_dictlen},{p_i}={uv_v}({p_d},{p_i}) "
+        f"local {p_dictbytes},{p_rst},{p_rpv}={dec_v}({p_d},{p_i},{p_dictlen},{p_rst},{p_rpv}) "
+        f"{p_i}={p_i}+{p_dictlen} "
+        f"local {p_fielddictlen} {p_fielddictlen},{p_i}={uv_v}({p_d},{p_i}) "
+        f"local {p_fielddictbytes},{p_rst},{p_rpv}={dec_v}({p_d},{p_i},{p_fielddictlen},{p_rst},{p_rpv}) "
+        f"{p_i}={p_i}+{p_fielddictlen} "
+        f"local {p_fieldslen} {p_fieldslen},{p_i}={uv_v}({p_d},{p_i}) "
+        f"local {p_fieldsbytes},{p_rst},{p_rpv}={dec_v}({p_d},{p_i},{p_fieldslen},{p_rst},{p_rpv}) "
+        f"{p_i}={p_i}+{p_fieldslen} "
+        f"local {p_fpos}=1 "
+        f"local {p_fdn} {p_fdn},{p_fdfi}={uv_v}({p_fielddictbytes},1) "
+        f"local {p_fielddict}={{}} "
+        f"for {p_fdk}=1,{p_fdn} do "
+        f"local {p_fdop}={p_fielddictbytes}[{p_fdfi}] {p_fdfi}={p_fdfi}+1 "
+        f"local {p_fdflen}={p_fielddictbytes}[{p_fdfi}] {p_fdfi}={p_fdfi}+1 "
+        f"local {p_fdfields}={{}} "
+        f"for {p_j}=1,{p_fdflen} do "
+        f"local {p_v} {p_v},{p_fdfi}={uv_v}({p_fielddictbytes},{p_fdfi}) "
+        f"{p_fdfields}[{p_j}]={p_v} "
+        f"end "
+        f"{p_fielddict}[{p_fdk}]={{{p_fdop},{p_fdfields}[1],{p_fdfields}[2],{p_fdfields}[3]}} "
+        f"end "
+        f"local {p_dn} {p_dn},{p_dfi}={uv_v}({p_dictbytes},1) "
+        f"local {p_dictionary}={{}} "
+        f"for {p_dk}=1,{p_dn} do "
+        f"local {p_dplen} {p_dplen},{p_dfi}={uv_v}({p_dictbytes},{p_dfi}) "
+        f"local {p_dpat}={{}} "
+        f"for {p_j}=1,{p_dplen} do {p_dpat}[{p_j}]={p_dictbytes}[{p_dfi}] {p_dfi}={p_dfi}+1 end "
+        f"{p_dictionary}[{p_dk}]={p_dpat} "
+        f"end "
+        f"local {p_flatstream}={{}} "
+        f"{p_fi}=1 "
+        f"while {p_fi}<=#{p_opsbytes} do "
+        f"local {p_v}={p_opsbytes}[{p_fi}] "
+        f"if {p_v}=={p_dmarker} then "
+        f"local {p_didx}={p_opsbytes}[{p_fi}+1] "
+        f"local {p_dpat}={p_dictionary}[{p_didx}+1] "
+        f"for {p_j}=1,#{p_dpat} do {p_flatstream}[#{p_flatstream}+1]={p_dpat}[{p_j}] end "
+        f"{p_fi}={p_fi}+3 "
+        f"else "
+        f"{p_flatstream}[#{p_flatstream}+1]={p_v} "
+        f"{p_fi}={p_fi}+1 "
+        f"end "
+        f"end "
+        f"local {p_ops}={{}} "
+        f"{p_rlei}=1 "
+        f"while {p_rlei}<=#{p_flatstream} do "
+        f"local {p_v}={p_flatstream}[{p_rlei}] "
+        f"if {p_v}=={p_marker} then "
+        f"local {p_rop}={p_flatstream}[{p_rlei}+1] "
+        f"local {p_rcount}={p_flatstream}[{p_rlei}+2] "
+        f"for {p_rk}=1,{p_rcount} do {p_ops}[#{p_ops}+1]={p_rop} end "
+        f"{p_rlei}={p_rlei}+3 "
+        f"else "
+        f"{p_ops}[#{p_ops}+1]={p_v} "
+        f"{p_rlei}={p_rlei}+1 "
+        f"end "
+        f"end "
+        f"local {p_logops}={{}} "
+        f"{p_lk}=1 "
+        f"while #{p_logops}<{p_nins} and {p_lk}<=#{p_ops} do "
+        f"local {p_v}={p_ops}[{p_lk}] "
+        f"if {p_v}=={p_fdictmarker} then "
+        f"local {p_fdidx}={p_ops}[{p_lk}+1] "
+        f"local {p_fdent}={p_fielddict}[{p_fdidx}+1] "
+        f"{p_logops}[#{p_logops}+1]={{fromdict=true,op={p_fdent}[1],a={p_fdent}[2],b={p_fdent}[3],c={p_fdent}[4]}} "
+        f"{p_lk}={p_lk}+2 "
+        f"else "
+        f"{p_logops}[#{p_logops}+1]={{fromdict=false,op={p_v}}} "
+        f"{p_lk}={p_lk}+1 "
+        f"end "
+        f"end "
+        f"local {p_ins}={{}} "
+        f"for {p_ii}=1,{p_nins} do "
+        f"local {p_lo}={p_logops}[{p_ii}] "
+        f"if {p_lo}.fromdict then "
+        f"{p_ins}[{p_ii}]={{{p_lo}.op,{p_lo}.a,{p_lo}.b,{p_lo}.c}} "
+        f"else "
+        f"local {p_iv},{p_ni}={ldi_v}({p_fieldsbytes},{p_fpos},{p_lo}.op) "
+        f"{p_ins}[{p_ii}]={p_iv} {p_fpos}={p_ni} "
+        f"end "
+        f"end "
+        f"return {{is_vararg={p_isvararg},params={p_params},updescs={p_updescs},protos={p_protos},consts={p_consts},ins={p_ins}}},{p_i} end "
+        f"local {env_v}=(getfenv and getfenv(0)) or _ENV or _G or {{}} "
+
+        f"local function {exec_v}({p_proto},{ubox_v},...) "
+        f"local {p_vr}={{}} "
+        f"local {p_rb}={{}} "
+        f"local {p_vtop}=0 "
+        f"local {args_v}={{...}} "
+        f"local {nargs_v}=select('#',...) "
+        f"local {p_va}={{}} "
+        f"local {p_van}=0 "
+        f"if {p_proto}.is_vararg then "
+        f"for {i_v}={p_proto}.params+1,{nargs_v} do {p_va}[{i_v}-{p_proto}.params]={args_v}[{i_v}] end "
+        f"{p_van}={nargs_v}-{p_proto}.params if {p_van}<0 then {p_van}=0 end "
+        f"end "
+        f"for {i_v}=1,{p_proto}.params do {p_vr}[{i_v}-1]={args_v}[{i_v}] end "
+        f"local {consts_v}={p_proto}.consts "
+        f"local {p_ins}={p_proto}.ins "
+        f"local {protos_v}={p_proto}.protos "
+        f"local function {p_getreg}({p_regparam}) local {p_x}={p_rb}[{p_regparam}] if {p_x}~=nil then return {p_x}.v end return {p_vr}[{p_regparam}] end "
+        f"local function {p_setreg}({p_regparam},{p_val}) local {p_x}={p_rb}[{p_regparam}] if {p_x}~=nil then {p_x}.v={p_val} else {p_vr}[{p_regparam}]={p_val} end end "
+        f"local function {p_boxreg}({p_regparam}) "
+        f"local {p_x}={p_rb}[{p_regparam}] "
+        f"if {p_x}==nil then {p_x}={{v={p_vr}[{p_regparam}]}} {p_rb}[{p_regparam}]={p_x} end "
+        f"return {p_x} end "
+        f"local {p_pc}=1 "
+        f"while {p_pc}<=#{p_ins} do "
+        + (
+            f"if {detect_var} then "
+            f"local {p_tj1}={rng.randint(1000,9999)} "
+            f"local {p_tj2}={p_tj1}+{rng.randint(1000,9999)} "
+            f"local {p_tj3}=true "
+            f"while {p_tj3} do {p_tj2}={p_tj2}+1 end "
+            f"end "
+            if detect_var else ""
+        ) +
+        f"local {p_rd}={p_ins}[{p_pc}] "
+        f"local {p_op2}={p_rd}[1] local {p_a2}={p_rd}[2] local {p_b2}={p_rd}[3] local {p_c2}={p_rd}[4] "
+        f"{p_pc}={p_pc}+1 "
+        f"if {p_op2}=={O('LOAD_CONST')} then {p_setreg}({p_a2},{consts_v}[{p_b2}+1]) "
+        f"elseif {p_op2}=={O('LOAD_VAR')} then {p_setreg}({p_a2},{p_getreg}({p_b2})) "
+        f"elseif {p_op2}=={O('SET_VAR')} then {p_setreg}({p_b2},{p_getreg}({p_a2})) "
+        f"elseif {p_op2}=={O('LOAD_GLOBAL')} then {p_setreg}({p_a2},{env_v}[{consts_v}[{p_b2}+1]]) "
+        f"elseif {p_op2}=={O('SET_GLOBAL')} then {env_v}[{consts_v}[{p_a2}+1]]={p_getreg}({p_b2}) "
+        f"elseif {p_op2}=={O('LOAD_UPVAL')} then "
+        f"local {p_x}={ubox_v}[{p_b2}] "
+        f"if {p_x} then {p_setreg}({p_a2},{p_x}.v) else {p_setreg}({p_a2},nil) end "
+        f"elseif {p_op2}=={O('SET_UPVAL')} then "
+        f"local {p_x}={ubox_v}[{p_a2}] "
+        f"if {p_x} then {p_x}.v={p_getreg}({p_b2}) end "
+        f"{p_setreg}({p_a2},{p_getreg}({p_b2})) "
+        f"elseif {p_op2}=={O('GET_TABLE')} then {p_setreg}({p_a2},{p_getreg}({p_b2})[{p_getreg}({p_c2})]) "
+        f"elseif {p_op2}=={O('SET_TABLE')} then {p_getreg}({p_a2})[{p_getreg}({p_b2})]={p_getreg}({p_c2}) "
+        f"elseif {p_op2}=={O('NEW_TABLE')} then {p_setreg}({p_a2},{{}}) "
+        f"elseif {p_op2}=={O('SET_LIST')} then {p_getreg}({p_a2})[{consts_v}[{p_b2}+1]]={p_getreg}({p_c2}) "
+        f"elseif {p_op2}=={O('SET_LIST_MULTI')} then "
+        f"local {p_jj}={p_b2} local {p_kk}={consts_v}[{p_c2}+1] "
+        f"local {p_t}={p_getreg}({p_a2}) "
+        f"while {p_jj}<{p_vtop} do {p_t}[{p_kk}]={p_getreg}({p_jj}) {p_kk}={p_kk}+1 {p_jj}={p_jj}+1 end "
+        f"elseif {p_op2}=={O('GET_FIELD')} then {p_setreg}({p_a2},{p_getreg}({p_b2})[{consts_v}[{p_c2}+1]]) "
+        f"elseif {p_op2}=={O('SET_FIELD')} then {p_getreg}({p_a2})[{consts_v}[{p_b2}+1]]={p_getreg}({p_c2}) "
+        f"elseif {p_op2}=={O('ADD')} then {p_setreg}({p_a2},{p_getreg}({p_b2})+{p_getreg}({p_c2})) "
+        f"elseif {p_op2}=={O('SUB')} then {p_setreg}({p_a2},{p_getreg}({p_b2})-{p_getreg}({p_c2})) "
+        f"elseif {p_op2}=={O('MUL')} then {p_setreg}({p_a2},{p_getreg}({p_b2})*{p_getreg}({p_c2})) "
+        f"elseif {p_op2}=={O('DIV')} then {p_setreg}({p_a2},{p_getreg}({p_b2})/{p_getreg}({p_c2})) "
+        f"elseif {p_op2}=={O('MOD')} then {p_setreg}({p_a2},{p_getreg}({p_b2})%{p_getreg}({p_c2})) "
+        f"elseif {p_op2}=={O('POW')} then {p_setreg}({p_a2},{p_getreg}({p_b2})^{p_getreg}({p_c2})) "
+        f"elseif {p_op2}=={O('CONCAT')} then {p_setreg}({p_a2},{p_getreg}({p_b2})..{p_getreg}({p_c2})) "
+        f"elseif {p_op2}=={O('IDIV')} then {p_setreg}({p_a2},math.floor({p_getreg}({p_b2})/{p_getreg}({p_c2}))) "
+        f"elseif {p_op2}=={O('BAND')} then {p_setreg}({p_a2},bit32.band({p_getreg}({p_b2}),{p_getreg}({p_c2}))) "
+        f"elseif {p_op2}=={O('BOR')} then {p_setreg}({p_a2},bit32.bor({p_getreg}({p_b2}),{p_getreg}({p_c2}))) "
+        f"elseif {p_op2}=={O('BXOR')} then {p_setreg}({p_a2},bit32.bxor({p_getreg}({p_b2}),{p_getreg}({p_c2}))) "
+        f"elseif {p_op2}=={O('BNOT')} then {p_setreg}({p_a2},bit32.bnot({p_getreg}({p_b2}))) "
+        f"elseif {p_op2}=={O('SHL')} then {p_setreg}({p_a2},bit32.lshift({p_getreg}({p_b2}),{p_getreg}({p_c2}))) "
+        f"elseif {p_op2}=={O('SHR')} then {p_setreg}({p_a2},bit32.rshift({p_getreg}({p_b2}),{p_getreg}({p_c2}))) "
+        f"elseif {p_op2}=={O('UNM')} then {p_setreg}({p_a2},-{p_getreg}({p_b2})) "
+        f"elseif {p_op2}=={O('LEN')} then {p_setreg}({p_a2},#{p_getreg}({p_b2})) "
+        f"elseif {p_op2}=={O('NOT')} then {p_setreg}({p_a2},not {p_getreg}({p_b2})) "
+        f"elseif {p_op2}=={O('AND')} then "
+        f"if not {p_getreg}({p_b2}) then {p_setreg}({p_a2},{p_getreg}({p_b2})) else {p_setreg}({p_a2},{p_getreg}({p_c2})) end "
+        f"elseif {p_op2}=={O('OR')} then "
+        f"if {p_getreg}({p_b2}) then {p_setreg}({p_a2},{p_getreg}({p_b2})) else {p_setreg}({p_a2},{p_getreg}({p_c2})) end "
+        f"elseif {p_op2}=={O('EQ')} then {p_setreg}({p_a2},({p_getreg}({p_b2})=={p_getreg}({p_c2}))) "
+        f"elseif {p_op2}=={O('NE')} then {p_setreg}({p_a2},({p_getreg}({p_b2})~={p_getreg}({p_c2}))) "
+        f"elseif {p_op2}=={O('LT')} then {p_setreg}({p_a2},({p_getreg}({p_b2})<{p_getreg}({p_c2}))) "
+        f"elseif {p_op2}=={O('LE')} then {p_setreg}({p_a2},({p_getreg}({p_b2})<={p_getreg}({p_c2}))) "
+        f"elseif {p_op2}=={O('GT')} then {p_setreg}({p_a2},({p_getreg}({p_b2})>{p_getreg}({p_c2}))) "
+        f"elseif {p_op2}=={O('GE')} then {p_setreg}({p_a2},({p_getreg}({p_b2})>={p_getreg}({p_c2}))) "
+        f"elseif {p_op2}=={O('JUMP')} then {p_pc}={p_a2}+1 "
+        f"elseif {p_op2}=={O('JUMP_FALSE')} then if not {p_getreg}({p_a2}) then {p_pc}={p_b2}+1 end "
+        f"elseif {p_op2}=={O('JUMP_TRUE')} then if {p_getreg}({p_a2}) then {p_pc}={p_b2}+1 end "
+        f"elseif {p_op2}=={O('JUMP_FALSE_NK')} then if not {p_getreg}({p_a2}) then {p_pc}={p_b2}+1 end "
+        f"elseif {p_op2}=={O('JUMP_TRUE_NK')} then if {p_getreg}({p_a2}) then {p_pc}={p_b2}+1 end "
+        f"elseif {p_op2}=={O('CALL')} then "
+        f"local {p_fnv}={p_getreg}({p_a2}) local {p_nargs2}={p_b2} local {p_nret}={p_c2} "
+        f"local {p_callargs}={{}} local {p_ncallargs}=0 "
+        f"if {p_nargs2}==255 then "
+        f"local {p_jj}={p_a2}+1 local {p_kk}=1 while {p_jj}<{p_vtop} do {p_callargs}[{p_kk}]={p_getreg}({p_jj}) {p_jj}={p_jj}+1 {p_kk}={p_kk}+1 end "
+        f"{p_ncallargs}={p_kk}-1 "
+        f"else for {p_jj}=1,{p_nargs2} do {p_callargs}[{p_jj}]={p_getreg}({p_a2}+{p_jj}) end {p_ncallargs}={p_nargs2} end "
+        f"if type({p_fnv})=='function' then "
+        f"local {p_res}=table.pack({p_fnv}(table.unpack({p_callargs},1,{p_ncallargs}))) "
+        f"if {p_nret}==255 then "
+        f"for {p_jj}=1,{p_res}.n do {p_setreg}({p_a2}+{p_jj}-1,{p_res}[{p_jj}]) end "
+        f"{p_setreg}({p_a2}+{p_res}.n,nil) "
+        f"{p_vtop}={p_a2}+{p_res}.n "
+        f"elseif {p_nret}>0 then {p_setreg}({p_a2},{p_res}[1]) end "
+        f"else error('attempt to call a '..type({p_fnv})..' value',0) end "
+        f"elseif {p_op2}=={O('CALL_METHOD')} then "
+        f"local {p_objv}={p_getreg}({p_a2}) local {p_mkey}={consts_v}[{p_b2}+1] "
+        f"local {p_rawc}={p_c2} local {p_multi}=false "
+        f"if {p_rawc}>=256 then {p_multi}=true {p_rawc}={p_rawc}-256 end "
+        f"local {p_nargs2}={p_rawc} "
+        f"local {p_mfn}={p_objv}[{p_mkey}] "
+        f"local {p_callargs}={{{p_objv}}} local {p_ncallargs}=1 "
+        f"if {p_nargs2}==255 then "
+        f"local {p_jj}={p_a2}+1 local {p_kk}=2 while {p_jj}<{p_vtop} do {p_callargs}[{p_kk}]={p_getreg}({p_jj}) {p_jj}={p_jj}+1 {p_kk}={p_kk}+1 end "
+        f"{p_ncallargs}={p_kk}-1 "
+        f"else for {p_jj}=1,{p_nargs2} do {p_callargs}[{p_jj}+1]={p_getreg}({p_a2}+{p_jj}) end {p_ncallargs}=1+{p_nargs2} end "
+        f"if type({p_mfn})=='function' then "
+        f"local {p_res}=table.pack({p_mfn}(table.unpack({p_callargs},1,{p_ncallargs}))) "
+        f"if {p_multi} then "
+        f"for {p_jj}=1,{p_res}.n do {p_setreg}({p_a2}+{p_jj}-1,{p_res}[{p_jj}]) end "
+        f"{p_setreg}({p_a2}+{p_res}.n,nil) "
+        f"{p_vtop}={p_a2}+{p_res}.n "
+        f"elseif {p_res}.n>=1 then {p_setreg}({p_a2},{p_res}[1]) end "
+        f"else error('attempt to call a '..type({p_mfn})..' value',0) end "
+        f"elseif {p_op2}=={O('RETURN')} then "
+        f"local {p_rbb}={p_a2} local {p_nret}={p_b2} "
+        f"if {p_nret}==1 then return {p_getreg}({p_rbb}) "
+        f"elseif {p_nret}==0 then return "
+        f"elseif {p_nret}==255 then "
+        f"local {p_res}={{}} local {p_jj}=0 "
+        f"while {p_rbb}+{p_jj}<{p_vtop} do {p_res}[{p_jj}+1]={p_getreg}({p_rbb}+{p_jj}) {p_jj}={p_jj}+1 end "
+        f"return table.unpack({p_res}) "
+        f"else local {p_res}={{}} for {p_jj}=0,{p_nret}-1 do {p_res}[{p_jj}+1]={p_getreg}({p_rbb}+{p_jj}) end return table.unpack({p_res}) end "
+        f"elseif {p_op2}=={O('RETURN_NONE')} then return "
+        f"elseif {p_op2}=={O('VARARG')} then "
+        f"local {p_nret}={p_b2} "
+        f"if {p_nret}==255 then for {p_jj}=1,{p_van} do {p_setreg}({p_a2}+{p_jj}-1,{p_va}[{p_jj}]) end "
+        f"{p_setreg}({p_a2}+{p_van},nil) "
+        f"{p_vtop}={p_a2}+{p_van} "
+        f"elseif {p_nret}==1 then {p_setreg}({p_a2},{p_va}[1]) end "
+        f"elseif {p_op2}=={O('CLOSURE')} then "
+        f"local {p_cp}={protos_v}[{p_b2}+1] "
+        f"local {p_childubox}={{}} "
+        f"for {p_ii}=1,#{p_cp}.updescs do "
+        f"local {p_ud}={p_cp}.updescs[{p_ii}] "
+        f"if {p_ud}.kind==0 then {p_childubox}[{p_ii}-1]={p_boxreg}({p_ud}.idx) "
+        f"else {p_childubox}[{p_ii}-1]={ubox_v}[{p_ud}.idx] end "
+        f"end "
+        f"{p_setreg}({p_a2},function(...) return {exec_v}({p_cp},{p_childubox},...) end) "
+        f"elseif {p_op2}=={O('FOR_PREP')} then "
+        f"local {p_iv}={p_getreg}({p_a2}) local {p_lim}={p_getreg}({p_a2}+1) local {p_st}={p_getreg}({p_a2}+2) "
+        f"if not(({p_st}>0 and {p_iv}<={p_lim}) or ({p_st}<0 and {p_iv}>={p_lim})) then {p_pc}={p_b2}+1 "
+        f"else {p_setreg}({p_a2}+3,{p_iv}) end "
+        f"elseif {p_op2}=={O('FOR_LOOP')} then "
+        f"local {p_iv}={p_getreg}({p_a2}+3)+{p_getreg}({p_a2}+2) "
+        f"local {p_lim}={p_getreg}({p_a2}+1) local {p_st}={p_getreg}({p_a2}+2) "
+        f"if ({p_st}>0 and {p_iv}<={p_lim}) or ({p_st}<0 and {p_iv}>={p_lim}) then {p_setreg}({p_a2}+3,{p_iv}) {p_pc}={p_b2}+1 end "
+        f"elseif {p_op2}=={O('TFOR_CALL')} then "
+        f"local {p_itf}={p_getreg}({p_a2}) local {p_stt}={p_getreg}({p_a2}+1) local {p_ctl}={p_getreg}({p_a2}+2) "
+        f"local {p_res}=table.pack({p_itf}({p_stt},{p_ctl})) "
+        f"for {p_jj}=1,{p_c2} do {p_setreg}({p_a2}+2+{p_jj},{p_res}[{p_jj}]) end "
+        f"{p_setreg}({p_a2}+2,{p_res}[1]) "
+        f"elseif {p_op2}=={O('TFOR_LOOP')} then "
+        f"if {p_getreg}({p_a2})==nil then {p_pc}={p_b2}+1 end "
+        f"elseif {p_op2}=={O('CLOSE_UPVAL')} then "
+        f"local {p_x}={p_rb}[{p_a2}] if {p_x}~=nil then {p_vr}[{p_a2}]={p_x}.v {p_rb}[{p_a2}]=nil end "
+        f"elseif {p_op2}=={O('MOVE')} then {p_setreg}({p_a2},{p_getreg}({p_b2})) "
+        f"end "
+        f"end "
+        f"end "
+
+        f"local {fn_v} "
+        f"do local {i_v},{j_v}={ldp_v}({data_v},{p_bodystart}) {fn_v}=function(...) return {exec_v}({i_v},{{}},...) end end "
+        f"return {fn_v}(...) "
+    )
+    return lua
+def bytecode_to_lua_mltn_only(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, detect_var=None):
+    N = gen_name_fn
+    data_v    = N(); u16_v     = N(); u16s_v    = N(); ldc_v     = N()
+    ldi_v     = N(); ldp_v     = N(); consts_v  = N()
+    protos_v  = N(); env_v     = N(); mk_v      = N(); fn_v      = N()
+    args_v    = N(); i_v       = N(); j_v       = N(); nargs_v   = N()
+    exec_v    = N()
+    ok_v      = N(); err_v     = N()
+    ubox_v    = N(); upidx_v   = N()
+
+    p_d = N(); p_i = N(); p_v = N(); p_t = N(); p_j = N(); p_s = N(); p_k = N()
+    p_bytes = N(); p_sign = N(); p_exp = N(); p_mant = N(); p_n = N(); p_ln = N()
+    p_f32b = N(); p_f32sign = N(); p_f32exp = N(); p_f32mant = N(); p_f32n = N()
+    p_raw = N(); p_newstate = N(); p_mask = N(); p_op = N(); p_a = N(); p_b = N(); p_cc = N(); p_o = N()
+    p_rstate = N(); p_rprev = N()
+    p_isvararg = N(); p_params = N(); p_nupvals = N(); p_updescs = N(); p_kind = N(); p_idx = N()
+    p_loopu = N(); p_loopp = N()
+    p_nprotos = N(); p_protos = N(); p_sz = N(); p_p = N(); p_ni = N()
+    p_nconsts = N(); p_consts = N(); p_ci = N(); p_cv = N()
+    p_nins = N(); p_pseed = N(); p_ins = N(); p_ii = N(); p_iv = N(); p_ns = N(); p_np = N()
+    p_ubox = N(); p_vr = N(); p_rb = N(); p_args = N(); p_nargs = N(); p_va = N(); p_van = N()
+    p_x = N(); p_val = N(); p_r = N()
+    p_pc = N(); p_rd = N(); p_op2 = N(); p_a2 = N(); p_b2 = N(); p_c2 = N()
+    p_fnv = N(); p_nargs2 = N(); p_nret = N(); p_callargs = N(); p_ncallargs = N(); p_jj = N(); p_kk = N(); p_res = N()
+    p_objv = N(); p_mkey = N(); p_rawc = N(); p_multi = N(); p_mfn = N()
+    p_cp = N(); p_childubox = N(); p_ud = N(); p_itf = N(); p_stt = N(); p_ctl = N()
+    p_rbb = N(); p_getreg = N(); p_setreg = N(); p_boxreg = N(); p_proto = N()
+    p_vtop = N()
+    p_lim = N(); p_st = N()
+    p_regparam = N()
+    p_tj1 = N(); p_tj2 = N(); p_tj3 = N()
+    p_cblen = N(); p_cbb = N(); p_cbi = N(); p_pseed2 = N(); p_rstate2 = N(); p_rprev2 = N()
+    p_smv = N()
+    p_strref = N(); p_strpool = N(); p_poolseed = N(); p_poollen = N(); p_poolraw = N()
+    p_poolcount = N(); p_poolidx = N(); p_poolslen = N(); p_poolstr = N(); p_poolst = N(); p_poolpv = N()
+    p_bodystart = N(); p_pst = N(); p_ppv = N(); p_ns = N(); p_mk = N()
+    dec_v = N()
+    p_marker = N(); p_dmarker = N(); p_opslen = N(); p_dictlen = N()
+    p_opsbytes = N(); p_dictbytes = N(); p_rst = N(); p_rpv = N()
+    p_dictionary = N(); p_dn = N(); p_dplen = N(); p_dflat = N(); p_dfi = N(); p_dpat = N()
+    p_flatstream = N(); p_fi = N(); p_ops = N(); p_didx = N(); p_dcount = N(); p_dk = N()
+    p_rlei = N(); p_rop = N(); p_rcount = N(); p_rk = N()
+    p_out = N()
+    p_fi = N()
+    p_rv = N()
+    p_fdictmarker = N(); p_fielddictlen = N(); p_fielddictbytes = N(); p_fielddict = N()
+    p_fdn = N(); p_fdfi = N(); p_fdop = N(); p_fdflen = N(); p_fdfields = N(); p_fdk = N()
+    p_fieldslen = N(); p_fieldsbytes = N(); p_fpos = N()
+    p_logops = N(); p_lk = N(); p_lo = N(); p_fdidx = N(); p_fdent = N()
 
     om = opmap if opmap is not None else _DEFAULT_OPMAP
     def O(name): return om[name]
@@ -2038,6 +2645,384 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
 
         f"local {fn_v} "
         f"do local {i_v},{j_v}={ldp_v}({data_v},{p_bodystart}) {fn_v}=function(...) return {exec_v}({i_v},{{}},...) end end "
+        f"return {fn_v}(...) "
+    )
+    return lua
+def bytecode_to_lua_legacy(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, detect_var=None):
+    N = gen_name_fn
+    data_v    = N(); u16_v     = N(); u16s_v    = N(); ldc_v     = N()
+    ldi_v     = N(); ldp_v     = N(); consts_v  = N()
+    protos_v  = N(); env_v     = N(); mk_v      = N(); fn_v      = N()
+    args_v    = N(); i_v       = N(); j_v       = N(); nargs_v   = N()
+    exec_v    = N()
+    ok_v      = N(); err_v     = N()
+    ubox_v    = N(); upidx_v   = N()
+
+    p_d = N(); p_i = N(); p_v = N(); p_t = N(); p_j = N(); p_s = N(); p_k = N()
+    p_bytes = N(); p_sign = N(); p_exp = N(); p_mant = N(); p_n = N(); p_ln = N()
+    p_f32b = N(); p_f32sign = N(); p_f32exp = N(); p_f32mant = N(); p_f32n = N()
+    p_raw = N(); p_newstate = N(); p_mask = N(); p_op = N(); p_a = N(); p_b = N(); p_cc = N(); p_o = N()
+    p_rstate = N(); p_rprev = N()
+    p_isvararg = N(); p_params = N(); p_nupvals = N(); p_updescs = N(); p_kind = N(); p_idx = N()
+    p_loopu = N(); p_loopp = N()
+    p_nprotos = N(); p_protos = N(); p_sz = N(); p_p = N(); p_ni = N()
+    p_nconsts = N(); p_consts = N(); p_ci = N(); p_cv = N()
+    p_nins = N(); p_pseed = N(); p_ins = N(); p_ii = N(); p_iv = N(); p_ns = N(); p_np = N()
+    p_ubox = N(); p_vr = N(); p_rb = N(); p_args = N(); p_nargs = N(); p_va = N(); p_van = N()
+    p_x = N(); p_val = N(); p_r = N()
+    p_pc = N(); p_rd = N(); p_op2 = N(); p_a2 = N(); p_b2 = N(); p_c2 = N()
+    p_fnv = N(); p_nargs2 = N(); p_nret = N(); p_callargs = N(); p_ncallargs = N(); p_jj = N(); p_kk = N(); p_res = N()
+    p_objv = N(); p_mkey = N(); p_rawc = N(); p_multi = N(); p_mfn = N()
+    p_cp = N(); p_childubox = N(); p_ud = N(); p_itf = N(); p_stt = N(); p_ctl = N()
+    p_rbb = N(); p_getreg = N(); p_setreg = N(); p_boxreg = N(); p_proto = N()
+    p_vtop = N()
+    p_lim = N(); p_st = N()
+    p_regparam = N()
+    p_tj1 = N(); p_tj2 = N(); p_tj3 = N()
+    p_cblen = N(); p_cbb = N(); p_cbi = N(); p_pseed2 = N(); p_rstate2 = N(); p_rprev2 = N()
+    p_smv = N()
+    p_strref = N(); p_strpool = N(); p_poolseed = N(); p_poollen = N(); p_poolraw = N()
+    p_poolcount = N(); p_poolidx = N(); p_poolslen = N(); p_poolstr = N(); p_poolst = N(); p_poolpv = N()
+    p_bodystart = N(); p_pst = N(); p_ppv = N(); p_ns = N(); p_mk = N()
+    dec_v = N()
+    p_marker = N(); p_dmarker = N(); p_opslen = N(); p_dictlen = N()
+    p_opsbytes = N(); p_dictbytes = N(); p_rst = N(); p_rpv = N()
+    p_dictionary = N(); p_dn = N(); p_dplen = N(); p_dflat = N(); p_dfi = N(); p_dpat = N()
+    p_flatstream = N(); p_fi = N(); p_ops = N(); p_didx = N(); p_dcount = N(); p_dk = N()
+    p_rlei = N(); p_rop = N(); p_rcount = N(); p_rk = N()
+    p_out = N()
+    p_fi = N()
+    p_rv = N()
+    p_fdictmarker = N(); p_fielddictlen = N(); p_fielddictbytes = N(); p_fielddict = N()
+    p_fdn = N(); p_fdfi = N(); p_fdop = N(); p_fdflen = N(); p_fdfields = N(); p_fdk = N()
+    p_fieldslen = N(); p_fieldsbytes = N(); p_fpos = N()
+    p_logops = N(); p_lk = N(); p_lo = N(); p_fdidx = N(); p_fdent = N()
+
+    om = opmap if opmap is not None else _DEFAULT_OPMAP
+    def O(name): return om[name]
+
+    uv_v = N()
+    euv_v = N()
+    p_eseed = N(); p_estate = N(); p_eprev = N(); p_eres = N(); p_esh = N()
+    p_eraw = N(); p_enewstate = N(); p_emask = N(); p_eb = N()
+
+    AB2  = f"{p_a}={u16_v}({p_d},{p_i}) {p_i}={p_i}+2 {p_b}={u16_v}({p_d},{p_i}) {p_i}={p_i}+2 "
+    AB2C = f"{p_a}={u16_v}({p_d},{p_i}) {p_i}={p_i}+2 {p_b}={u16_v}({p_d},{p_i}) {p_i}={p_i}+2 {p_cc}={u16_v}({p_d},{p_i}) {p_i}={p_i}+2 "
+    A2   = f"{p_a}={u16_v}({p_d},{p_i}) {p_i}={p_i}+2 "
+
+    def ldi_cases():
+        groups_ab2 = [
+            ('LOAD_CONST','LOAD_VAR','SET_VAR','LOAD_GLOBAL','SET_GLOBAL','CLOSURE'),
+            ('LOAD_UPVAL','SET_UPVAL'),
+            ('RETURN','VARARG'),
+            ('JUMP_FALSE','JUMP_TRUE','JUMP_FALSE_NK','JUMP_TRUE_NK'),
+            ('UNM','LEN','NOT','BNOT'),
+            ('FOR_PREP','FOR_LOOP','TFOR_LOOP'),
+            ('DUP','MOVE'),
+        ]
+        groups_ab2c = [
+            ('GET_TABLE','SET_TABLE','SET_LIST'),
+            ('SET_LIST_MULTI',),
+            ('GET_FIELD','SET_FIELD'),
+            ('ADD','SUB','MUL','DIV','MOD','POW','CONCAT','IDIV','AND','OR',
+             'BAND','BOR','BXOR','SHL','SHR'),
+            ('EQ','NE','LT','LE','GT','GE'),
+            ('CALL','CALL_METHOD'),
+            ('TFOR_CALL',),
+        ]
+        groups_a2 = [('NEW_TABLE',), ('RETURN_NONE',), ('POP',), ('JUMP',), ('CLOSE_UPVAL',)]
+
+        lines = []
+        first = True
+        for grp in groups_ab2:
+            cond = " or ".join(f"{p_o}=={O(n)}" for n in grp)
+            kw = "if" if first else "elseif"
+            lines.append(f"{kw} {cond} then {AB2}")
+            first = False
+        for grp in groups_ab2c:
+            cond = " or ".join(f"{p_o}=={O(n)}" for n in grp)
+            lines.append(f"elseif {cond} then {AB2C}")
+        for grp in groups_a2:
+            cond = " or ".join(f"{p_o}=={O(n)}" for n in grp)
+            lines.append(f"elseif {cond} then {A2}")
+        lines.append("end")
+        return " ".join(lines)
+
+    dexpr = data_expr if data_expr is not None else "{}"
+
+    lua = (
+        f"local {data_v}={dexpr} "
+        f"local function {u16_v}({p_d},{p_i}) return {p_d}[{p_i}]+({p_d}[{p_i}+1]*256) end "
+        f"local function {u16s_v}({p_d},{p_i}) local {p_v}={p_d}[{p_i}]+({p_d}[{p_i}+1]*256) if {p_v}>=32768 then {p_v}={p_v}-65536 end return {p_v} end "
+        f"local function {uv_v}({p_d},{p_i}) "
+        f"local {p_res}=0 local {p_st}=0 "
+        f"while true do "
+        f"local {p_x}={p_d}[{p_i}] {p_i}={p_i}+1 "
+        f"{p_res}={p_res}+bit32.lshift(bit32.band({p_x},0x7F),{p_st}) "
+        f"if bit32.band({p_x},0x80)==0 then break end "
+        f"{p_st}={p_st}+7 "
+        f"end "
+        f"return {p_res},{p_i} end "
+        f"local function {euv_v}({p_d},{p_i}) "
+        f"local {p_eseed}={p_d}[{p_i}] {p_i}={p_i}+1 "
+        f"local {p_estate}={p_eseed} local {p_eprev}={p_eseed} "
+        f"local {p_eres}=0 local {p_esh}=0 "
+        f"while true do "
+        f"local {p_eraw}={p_d}[{p_i}] {p_i}={p_i}+1 "
+        f"local {p_enewstate}=({p_estate}*1103515245+12345)%256 "
+        f"local {p_emask}=bit32.bxor({p_enewstate},({p_eprev}*31)%256)%256 "
+        f"local {p_eb}=bit32.bxor({p_eraw},{p_emask})%256 "
+        f"{p_estate}={p_enewstate} {p_eprev}={p_emask} "
+        f"{p_eres}={p_eres}+bit32.lshift(bit32.band({p_eb},0x7F),{p_esh}) "
+        f"if bit32.band({p_eb},0x80)==0 then break end "
+        f"{p_esh}={p_esh}+7 "
+        f"end "
+        f"return {p_eres},{p_i} end "
+        f"local function {ldc_v}({p_d},{p_i}) "
+        f"local {p_t}={p_d}[{p_i}] {p_i}={p_i}+1 "
+        f"if {p_t}==0 then return nil,{p_i} "
+        f"elseif {p_t}==1 then return {p_d}[{p_i}]==1,{p_i}+1 "
+        f"elseif {p_t}==2 then "
+        f"local {p_bytes}={{}} for {p_j}=0,7 do {p_bytes}[{p_j}+1]={p_d}[{p_i}+{p_j}] end {p_i}={p_i}+8 "
+        f"local {p_sign}={p_bytes}[8]>=128 and 1 or 0 "
+        f"local {p_exp}=(({p_bytes}[8]%128)*16)+math.floor({p_bytes}[7]/16) "
+        f"local {p_mant}={p_bytes}[7]%16 "
+        f"for {p_j}=6,1,-1 do {p_mant}={p_mant}*256+{p_bytes}[{p_j}] end "
+        f"if {p_exp}==2047 then "
+        f"if {p_mant}==0 then return ({p_sign}==1 and -math.huge or math.huge),{p_i} "
+        f"else return (0/0),{p_i} end end "
+        f"local {p_n} "
+        f"if {p_exp}==0 then {p_n}={p_mant}*(2^(-1074)) "
+        f"else {p_n}=(1+{p_mant}*(2^(-52)))*(2^({p_exp}-1023)) end "
+        f"return ({p_sign}==1 and -{p_n} or {p_n}),{p_i} "
+        f"end "
+        f"local {p_ln}={u16_v}({p_d},{p_i}) {p_i}={p_i}+2 "
+        f"local {p_s}='' for {p_j}=0,{p_ln}-1 do {p_s}={p_s}..string.char({p_d}[{p_i}+{p_j}]) end "
+        f"return {p_s},{p_i}+{p_ln} end "
+        f"local function {dec_v}({p_d},{p_i},{p_ln},{p_rst},{p_rpv}) "
+        f"local {p_out}={{}} "
+        f"for {p_j}=0,{p_ln}-1 do "
+        f"local {p_raw}={p_d}[{p_i}+{p_j}] "
+        f"local {p_newstate}=({p_rst}*1103515245+12345)%256 "
+        f"local {p_mask}=bit32.bxor({p_newstate},({p_rpv}*31)%256)%256 "
+        f"local {p_rv}=bit32.bxor({p_raw},{p_mask})%256 "
+        f"{p_out}[{p_j}+1]={p_rv} "
+        f"{p_rst}={p_newstate} {p_rpv}={p_rv} "
+        f"end "
+        f"return {p_out},{p_rst},{p_rpv} end "
+        f"local function {ldi_v}({p_d},{p_i},{p_op}) "
+        f"local {p_a},{p_b},{p_cc}=nil,nil,nil "
+        f"local {p_o}={p_op} "
+        f"{ldi_cases()} "
+        f"return {{{p_op},{p_a},{p_b},{p_cc}}},{p_i} end "
+        f"local function {ldp_v}({p_d},{p_i}) "
+        f"local {p_isvararg}={p_d}[{p_i}]==1 local {p_params}={p_d}[{p_i}+1] {p_i}={p_i}+2 "
+        f"local {p_nupvals}={u16_v}({p_d},{p_i}) {p_i}={p_i}+2 "
+        f"local {p_updescs}={{}} "
+        f"for {p_loopu}=1,{p_nupvals} do "
+        f"local {p_kind}={p_d}[{p_i}] {p_i}={p_i}+1 "
+        f"local {p_idx}={u16_v}({p_d},{p_i}) {p_i}={p_i}+2 "
+        f"{p_updescs}[#{p_updescs}+1]={{kind={p_kind},idx={p_idx}}} "
+        f"end "
+        f"local {p_nprotos}={u16_v}({p_d},{p_i}) {p_i}={p_i}+2 "
+        f"local {p_protos}={{}} "
+        f"for {p_loopp}=1,{p_nprotos} do "
+        f"local {p_sz}={p_d}[{p_i}]+({p_d}[{p_i}+1]*256)+({p_d}[{p_i}+2]*65536)+({p_d}[{p_i}+3]*16777216) {p_i}={p_i}+4 "
+        f"local {p_p},{p_ni}={ldp_v}({p_d},{p_i}) {p_i}={p_ni} "
+        f"{p_protos}[#{p_protos}+1]={p_p} "
+        f"end "
+        f"local {p_nconsts}={u16_v}({p_d},{p_i}) {p_i}={p_i}+2 "
+        f"local {p_consts}={{}} "
+        f"for {p_ci}=1,{p_nconsts} do local {p_cv},{p_ni}={ldc_v}({p_d},{p_i}) {p_consts}[{p_ci}]={p_cv} {p_i}={p_ni} end "
+        f"local {p_nins}={u16_v}({p_d},{p_i}) {p_i}={p_i}+2 "
+        f"local {p_pseed}={p_d}[{p_i}] {p_i}={p_i}+1 "
+        f"local {p_ins}={{}} "
+        f"local {p_rstate}={p_pseed} local {p_rprev}={p_pseed} "
+        f"for {p_ii}=1,{p_nins} do "
+        f"local {p_raw}={p_d}[{p_i}] {p_i}={p_i}+1 "
+        f"local {p_newstate}=({p_rstate}*1103515245+12345)%256 "
+        f"local {p_mask}=bit32.bxor({p_newstate},({p_rprev}*31)%256)%256 "
+        f"local {p_op}=bit32.bxor({p_raw},{p_mask})%256 "
+        f"{p_rstate}={p_newstate} {p_rprev}={p_op} "
+        f"local {p_iv},{p_ni}={ldi_v}({p_d},{p_i},{p_op}) "
+        f"{p_ins}[{p_ii}]={p_iv} {p_i}={p_ni} "
+        f"end "
+        f"return {{is_vararg={p_isvararg},params={p_params},updescs={p_updescs},protos={p_protos},consts={p_consts},ins={p_ins}}},{p_i} end "
+        f"local {env_v}=(getfenv and getfenv(0)) or _ENV or _G or {{}} "
+
+        f"local function {exec_v}({p_proto},{ubox_v},...) "
+        f"local {p_vr}={{}} "
+        f"local {p_rb}={{}} "
+        f"local {p_vtop}=0 "
+        f"local {args_v}={{...}} "
+        f"local {nargs_v}=select('#',...) "
+        f"local {p_va}={{}} "
+        f"local {p_van}=0 "
+        f"if {p_proto}.is_vararg then "
+        f"for {i_v}={p_proto}.params+1,{nargs_v} do {p_va}[{i_v}-{p_proto}.params]={args_v}[{i_v}] end "
+        f"{p_van}={nargs_v}-{p_proto}.params if {p_van}<0 then {p_van}=0 end "
+        f"end "
+        f"for {i_v}=1,{p_proto}.params do {p_vr}[{i_v}-1]={args_v}[{i_v}] end "
+        f"local {consts_v}={p_proto}.consts "
+        f"local {p_ins}={p_proto}.ins "
+        f"local {protos_v}={p_proto}.protos "
+        f"local function {p_getreg}({p_regparam}) local {p_x}={p_rb}[{p_regparam}] if {p_x}~=nil then return {p_x}.v end return {p_vr}[{p_regparam}] end "
+        f"local function {p_setreg}({p_regparam},{p_val}) local {p_x}={p_rb}[{p_regparam}] if {p_x}~=nil then {p_x}.v={p_val} else {p_vr}[{p_regparam}]={p_val} end end "
+        f"local function {p_boxreg}({p_regparam}) "
+        f"local {p_x}={p_rb}[{p_regparam}] "
+        f"if {p_x}==nil then {p_x}={{v={p_vr}[{p_regparam}]}} {p_rb}[{p_regparam}]={p_x} end "
+        f"return {p_x} end "
+        f"local {p_pc}=1 "
+        f"while {p_pc}<=#{p_ins} do "
+        + (
+            f"if {detect_var} then "
+            f"local {p_tj1}={rng.randint(1000,9999)} "
+            f"local {p_tj2}={p_tj1}+{rng.randint(1000,9999)} "
+            f"local {p_tj3}=true "
+            f"while {p_tj3} do {p_tj2}={p_tj2}+1 end "
+            f"end "
+            if detect_var else ""
+        ) +
+        f"local {p_rd}={p_ins}[{p_pc}] "
+        f"local {p_op2}={p_rd}[1] local {p_a2}={p_rd}[2] local {p_b2}={p_rd}[3] local {p_c2}={p_rd}[4] "
+        f"{p_pc}={p_pc}+1 "
+        f"if {p_op2}=={O('LOAD_CONST')} then {p_setreg}({p_a2},{consts_v}[{p_b2}+1]) "
+        f"elseif {p_op2}=={O('LOAD_VAR')} then {p_setreg}({p_a2},{p_getreg}({p_b2})) "
+        f"elseif {p_op2}=={O('SET_VAR')} then {p_setreg}({p_b2},{p_getreg}({p_a2})) "
+        f"elseif {p_op2}=={O('LOAD_GLOBAL')} then {p_setreg}({p_a2},{env_v}[{consts_v}[{p_b2}+1]]) "
+        f"elseif {p_op2}=={O('SET_GLOBAL')} then {env_v}[{consts_v}[{p_a2}+1]]={p_getreg}({p_b2}) "
+        f"elseif {p_op2}=={O('LOAD_UPVAL')} then "
+        f"local {p_x}={ubox_v}[{p_b2}] "
+        f"if {p_x} then {p_setreg}({p_a2},{p_x}.v) else {p_setreg}({p_a2},nil) end "
+        f"elseif {p_op2}=={O('SET_UPVAL')} then "
+        f"local {p_x}={ubox_v}[{p_a2}] "
+        f"if {p_x} then {p_x}.v={p_getreg}({p_b2}) end "
+        f"{p_setreg}({p_a2},{p_getreg}({p_b2})) "
+        f"elseif {p_op2}=={O('GET_TABLE')} then {p_setreg}({p_a2},{p_getreg}({p_b2})[{p_getreg}({p_c2})]) "
+        f"elseif {p_op2}=={O('SET_TABLE')} then {p_getreg}({p_a2})[{p_getreg}({p_b2})]={p_getreg}({p_c2}) "
+        f"elseif {p_op2}=={O('NEW_TABLE')} then {p_setreg}({p_a2},{{}}) "
+        f"elseif {p_op2}=={O('SET_LIST')} then {p_getreg}({p_a2})[{consts_v}[{p_b2}+1]]={p_getreg}({p_c2}) "
+        f"elseif {p_op2}=={O('SET_LIST_MULTI')} then "
+        f"local {p_jj}={p_b2} local {p_kk}={consts_v}[{p_c2}+1] "
+        f"local {p_t}={p_getreg}({p_a2}) "
+        f"while {p_jj}<{p_vtop} do {p_t}[{p_kk}]={p_getreg}({p_jj}) {p_kk}={p_kk}+1 {p_jj}={p_jj}+1 end "
+        f"elseif {p_op2}=={O('GET_FIELD')} then {p_setreg}({p_a2},{p_getreg}({p_b2})[{consts_v}[{p_c2}+1]]) "
+        f"elseif {p_op2}=={O('SET_FIELD')} then {p_getreg}({p_a2})[{consts_v}[{p_b2}+1]]={p_getreg}({p_c2}) "
+        f"elseif {p_op2}=={O('ADD')} then {p_setreg}({p_a2},{p_getreg}({p_b2})+{p_getreg}({p_c2})) "
+        f"elseif {p_op2}=={O('SUB')} then {p_setreg}({p_a2},{p_getreg}({p_b2})-{p_getreg}({p_c2})) "
+        f"elseif {p_op2}=={O('MUL')} then {p_setreg}({p_a2},{p_getreg}({p_b2})*{p_getreg}({p_c2})) "
+        f"elseif {p_op2}=={O('DIV')} then {p_setreg}({p_a2},{p_getreg}({p_b2})/{p_getreg}({p_c2})) "
+        f"elseif {p_op2}=={O('MOD')} then {p_setreg}({p_a2},{p_getreg}({p_b2})%{p_getreg}({p_c2})) "
+        f"elseif {p_op2}=={O('POW')} then {p_setreg}({p_a2},{p_getreg}({p_b2})^{p_getreg}({p_c2})) "
+        f"elseif {p_op2}=={O('CONCAT')} then {p_setreg}({p_a2},{p_getreg}({p_b2})..{p_getreg}({p_c2})) "
+        f"elseif {p_op2}=={O('IDIV')} then {p_setreg}({p_a2},math.floor({p_getreg}({p_b2})/{p_getreg}({p_c2}))) "
+        f"elseif {p_op2}=={O('BAND')} then {p_setreg}({p_a2},bit32.band({p_getreg}({p_b2}),{p_getreg}({p_c2}))) "
+        f"elseif {p_op2}=={O('BOR')} then {p_setreg}({p_a2},bit32.bor({p_getreg}({p_b2}),{p_getreg}({p_c2}))) "
+        f"elseif {p_op2}=={O('BXOR')} then {p_setreg}({p_a2},bit32.bxor({p_getreg}({p_b2}),{p_getreg}({p_c2}))) "
+        f"elseif {p_op2}=={O('BNOT')} then {p_setreg}({p_a2},bit32.bnot({p_getreg}({p_b2}))) "
+        f"elseif {p_op2}=={O('SHL')} then {p_setreg}({p_a2},bit32.lshift({p_getreg}({p_b2}),{p_getreg}({p_c2}))) "
+        f"elseif {p_op2}=={O('SHR')} then {p_setreg}({p_a2},bit32.rshift({p_getreg}({p_b2}),{p_getreg}({p_c2}))) "
+        f"elseif {p_op2}=={O('UNM')} then {p_setreg}({p_a2},-{p_getreg}({p_b2})) "
+        f"elseif {p_op2}=={O('LEN')} then {p_setreg}({p_a2},#{p_getreg}({p_b2})) "
+        f"elseif {p_op2}=={O('NOT')} then {p_setreg}({p_a2},not {p_getreg}({p_b2})) "
+        f"elseif {p_op2}=={O('AND')} then "
+        f"if not {p_getreg}({p_b2}) then {p_setreg}({p_a2},{p_getreg}({p_b2})) else {p_setreg}({p_a2},{p_getreg}({p_c2})) end "
+        f"elseif {p_op2}=={O('OR')} then "
+        f"if {p_getreg}({p_b2}) then {p_setreg}({p_a2},{p_getreg}({p_b2})) else {p_setreg}({p_a2},{p_getreg}({p_c2})) end "
+        f"elseif {p_op2}=={O('EQ')} then {p_setreg}({p_a2},({p_getreg}({p_b2})=={p_getreg}({p_c2}))) "
+        f"elseif {p_op2}=={O('NE')} then {p_setreg}({p_a2},({p_getreg}({p_b2})~={p_getreg}({p_c2}))) "
+        f"elseif {p_op2}=={O('LT')} then {p_setreg}({p_a2},({p_getreg}({p_b2})<{p_getreg}({p_c2}))) "
+        f"elseif {p_op2}=={O('LE')} then {p_setreg}({p_a2},({p_getreg}({p_b2})<={p_getreg}({p_c2}))) "
+        f"elseif {p_op2}=={O('GT')} then {p_setreg}({p_a2},({p_getreg}({p_b2})>{p_getreg}({p_c2}))) "
+        f"elseif {p_op2}=={O('GE')} then {p_setreg}({p_a2},({p_getreg}({p_b2})>={p_getreg}({p_c2}))) "
+        f"elseif {p_op2}=={O('JUMP')} then {p_pc}={p_a2}+1 "
+        f"elseif {p_op2}=={O('JUMP_FALSE')} then if not {p_getreg}({p_a2}) then {p_pc}={p_b2}+1 end "
+        f"elseif {p_op2}=={O('JUMP_TRUE')} then if {p_getreg}({p_a2}) then {p_pc}={p_b2}+1 end "
+        f"elseif {p_op2}=={O('JUMP_FALSE_NK')} then if not {p_getreg}({p_a2}) then {p_pc}={p_b2}+1 end "
+        f"elseif {p_op2}=={O('JUMP_TRUE_NK')} then if {p_getreg}({p_a2}) then {p_pc}={p_b2}+1 end "
+        f"elseif {p_op2}=={O('CALL')} then "
+        f"local {p_fnv}={p_getreg}({p_a2}) local {p_nargs2}={p_b2} local {p_nret}={p_c2} "
+        f"local {p_callargs}={{}} local {p_ncallargs}=0 "
+        f"if {p_nargs2}==255 then "
+        f"local {p_jj}={p_a2}+1 local {p_kk}=1 while {p_jj}<{p_vtop} do {p_callargs}[{p_kk}]={p_getreg}({p_jj}) {p_jj}={p_jj}+1 {p_kk}={p_kk}+1 end "
+        f"{p_ncallargs}={p_kk}-1 "
+        f"else for {p_jj}=1,{p_nargs2} do {p_callargs}[{p_jj}]={p_getreg}({p_a2}+{p_jj}) end {p_ncallargs}={p_nargs2} end "
+        f"if type({p_fnv})=='function' then "
+        f"local {p_res}=table.pack({p_fnv}(table.unpack({p_callargs},1,{p_ncallargs}))) "
+        f"if {p_nret}==255 then "
+        f"for {p_jj}=1,{p_res}.n do {p_setreg}({p_a2}+{p_jj}-1,{p_res}[{p_jj}]) end "
+        f"{p_setreg}({p_a2}+{p_res}.n,nil) "
+        f"{p_vtop}={p_a2}+{p_res}.n "
+        f"elseif {p_nret}>0 then {p_setreg}({p_a2},{p_res}[1]) end "
+        f"else error('attempt to call a '..type({p_fnv})..' value',0) end "
+        f"elseif {p_op2}=={O('CALL_METHOD')} then "
+        f"local {p_objv}={p_getreg}({p_a2}) local {p_mkey}={consts_v}[{p_b2}+1] "
+        f"local {p_rawc}={p_c2} local {p_multi}=false "
+        f"if {p_rawc}>=256 then {p_multi}=true {p_rawc}={p_rawc}-256 end "
+        f"local {p_nargs2}={p_rawc} "
+        f"local {p_mfn}={p_objv}[{p_mkey}] "
+        f"local {p_callargs}={{{p_objv}}} local {p_ncallargs}=1 "
+        f"if {p_nargs2}==255 then "
+        f"local {p_jj}={p_a2}+1 local {p_kk}=2 while {p_jj}<{p_vtop} do {p_callargs}[{p_kk}]={p_getreg}({p_jj}) {p_jj}={p_jj}+1 {p_kk}={p_kk}+1 end "
+        f"{p_ncallargs}={p_kk}-1 "
+        f"else for {p_jj}=1,{p_nargs2} do {p_callargs}[{p_jj}+1]={p_getreg}({p_a2}+{p_jj}) end {p_ncallargs}=1+{p_nargs2} end "
+        f"if type({p_mfn})=='function' then "
+        f"local {p_res}=table.pack({p_mfn}(table.unpack({p_callargs},1,{p_ncallargs}))) "
+        f"if {p_multi} then "
+        f"for {p_jj}=1,{p_res}.n do {p_setreg}({p_a2}+{p_jj}-1,{p_res}[{p_jj}]) end "
+        f"{p_setreg}({p_a2}+{p_res}.n,nil) "
+        f"{p_vtop}={p_a2}+{p_res}.n "
+        f"elseif {p_res}.n>=1 then {p_setreg}({p_a2},{p_res}[1]) end "
+        f"else error('attempt to call a '..type({p_mfn})..' value',0) end "
+        f"elseif {p_op2}=={O('RETURN')} then "
+        f"local {p_rbb}={p_a2} local {p_nret}={p_b2} "
+        f"if {p_nret}==1 then return {p_getreg}({p_rbb}) "
+        f"elseif {p_nret}==0 then return "
+        f"elseif {p_nret}==255 then "
+        f"local {p_res}={{}} local {p_jj}=0 "
+        f"while {p_rbb}+{p_jj}<{p_vtop} do {p_res}[{p_jj}+1]={p_getreg}({p_rbb}+{p_jj}) {p_jj}={p_jj}+1 end "
+        f"return table.unpack({p_res}) "
+        f"else local {p_res}={{}} for {p_jj}=0,{p_nret}-1 do {p_res}[{p_jj}+1]={p_getreg}({p_rbb}+{p_jj}) end return table.unpack({p_res}) end "
+        f"elseif {p_op2}=={O('RETURN_NONE')} then return "
+        f"elseif {p_op2}=={O('VARARG')} then "
+        f"local {p_nret}={p_b2} "
+        f"if {p_nret}==255 then for {p_jj}=1,{p_van} do {p_setreg}({p_a2}+{p_jj}-1,{p_va}[{p_jj}]) end "
+        f"{p_setreg}({p_a2}+{p_van},nil) "
+        f"{p_vtop}={p_a2}+{p_van} "
+        f"elseif {p_nret}==1 then {p_setreg}({p_a2},{p_va}[1]) end "
+        f"elseif {p_op2}=={O('CLOSURE')} then "
+        f"local {p_cp}={protos_v}[{p_b2}+1] "
+        f"local {p_childubox}={{}} "
+        f"for {p_ii}=1,#{p_cp}.updescs do "
+        f"local {p_ud}={p_cp}.updescs[{p_ii}] "
+        f"if {p_ud}.kind==0 then {p_childubox}[{p_ii}-1]={p_boxreg}({p_ud}.idx) "
+        f"else {p_childubox}[{p_ii}-1]={ubox_v}[{p_ud}.idx] end "
+        f"end "
+        f"{p_setreg}({p_a2},function(...) return {exec_v}({p_cp},{p_childubox},...) end) "
+        f"elseif {p_op2}=={O('FOR_PREP')} then "
+        f"local {p_iv}={p_getreg}({p_a2}) local {p_lim}={p_getreg}({p_a2}+1) local {p_st}={p_getreg}({p_a2}+2) "
+        f"if not(({p_st}>0 and {p_iv}<={p_lim}) or ({p_st}<0 and {p_iv}>={p_lim})) then {p_pc}={p_b2}+1 "
+        f"else {p_setreg}({p_a2}+3,{p_iv}) end "
+        f"elseif {p_op2}=={O('FOR_LOOP')} then "
+        f"local {p_iv}={p_getreg}({p_a2}+3)+{p_getreg}({p_a2}+2) "
+        f"local {p_lim}={p_getreg}({p_a2}+1) local {p_st}={p_getreg}({p_a2}+2) "
+        f"if ({p_st}>0 and {p_iv}<={p_lim}) or ({p_st}<0 and {p_iv}>={p_lim}) then {p_setreg}({p_a2}+3,{p_iv}) {p_pc}={p_b2}+1 end "
+        f"elseif {p_op2}=={O('TFOR_CALL')} then "
+        f"local {p_itf}={p_getreg}({p_a2}) local {p_stt}={p_getreg}({p_a2}+1) local {p_ctl}={p_getreg}({p_a2}+2) "
+        f"local {p_res}=table.pack({p_itf}({p_stt},{p_ctl})) "
+        f"for {p_jj}=1,{p_c2} do {p_setreg}({p_a2}+2+{p_jj},{p_res}[{p_jj}]) end "
+        f"{p_setreg}({p_a2}+2,{p_res}[1]) "
+        f"elseif {p_op2}=={O('TFOR_LOOP')} then "
+        f"if {p_getreg}({p_a2})==nil then {p_pc}={p_b2}+1 end "
+        f"elseif {p_op2}=={O('CLOSE_UPVAL')} then "
+        f"local {p_x}={p_rb}[{p_a2}] if {p_x}~=nil then {p_vr}[{p_a2}]={p_x}.v {p_rb}[{p_a2}]=nil end "
+        f"elseif {p_op2}=={O('MOVE')} then {p_setreg}({p_a2},{p_getreg}({p_b2})) "
+        f"end "
+        f"end "
+        f"end "
+
+        f"local {fn_v} "
+        f"do local {i_v},{j_v}={ldp_v}({data_v},1) {fn_v}=function(...) return {exec_v}({i_v},{{}},...) end end "
         f"return {fn_v}(...) "
     )
     return lua
