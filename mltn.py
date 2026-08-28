@@ -79,7 +79,7 @@ def pick_two_markers(used_values):
                 return found[0], found[1]
     raise ValueError("not enough free byte values for RLE+DICT markers")
 
-def rle_encode_ops(op_list, marker):
+def rle_encode_ops(op_list, marker, dict_marker=None):
     out = []
     i = 0
     n = len(op_list)
@@ -88,6 +88,8 @@ def rle_encode_ops(op_list, marker):
         run = 1
         while i + run < n and op_list[i + run] == op and run < RLE_MAX_RUN:
             run += 1
+        if dict_marker is not None and run == dict_marker:
+            run -= 1
         if run >= RLE_MIN_RUN and op != marker:
             out.append(marker)
             out.append(op)
@@ -230,7 +232,7 @@ def encode_opcode_chain(op_list, proto_seed, marker=None, dict_marker=None, dict
     if marker is None:
         stream = op_list
     else:
-        rle_stream = rle_encode_ops(op_list, marker)
+        rle_stream = rle_encode_ops(op_list, marker, dict_marker)
         if dict_marker is not None and dictionary:
             atoms = _split_atoms(rle_stream, marker)
             stream = dict_encode_atoms(atoms, dictionary, dict_marker)
@@ -276,3 +278,30 @@ def encode_instruction_fields(a=None, b=None, c=None):
 
 def gen_seed():
     return secrets.randbelow(256)
+
+def write_enc_uvarint(n, seed=None):
+    if seed is None:
+        seed = gen_seed()
+    plain = write_uvarint(n)
+    cipher = MltnCipherStream(seed)
+    enc = cipher.process(plain)
+    return bytes([seed]) + enc
+
+def read_enc_uvarint(data, i):
+    seed = data[i]
+    i += 1
+    state = seed & 0xFF
+    prev = seed & 0xFF
+    result = 0
+    shift = 0
+    while True:
+        raw = data[i]
+        i += 1
+        state, mask = next_byte_mask(state, prev)
+        b = raw ^ mask
+        prev = mask & 0xFF
+        result |= (b & 0x7F) << shift
+        if not (b & 0x80):
+            break
+        shift += 7
+    return result, i

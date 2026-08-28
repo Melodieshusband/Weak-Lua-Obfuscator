@@ -162,17 +162,18 @@ class FuncProto:
         for kind, idx in self.upvals:
             data += bytes([kind])
             data += mltn.write_uvarint(idx)
-        data += mltn.write_uvarint(len(self.protos))
+        data += mltn.write_enc_uvarint(len(self.protos))
         for p in self.protos:
             s = p.serialize()
-            data += struct.pack('<I', len(s)) + s
+            data += mltn.write_enc_uvarint(len(s))
+            data += s
         const_seed = mltn.gen_seed()
         const_block = mltn.encode_const_block(self.consts, const_seed)
-        data += mltn.write_uvarint(len(self.consts))
+        data += mltn.write_enc_uvarint(len(self.consts))
         data += bytes([const_seed])
         data += mltn.write_uvarint(len(const_block))
         data += const_block
-        data += mltn.write_uvarint(len(self.instructions))
+        data += mltn.write_enc_uvarint(len(self.instructions))
         proto_seed = mltn.gen_seed()
         data += bytes([proto_seed])
 
@@ -184,7 +185,7 @@ class FuncProto:
         )
         data += bytes([marker, dict_marker])
 
-        rle_stream = mltn.rle_encode_ops(op_list, marker)
+        rle_stream = mltn.rle_encode_ops(op_list, marker, dict_marker)
         atoms = mltn._split_atoms(rle_stream, marker)
         dictionary = mltn.build_dictionary(atoms)
         dict_encoded = mltn.dict_encode_atoms(atoms, dictionary, dict_marker)
@@ -1520,13 +1521,14 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
     p_nprotos = N(); p_protos = N(); p_sz = N(); p_p = N(); p_ni = N()
     p_nconsts = N(); p_consts = N(); p_ci = N(); p_cv = N()
     p_nins = N(); p_pseed = N(); p_ins = N(); p_ii = N(); p_iv = N(); p_ns = N(); p_np = N()
-    p_ubox = N(); p_vr = N(); p_rb = N(); p_args = N(); p_nargs = N(); p_va = N()
+    p_ubox = N(); p_vr = N(); p_rb = N(); p_args = N(); p_nargs = N(); p_va = N(); p_van = N()
     p_x = N(); p_val = N(); p_r = N()
     p_pc = N(); p_rd = N(); p_op2 = N(); p_a2 = N(); p_b2 = N(); p_c2 = N()
     p_fnv = N(); p_nargs2 = N(); p_nret = N(); p_callargs = N(); p_ncallargs = N(); p_jj = N(); p_kk = N(); p_res = N()
     p_objv = N(); p_mkey = N(); p_rawc = N(); p_multi = N(); p_mfn = N()
     p_cp = N(); p_childubox = N(); p_ud = N(); p_itf = N(); p_stt = N(); p_ctl = N()
     p_rbb = N(); p_getreg = N(); p_setreg = N(); p_boxreg = N(); p_proto = N()
+    p_vtop = N()
     p_lim = N(); p_st = N()
     p_regparam = N()
     p_tj1 = N(); p_tj2 = N(); p_tj3 = N()
@@ -1546,6 +1548,9 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
     def O(name): return om[name]
 
     uv_v = N()
+    euv_v = N()
+    p_eseed = N(); p_estate = N(); p_eprev = N(); p_eres = N(); p_esh = N()
+    p_eraw = N(); p_enewstate = N(); p_emask = N(); p_eb = N()
 
     AB2  = f"{p_a},{p_i}={uv_v}({p_d},{p_i}) {p_b},{p_i}={uv_v}({p_d},{p_i}) "
     AB2C = f"{p_a},{p_i}={uv_v}({p_d},{p_i}) {p_b},{p_i}={uv_v}({p_d},{p_i}) {p_cc},{p_i}={uv_v}({p_d},{p_i}) "
@@ -1604,6 +1609,21 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
         f"{p_st}={p_st}+7 "
         f"end "
         f"return {p_res},{p_i} end "
+        f"local function {euv_v}({p_d},{p_i}) "
+        f"local {p_eseed}={p_d}[{p_i}] {p_i}={p_i}+1 "
+        f"local {p_estate}={p_eseed} local {p_eprev}={p_eseed} "
+        f"local {p_eres}=0 local {p_esh}=0 "
+        f"while true do "
+        f"local {p_eraw}={p_d}[{p_i}] {p_i}={p_i}+1 "
+        f"local {p_enewstate}=({p_estate}*1103515245+12345)%256 "
+        f"local {p_emask}=bit32.bxor({p_enewstate},({p_eprev}*31)%256)%256 "
+        f"local {p_eb}=bit32.bxor({p_eraw},{p_emask})%256 "
+        f"{p_estate}={p_enewstate} {p_eprev}={p_emask} "
+        f"{p_eres}={p_eres}+bit32.lshift(bit32.band({p_eb},0x7F),{p_esh}) "
+        f"if bit32.band({p_eb},0x80)==0 then break end "
+        f"{p_esh}={p_esh}+7 "
+        f"end "
+        f"return {p_eres},{p_i} end "
         f"local function {ldc_v}({p_d},{p_i}) "
         f"local {p_t}={p_d}[{p_i}] {p_i}={p_i}+1 "
         f"if {p_t}==0 then return nil,{p_i} "
@@ -1655,14 +1675,14 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
         f"local {p_idx} {p_idx},{p_i}={uv_v}({p_d},{p_i}) "
         f"{p_updescs}[#{p_updescs}+1]={{kind={p_kind},idx={p_idx}}} "
         f"end "
-        f"local {p_nprotos} {p_nprotos},{p_i}={uv_v}({p_d},{p_i}) "
+        f"local {p_nprotos} {p_nprotos},{p_i}={euv_v}({p_d},{p_i}) "
         f"local {p_protos}={{}} "
         f"for {p_loopp}=1,{p_nprotos} do "
-        f"local {p_sz}={p_d}[{p_i}]+({p_d}[{p_i}+1]*256)+({p_d}[{p_i}+2]*65536)+({p_d}[{p_i}+3]*16777216) {p_i}={p_i}+4 "
+        f"local {p_sz} {p_sz},{p_i}={euv_v}({p_d},{p_i}) "
         f"local {p_p},{p_ni}={ldp_v}({p_d},{p_i}) {p_i}={p_ni} "
         f"{p_protos}[#{p_protos}+1]={p_p} "
         f"end "
-        f"local {p_nconsts} {p_nconsts},{p_i}={uv_v}({p_d},{p_i}) "
+        f"local {p_nconsts} {p_nconsts},{p_i}={euv_v}({p_d},{p_i}) "
         f"local {p_pseed}={p_d}[{p_i}] {p_i}={p_i}+1 "
         f"local {p_cblen} {p_cblen},{p_i}={uv_v}({p_d},{p_i}) "
         f"local {p_cbb}={{}} "
@@ -1678,7 +1698,7 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
         f"local {p_cbi}=1 "
         f"local {p_consts}={{}} "
         f"for {p_ci}=1,{p_nconsts} do local {p_cv},{p_ni}={ldc_v}({p_cbb},{p_cbi}) {p_consts}[{p_ci}]={p_cv} {p_cbi}={p_ni} end "
-        f"local {p_nins} {p_nins},{p_i}={uv_v}({p_d},{p_i}) "
+        f"local {p_nins} {p_nins},{p_i}={euv_v}({p_d},{p_i}) "
         f"local {p_pseed2}={p_d}[{p_i}] {p_i}={p_i}+1 "
         f"local {p_marker}={p_d}[{p_i}] {p_i}={p_i}+1 "
         f"local {p_dmarker}={p_d}[{p_i}] {p_i}={p_i}+1 "
@@ -1735,11 +1755,14 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
         f"local function {exec_v}({p_proto},{ubox_v},...) "
         f"local {p_vr}={{}} "
         f"local {p_rb}={{}} "
+        f"local {p_vtop}=0 "
         f"local {args_v}={{...}} "
         f"local {nargs_v}=select('#',...) "
         f"local {p_va}={{}} "
+        f"local {p_van}=0 "
         f"if {p_proto}.is_vararg then "
         f"for {i_v}={p_proto}.params+1,{nargs_v} do {p_va}[{i_v}-{p_proto}.params]={args_v}[{i_v}] end "
+        f"{p_van}={nargs_v}-{p_proto}.params if {p_van}<0 then {p_van}=0 end "
         f"end "
         f"for {i_v}=1,{p_proto}.params do {p_vr}[{i_v}-1]={args_v}[{i_v}] end "
         f"local {consts_v}={p_proto}.consts "
@@ -1784,7 +1807,7 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
         f"elseif {p_op2}=={O('SET_LIST_MULTI')} then "
         f"local {p_jj}={p_b2} local {p_kk}={consts_v}[{p_c2}+1] "
         f"local {p_t}={p_getreg}({p_a2}) "
-        f"while {p_getreg}({p_jj})~=nil do {p_t}[{p_kk}]={p_getreg}({p_jj}) {p_kk}={p_kk}+1 {p_jj}={p_jj}+1 end "
+        f"while {p_jj}<{p_vtop} do {p_t}[{p_kk}]={p_getreg}({p_jj}) {p_kk}={p_kk}+1 {p_jj}={p_jj}+1 end "
         f"elseif {p_op2}=={O('GET_FIELD')} then {p_setreg}({p_a2},{p_getreg}({p_b2})[{consts_v}[{p_c2}+1]]) "
         f"elseif {p_op2}=={O('SET_FIELD')} then {p_getreg}({p_a2})[{consts_v}[{p_b2}+1]]={p_getreg}({p_c2}) "
         f"elseif {p_op2}=={O('ADD')} then {p_setreg}({p_a2},{p_getreg}({p_b2})+{p_getreg}({p_c2})) "
@@ -1823,7 +1846,7 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
         f"local {p_fnv}={p_getreg}({p_a2}) local {p_nargs2}={p_b2} local {p_nret}={p_c2} "
         f"local {p_callargs}={{}} local {p_ncallargs}=0 "
         f"if {p_nargs2}==255 then "
-        f"local {p_jj}={p_a2}+1 local {p_kk}=1 while {p_getreg}({p_jj})~=nil do {p_callargs}[{p_kk}]={p_getreg}({p_jj}) {p_jj}={p_jj}+1 {p_kk}={p_kk}+1 end "
+        f"local {p_jj}={p_a2}+1 local {p_kk}=1 while {p_jj}<{p_vtop} do {p_callargs}[{p_kk}]={p_getreg}({p_jj}) {p_jj}={p_jj}+1 {p_kk}={p_kk}+1 end "
         f"{p_ncallargs}={p_kk}-1 "
         f"else for {p_jj}=1,{p_nargs2} do {p_callargs}[{p_jj}]={p_getreg}({p_a2}+{p_jj}) end {p_ncallargs}={p_nargs2} end "
         f"if type({p_fnv})=='function' then "
@@ -1831,6 +1854,7 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
         f"if {p_nret}==255 then "
         f"for {p_jj}=1,{p_res}.n do {p_setreg}({p_a2}+{p_jj}-1,{p_res}[{p_jj}]) end "
         f"{p_setreg}({p_a2}+{p_res}.n,nil) "
+        f"{p_vtop}={p_a2}+{p_res}.n "
         f"elseif {p_nret}>0 then {p_setreg}({p_a2},{p_res}[1]) end "
         f"else error('attempt to call a '..type({p_fnv})..' value',0) end "
         f"elseif {p_op2}=={O('CALL_METHOD')} then "
@@ -1841,7 +1865,7 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
         f"local {p_mfn}={p_objv}[{p_mkey}] "
         f"local {p_callargs}={{{p_objv}}} local {p_ncallargs}=1 "
         f"if {p_nargs2}==255 then "
-        f"local {p_jj}={p_a2}+1 local {p_kk}=2 while {p_getreg}({p_jj})~=nil do {p_callargs}[{p_kk}]={p_getreg}({p_jj}) {p_jj}={p_jj}+1 {p_kk}={p_kk}+1 end "
+        f"local {p_jj}={p_a2}+1 local {p_kk}=2 while {p_jj}<{p_vtop} do {p_callargs}[{p_kk}]={p_getreg}({p_jj}) {p_jj}={p_jj}+1 {p_kk}={p_kk}+1 end "
         f"{p_ncallargs}={p_kk}-1 "
         f"else for {p_jj}=1,{p_nargs2} do {p_callargs}[{p_jj}+1]={p_getreg}({p_a2}+{p_jj}) end {p_ncallargs}=1+{p_nargs2} end "
         f"if type({p_mfn})=='function' then "
@@ -1849,6 +1873,7 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
         f"if {p_multi} then "
         f"for {p_jj}=1,{p_res}.n do {p_setreg}({p_a2}+{p_jj}-1,{p_res}[{p_jj}]) end "
         f"{p_setreg}({p_a2}+{p_res}.n,nil) "
+        f"{p_vtop}={p_a2}+{p_res}.n "
         f"elseif {p_res}.n>=1 then {p_setreg}({p_a2},{p_res}[1]) end "
         f"else error('attempt to call a '..type({p_mfn})..' value',0) end "
         f"elseif {p_op2}=={O('RETURN')} then "
@@ -1857,13 +1882,15 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
         f"elseif {p_nret}==0 then return "
         f"elseif {p_nret}==255 then "
         f"local {p_res}={{}} local {p_jj}=0 "
-        f"while {p_getreg}({p_rbb}+{p_jj})~=nil do {p_res}[{p_jj}+1]={p_getreg}({p_rbb}+{p_jj}) {p_jj}={p_jj}+1 end "
+        f"while {p_rbb}+{p_jj}<{p_vtop} do {p_res}[{p_jj}+1]={p_getreg}({p_rbb}+{p_jj}) {p_jj}={p_jj}+1 end "
         f"return table.unpack({p_res}) "
         f"else local {p_res}={{}} for {p_jj}=0,{p_nret}-1 do {p_res}[{p_jj}+1]={p_getreg}({p_rbb}+{p_jj}) end return table.unpack({p_res}) end "
         f"elseif {p_op2}=={O('RETURN_NONE')} then return "
         f"elseif {p_op2}=={O('VARARG')} then "
         f"local {p_nret}={p_b2} "
-        f"if {p_nret}==255 then for {p_jj}=1,#{p_va} do {p_setreg}({p_a2}+{p_jj}-1,{p_va}[{p_jj}]) end "
+        f"if {p_nret}==255 then for {p_jj}=1,{p_van} do {p_setreg}({p_a2}+{p_jj}-1,{p_va}[{p_jj}]) end "
+        f"{p_setreg}({p_a2}+{p_van},nil) "
+        f"{p_vtop}={p_a2}+{p_van} "
         f"elseif {p_nret}==1 then {p_setreg}({p_a2},{p_va}[1]) end "
         f"elseif {p_op2}=={O('CLOSURE')} then "
         f"local {p_cp}={protos_v}[{p_b2}+1] "
