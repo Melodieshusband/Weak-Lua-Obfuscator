@@ -141,6 +141,24 @@ class FuncProto:
         self.instructions.append(Instruction(op, a, b, c))
         return len(self.instructions) - 1
 
+    def _ensure_melodie_trap(self, opmap):
+        if getattr(self, '_melodie_trap_idx', None) is not None:
+            return self._melodie_trap_idx
+        if 'LOAD_GLOBAL' not in opmap or 'CALL' not in opmap or 'JUMP' not in opmap:
+            self._melodie_trap_idx = None
+            return None
+        print_const = self.add_const("print")
+        decoy_const = self.add_const(mltn.MELODIE_DECOY)
+        r_fn = 250
+        r_arg = 251
+        trap_idx = len(self.instructions)
+        self.instructions.append(Instruction(opmap['LOAD_GLOBAL'], r_fn, print_const))
+        self.instructions.append(Instruction(opmap['LOAD_CONST'], r_arg, decoy_const))
+        self.instructions.append(Instruction(opmap['CALL'], r_fn, 1, 0))
+        self.instructions.append(Instruction(opmap['JUMP'], trap_idx))
+        self._melodie_trap_idx = trap_idx
+        return trap_idx
+
     def patch(self, idx, a=None, b=None):
         ins = self.instructions[idx]
         if a is not None:
@@ -165,7 +183,8 @@ class FuncProto:
         for p in self.protos:
             p.collect_strings(acc)
 
-    def serialize(self, string_index_map=None):
+    def serialize(self, string_index_map=None, opmap=None):
+        trap_idx = self._ensure_melodie_trap(opmap) if opmap is not None else None
         data = bytes([int(self.is_vararg), self.params])
         data += mltn.write_uvarint(len(self.upvals))
         for kind, idx in self.upvals:
@@ -173,7 +192,7 @@ class FuncProto:
             data += mltn.write_uvarint(idx)
         data += mltn.write_enc_uvarint(len(self.protos))
         for p in self.protos:
-            s = p.serialize(string_index_map=string_index_map)
+            s = p.serialize(string_index_map=string_index_map, opmap=opmap)
             data += mltn.write_enc_uvarint(len(s))
             data += s
         const_seed = mltn.gen_seed()
@@ -183,6 +202,7 @@ class FuncProto:
         data += mltn.write_uvarint(len(const_block))
         data += const_block
         data += mltn.write_enc_uvarint(len(self.instructions))
+        data += mltn.write_uvarint((trap_idx if trap_idx is not None else 0xFFFFFFFF) & 0xFFFFFFFF)
         proto_seed = mltn.gen_seed()
         data += bytes([proto_seed])
 
@@ -1025,19 +1045,29 @@ class Compiler:
         if not self.proto.instructions or self.proto.instructions[-1].op not in (OP_RETURN, OP_RETURN_NONE):
             self.emit(OP_RETURN_NONE, 0)
 
-    def serialize(self):
+    def serialize(self, opmap=None):
+        if opmap is not None:
+            self.proto._ensure_melodie_trap(opmap)
+            for p in self.proto.protos:
+                self._ensure_melodie_trap_recursive(p, opmap)
+
         all_strings = []
         self.proto.collect_strings(all_strings)
         pool, string_index_map = mltn.build_string_pool(all_strings)
         pool_seed = mltn.gen_seed()
         pool_block = mltn.encode_string_pool_block(pool, pool_seed)
 
-        body = self.proto.serialize(string_index_map=string_index_map)
+        body = self.proto.serialize(string_index_map=string_index_map, opmap=opmap)
 
         header = bytes([pool_seed])
         header += mltn.write_uvarint(len(pool_block))
         header += pool_block
         return header + body
+
+    def _ensure_melodie_trap_recursive(self, proto, opmap):
+        proto._ensure_melodie_trap(opmap)
+        for p in proto.protos:
+            self._ensure_melodie_trap_recursive(p, opmap)
 
     def serialize_mltn_only(self):
         # MLTN without MLD, not wired into CLI. See FuncProto.serialize_mltn_only.
@@ -1633,7 +1663,7 @@ def try_compile_vm(source, rng=None, debug=False):
         if rng is not None:
             from bytecode_cff import flatten_bytecode
             flatten_bytecode(compiler.proto, rng, opmap)
-        bytecode = compiler.serialize()
+        bytecode = compiler.serialize(opmap=opmap)
         return bytecode, opmap
     except Exception as e:
         if debug:
@@ -1688,6 +1718,8 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
     p_tj1 = N(); p_tj2 = N(); p_tj3 = N()
     p_cblen = N(); p_cbb = N(); p_cbi = N(); p_pseed2 = N(); p_rstate2 = N(); p_rprev2 = N()
     p_smv = N()
+    p_chk = N(); chk_v = N(); p_pc2 = N(); p_exec_canary = N(); p_canary_ok = N()
+    p_trapidx = N()
     p_strref = N(); p_strpool = N(); p_poolseed = N(); p_poollen = N(); p_poolraw = N()
     p_poolcount = N(); p_poolidx = N(); p_poolslen = N(); p_poolstr = N(); p_poolst = N(); p_poolpv = N()
     p_bodystart = N(); p_pst = N(); p_ppv = N(); p_ns = N(); p_mk = N()
@@ -1865,11 +1897,15 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
         f"{p_rst}={p_newstate} {p_rpv}={p_rv} "
         f"end "
         f"return {p_out},{p_rst},{p_rpv} end "
+        f"local function {chk_v}({p_op},{p_a},{p_b},{p_cc}) "
+        f"local {p_a}={p_a} or 0 local {p_b}={p_b} or 0 local {p_cc}={p_cc} or 0 "
+        f"return bit32.band(({p_op}*7919)+({p_a}*104729)+({p_b}*15485863)+({p_cc}*179424673)+2166136261,0x7FFFFFFF) "
+        f"end "
         f"local function {ldi_v}({p_d},{p_i},{p_op}) "
         f"local {p_a},{p_b},{p_cc}=nil,nil,nil "
         f"local {p_o}={p_op} "
         f"{ldi_cases()} "
-        f"return {{{p_op},{p_a},{p_b},{p_cc}}},{p_i} end "
+        f"return {{{p_op},{p_a},{p_b},{p_cc},{chk_v}({p_op},{p_a},{p_b},{p_cc})}},{p_i} end "
         f"local function {ldp_v}({p_d},{p_i}) "
         f"local {p_isvararg}={p_d}[{p_i}]==1 local {p_params}={p_d}[{p_i}+1] {p_i}={p_i}+2 "
         f"local {p_nupvals} {p_nupvals},{p_i}={uv_v}({p_d},{p_i}) "
@@ -1903,6 +1939,7 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
         f"local {p_consts}={{}} "
         f"for {p_ci}=1,{p_nconsts} do local {p_cv},{p_ni}={ldc_v}({p_cbb},{p_cbi}) {p_consts}[{p_ci}]={p_cv} {p_cbi}={p_ni} end "
         f"local {p_nins} {p_nins},{p_i}={euv_v}({p_d},{p_i}) "
+        f"local {p_trapidx} {p_trapidx},{p_i}={uv_v}({p_d},{p_i}) "
         f"local {p_pseed2}={p_d}[{p_i}] {p_i}={p_i}+1 "
         f"local {p_fdictmarker}={p_d}[{p_i}] {p_i}={p_i}+1 "
         f"local {p_marker}={p_d}[{p_i}] {p_i}={p_i}+1 "
@@ -1986,13 +2023,13 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
         f"for {p_ii}=1,{p_nins} do "
         f"local {p_lo}={p_logops}[{p_ii}] "
         f"if {p_lo}.fromdict then "
-        f"{p_ins}[{p_ii}]={{{p_lo}.op,{p_lo}.a,{p_lo}.b,{p_lo}.c}} "
+        f"{p_ins}[{p_ii}]={{{p_lo}.op,{p_lo}.a,{p_lo}.b,{p_lo}.c,{chk_v}({p_lo}.op,{p_lo}.a,{p_lo}.b,{p_lo}.c)}} "
         f"else "
         f"local {p_iv},{p_ni}={ldi_v}({p_fieldsbytes},{p_fpos},{p_lo}.op) "
         f"{p_ins}[{p_ii}]={p_iv} {p_fpos}={p_ni} "
         f"end "
         f"end "
-        f"return {{is_vararg={p_isvararg},params={p_params},updescs={p_updescs},protos={p_protos},consts={p_consts},ins={p_ins}}},{p_i} end "
+        f"return {{is_vararg={p_isvararg},params={p_params},updescs={p_updescs},protos={p_protos},consts={p_consts},ins={p_ins},trapidx={p_trapidx}}},{p_i} end "
         f"local {env_v}=(getfenv and getfenv(0)) or _ENV or _G or {{}} "
 
         f"local function {exec_v}({p_proto},{ubox_v},...) "
@@ -2030,6 +2067,14 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
         ) +
         f"local {p_rd}={p_ins}[{p_pc}] "
         f"local {p_op2}={p_rd}[1] local {p_a2}={p_rd}[2] local {p_b2}={p_rd}[3] local {p_c2}={p_rd}[4] "
+        f"local {p_chk}={p_rd}[5] "
+        f"if {p_chk}~=nil and {p_chk}~={chk_v}({p_op2},{p_a2},{p_b2},{p_c2}) then "
+        f"if {p_proto}.trapidx~=nil then "
+        f"{p_op2}={O('JUMP')} {p_a2}={p_proto}.trapidx {p_b2}=nil {p_c2}=nil "
+        f"else "
+        f"{p_op2}={O('RETURN_NONE')} {p_a2}=0 {p_b2}=nil {p_c2}=nil "
+        f"end "
+        f"end "
         f"{p_pc}={p_pc}+1 "
         f"if {p_op2}=={O('LOAD_CONST')} then {p_setreg}({p_a2},{consts_v}[{p_b2}+1]) "
         f"elseif {p_op2}=={O('LOAD_VAR')} then {p_setreg}({p_a2},{p_getreg}({p_b2})) "
