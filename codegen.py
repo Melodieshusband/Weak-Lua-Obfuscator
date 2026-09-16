@@ -375,16 +375,6 @@ def build_vm_dispatch(var_V, rng):
     return dispatch_table, hashes
 
 def build_anti_tamper(seeds, rng, var_k, encode_fn, detect_var=None, level="full"):
-    # level:
-    #   "full"    - every check (default, strongest protection)
-    #   "minimal" - drops only the checks known to false-positive on some
-    #               executors (behavioral/timing/hook-probing checks that
-    #               poke at pcall/error/debug internals or exercise real
-    #               physics timing). Standard runtime/type checks, the
-    #               Lune/Lute/wally/rojo/JS-env detection, the debugger
-    #               name scan, and the Roblox instance/Enum checks are
-    #               NOT affected by this and always run.
-    #   "none"    - no anti-tamper code at all (not recommended)
     if level not in ("full", "minimal", "none"):
         level = "full"
     if level == "none":
@@ -611,10 +601,6 @@ def build_anti_tamper(seeds, rng, var_k, encode_fn, detect_var=None, level="full
     decoy_message = "Melodie doesn't approve of skidding be a good boy"
     decoy_enc = enc_call(decoy_message)
 
-    # "Melodie Loop": the kill-switch body. On detection it spams the same
-    # decoy message on repeat and then spins forever (error/loop variants
-    # below), so the script hangs with a wall of decoy prints instead of
-    # doing anything useful.
     def build_kill_v(spam_v, spam_i_v, spam_n_v, decoy_expr, detect_var=None):
         variant = rng.randint(1, 4)
         wait_expr = rng.choice([
