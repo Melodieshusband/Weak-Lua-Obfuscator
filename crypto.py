@@ -72,7 +72,7 @@ def encode_string(text, call_id, seeds):
     key = seeds["KEY"]
     alphabet = build_alphabet(key, seeds["NONCE_BASE"])
     N = len(alphabet)
-    data = bytes(ord(c) & 0xFF for c in text)
+    data = text.encode("utf-8")
     nonce_lo, nonce_hi = derive_nonce(call_id, key, seeds["NONCE_BASE"])
     ks = keystream(key, nonce_lo, nonce_hi, len(data))
     encrypted = bytes(b ^ k for b, k in zip(data, ks))
@@ -101,7 +101,7 @@ def decode_string(encoded, call_id, seeds):
     nonce_lo, nonce_hi = derive_nonce(call_id, key, seeds["NONCE_BASE"])
     ks = keystream(key, nonce_lo, nonce_hi, len(encrypted))
     data = bytes(b ^ k for b, k in zip(encrypted, ks))
-    return "".join(chr(b) for b in data)
+    return data.decode("utf-8", errors="surrogateescape")
 
 def encrypt_bytes(data, call_id, seeds):
     key = seeds["KEY"]
