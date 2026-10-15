@@ -6,7 +6,7 @@ from codegen import (
     build_runtime_header, build_vm_dispatch,
     build_anti_tamper, build_runtime_footer,
 )
-from vm import try_compile_vm, bytecode_to_lua
+from vm import try_compile_vm, bytecode_to_lua, bytecode_to_lua_legacy
 from string_fold import fold_strings
 from number_fold import fold_numbers
 
@@ -175,7 +175,7 @@ class Obfuscator:
         else:
             bytecode_result = try_compile_vm(source, rng=rng)
             if bytecode_result is not None:
-                bytecode, opmap = bytecode_result
+                bytecode, opmap, bc_format = bytecode_result
                 use_vm = True
             else:
                 if force_vm:
@@ -222,7 +222,8 @@ class Obfuscator:
 
         if use_vm:
             data_expr = self.build_vm_data_expr(bytecode, prims)
-            payload = bytecode_to_lua(bytecode, rng, gen_name, opmap, data_expr=data_expr, detect_var=detect_var)
+            encode_fn = bytecode_to_lua if bc_format == "mltn" else bytecode_to_lua_legacy
+            payload = encode_fn(bytecode, rng, gen_name, opmap, data_expr=data_expr, detect_var=detect_var)
             vmres_v = gen_name()
             if hide_vm_source:
                 chunk_src = f"return (function(...) {payload} end)(...)"
@@ -286,6 +287,8 @@ class Obfuscator:
 
         if use_vm:
             mode = "VM (hidden source)" if hide_vm_source else "VM (no loadstring)"
+            bc_label = "MLTN+MLD compressed" if bc_format == "mltn" else "plain (compression skipped, would have grown output)"
+            mode = f"{mode}, bytecode: {bc_label}"
         else:
             mode = "chunks+string-fold"
         mode = f"{mode}, Anti-Tamper: {at_label}"

@@ -1663,8 +1663,11 @@ def try_compile_vm(source, rng=None, debug=False):
         if rng is not None:
             from bytecode_cff import flatten_bytecode
             flatten_bytecode(compiler.proto, rng, opmap)
-        bytecode = compiler.serialize(opmap=opmap)
-        return bytecode, opmap
+        bytecode_legacy = compiler.serialize_legacy()
+        bytecode_mltn = compiler.serialize(opmap=opmap)
+        if len(bytecode_mltn) < len(bytecode_legacy):
+            return bytecode_mltn, opmap, "mltn"
+        return bytecode_legacy, opmap, "legacy"
     except Exception as e:
         if debug:
             import traceback

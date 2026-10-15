@@ -41,6 +41,20 @@ def main():
         print("[!] You can only pick one of: --full-anti-tamper, --minimal-anti-tamper, --no-anti-tamper")
         sys.exit(1)
 
+    if hide_vm_source:
+        print("[!] WARNING: --hide-vm-source loads the VM dispatch loop via loadstring/load.")
+        print("[!] This is a WEAK protection method. Any executor, debugger or hook that")
+        print("[!] intercepts loadstring/load (a very common technique) can recover the")
+        print("[!] plain VM source directly from memory, which defeats this protection")
+        print("[!] completely. Only use this if your target environment truly requires it.")
+        try:
+            answer = input("[?] Continue with this weak protection method? (Y/N): ").strip().lower()
+        except EOFError:
+            answer = "n"
+        if answer != "y":
+            print("[!] Aborted. Re-run without --hide-vm-source for the stronger default mode.")
+            sys.exit(0)
+
     if at_none:
         anti_tamper_level = "none"
     elif at_minimal:
