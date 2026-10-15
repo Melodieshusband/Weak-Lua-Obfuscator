@@ -124,6 +124,27 @@ class Obfuscator:
 
         return "".join(lines)
 
+    def build_hidden_chunk(self, lua_source, env_names=None):
+        ls_v = gen_name()
+        env_v = gen_name()
+        fn_v = gen_name()
+        er_v = gen_name()
+        lines = []
+        lines.append(f"local {ls_v}=loadstring or load ")
+        lines.append(
+            f"local {env_v}=setmetatable({{}},{{__index=(getfenv and getfenv(0)) or _ENV or {{}}}}) "
+        )
+        for real_name in (env_names or []):
+            kn_v = gen_name()
+            lines.append(
+                f"do local {kn_v}={self.k_call(real_name, ret_type=1)} "
+                f"{env_v}[{kn_v}]={real_name} end "
+            )
+        lines.append(f"local {fn_v},{er_v}={ls_v}({self.k_call(lua_source, ret_type=1)}) ")
+        lines.append(f"if not {fn_v} then error({er_v} or '',0) end ")
+        lines.append(f"if setfenv then setfenv({fn_v},{env_v}) end ")
+        return "".join(lines), fn_v
+
     def build_vm_data_expr(self, bytecode, prims):
         cid = self.next_call_id()
         enc = encrypt_bytes(bytecode, cid, self.seeds)
@@ -145,7 +166,7 @@ class Obfuscator:
         )
         return expr
 
-    def obfuscate(self, force_vm=False, force_fold=False, anti_tamper_level="full"):
+    def obfuscate(self, force_vm=False, force_fold=False, anti_tamper_level="full", hide_vm_source=False):
         source = self.source
         rng = self.rng
 
@@ -168,7 +189,9 @@ class Obfuscator:
             self.wm_var,
         )
 
-        dispatch_table, hashes = build_vm_dispatch(self.var_V, rng)
+        dispatch_expr, hashes = build_vm_dispatch(rng)
+        dispatch_loader, dispatch_fn_v = self.build_hidden_chunk(f"return {dispatch_expr}")
+        dispatch_table = f"{dispatch_loader}local {self.var_V}={dispatch_fn_v}() "
 
         detect_var = gen_name()
 
@@ -201,10 +224,20 @@ class Obfuscator:
             data_expr = self.build_vm_data_expr(bytecode, prims)
             payload = bytecode_to_lua(bytecode, rng, gen_name, opmap, data_expr=data_expr, detect_var=detect_var)
             vmres_v = gen_name()
-            payload_stage = (
-                f"local {vmres_v}={{true,(function(...) {payload} end)()}} "
-                f"{res_var}={vmres_v} "
-            )
+            if hide_vm_source:
+                chunk_src = f"return (function(...) {payload} end)(...)"
+                env_names = [detect_var, prims["ks"], prims["xorb"], prims["blk"], prims["nb"]]
+                vm_loader, vm_fn_v = self.build_hidden_chunk(chunk_src, env_names=env_names)
+                payload_stage = (
+                    f"{vm_loader}"
+                    f"local {vmres_v}={{true,{vm_fn_v}()}} "
+                    f"{res_var}={vmres_v} "
+                )
+            else:
+                payload_stage = (
+                    f"local {vmres_v}={{true,(function(...) {payload} end)()}} "
+                    f"{res_var}={vmres_v} "
+                )
         else:
             flattened = ast_flatten_source(source, rng, gen_name, detect_var=detect_var)
             if flattened is None:
@@ -251,6 +284,9 @@ class Obfuscator:
             "]]\n"
         )
 
-        mode = "VM (no loadstring)" if use_vm else "chunks+string-fold"
+        if use_vm:
+            mode = "VM (hidden source)" if hide_vm_source else "VM (no loadstring)"
+        else:
+            mode = "chunks+string-fold"
         mode = f"{mode}, Anti-Tamper: {at_label}"
         return banner + header + body + footer, mode

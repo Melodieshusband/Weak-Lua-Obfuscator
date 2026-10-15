@@ -328,7 +328,7 @@ def build_runtime_header(seeds, var_k, var_Q, var_G, var_B, var_f, var_V, wm_var
         f"local {valv_v}=table.concat({ig3_v}) local {result_v} if {par_ka_b1}==1 then {result_v}={valv_v} elseif {par_ka_b1}==2 then local {nv_v}=tonumber({valv_v}) {result_v}={nv_v}==nil and 0 or {nv_v} elseif {par_ka_b1}==3 then {result_v}={valv_v}=='1' end {CC_v}[{ck_v}]={result_v} return {result_v} end "
     ), {"ks": ks_v, "xorb": xorb_v, "nb": nb_v, "sc": sc, "blk": blk_v}
 
-def build_vm_dispatch(var_V, rng):
+def build_vm_dispatch(rng):
     import re
     ops = {
         "add":    ("s,m", "s+m"),
@@ -371,8 +371,8 @@ def build_vm_dispatch(var_V, rng):
                 real_expr = re.sub(r'\bm\b', pm, real_expr)
             dispatch_lines.append(f"[{h}]=function({real_params}) return {real_expr} end")
 
-    dispatch_table = f"local {var_V}={{{';'.join(dispatch_lines)}}} "
-    return dispatch_table, hashes
+    dispatch_expr = f"{{{';'.join(dispatch_lines)}}}"
+    return dispatch_expr, hashes
 
 def build_anti_tamper(seeds, rng, var_k, encode_fn, detect_var=None, level="full"):
     if level not in ("full", "minimal", "none"):

@@ -6,6 +6,7 @@ def main():
     args = sys.argv[1:]
     force_vm   = '--vm'   in args
     force_fold = '--fold' in args
+    hide_vm_source = '--hide-vm-source' in args
 
     at_none    = '--no-anti-tamper'      in args
     at_minimal = '--minimal-anti-tamper' in args
@@ -17,6 +18,10 @@ def main():
         print("Usage: python main.py <input.lua> [output.lua] [--vm | --fold] [anti-tamper flag]")
         print("  --vm                     Use VM bytecode")
         print("  --fold                   Use string-fold (without VM)")
+        print("  --hide-vm-source         With --vm, encrypt the VM dispatch loop itself")
+        print("                           and load it with loadstring/load instead of")
+        print("                           emitting it as plain Lua. Breaks executors that")
+        print("                           block loadstring, so it is off by default.")
         print("")
         print("Anti-Tamper flags (default: full):")
         print("  --full-anti-tamper       All checks enabled (default, strongest protection)")
@@ -58,6 +63,7 @@ def main():
         result, mode = obf.obfuscate(
             force_vm=force_vm, force_fold=force_fold,
             anti_tamper_level=anti_tamper_level,
+            hide_vm_source=hide_vm_source,
         )
     except RuntimeError as e:
         print(f"[!] {e}")
