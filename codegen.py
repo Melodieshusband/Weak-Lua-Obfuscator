@@ -63,6 +63,7 @@ def build_runtime_header(seeds, var_k, var_Q, var_G, var_B, var_f, var_V, wm_var
     hh_v    = gen_name()
     ll_v    = gen_name()
     kk_v    = gen_name()
+    cc_v    = gen_name()
     dd_v    = gen_name()
     ig3_v   = gen_name()
     ck_v    = gen_name()
@@ -96,9 +97,12 @@ def build_runtime_header(seeds, var_k, var_Q, var_G, var_B, var_f, var_V, wm_var
     nonce_base = seeds["NONCE_BASE"]
     c0, c1, c2, c3 = CHACHA_CONST
 
-    band  = "bit32.band"
-    bxor  = "bit32.bxor"
-    lrot  = "bit32.lrotate"
+    band   = "bit32.band"
+    bxor   = "bit32.bxor"
+    lrot   = "bit32.lrotate"
+    bor    = "bit32.bor"
+    lshift = "bit32.lshift"
+    rshift = "bit32.rshift"
 
     key_rng = random.Random(secrets.randbits(64))
 
@@ -317,7 +321,28 @@ def build_runtime_header(seeds, var_k, var_Q, var_G, var_B, var_f, var_V, wm_var
         f"local {N_v}=#{alpha_v} "
         f"local {RA_v}={{}} "
         f"for {ri_v}=1,{N_v},1 do {RA_v}[{sb}({alpha_v},{ri_v})]={ri_v} end "
-        f"local function {g3}({par_ga}) if type({par_ga})~='string' then return nil end local {al_v}=#{par_ga} if {al_v}%2~=0 then return nil end local {ig3_v}={{}} for {iw_v}=1,{al_v},2 do local {hh_v}={RA_v}[{sb}({par_ga},{iw_v})] local {ll_v}={RA_v}[{sb}({par_ga},{iw_v}+1)] if not {hh_v} or not {ll_v} then return nil end local {kk_v}=({hh_v}-1)*{N_v}+({ll_v}-1) if {kk_v}<0 or {kk_v}>255 then return nil end {ig3_v}[#{ig3_v}+1]={kk_v} end return {ig3_v} end "
+        f"local function {g3}({par_ga}) "
+        f"if type({par_ga})~='string' then return nil end "
+        f"local {al_v}=#{par_ga} "
+        f"local {hh_v}=0 local {ll_v}=0 local {kk_v}=-1 "
+        f"local {ig3_v}={{}} "
+        f"for {iw_v}=1,{al_v},1 do "
+        f"local {cc_v}={RA_v}[{sb}({par_ga},{iw_v})] "
+        f"if not {cc_v} then return nil end "
+        f"{cc_v}={cc_v}-1 "
+        f"if {kk_v}<0 then {kk_v}={cc_v} else "
+        f"{kk_v}={kk_v}+{cc_v}*91 "
+        f"{hh_v}={bor}({hh_v},{lshift}({kk_v},{ll_v})) "
+        f"if {band}({kk_v},8191)>88 then {ll_v}={ll_v}+13 else {ll_v}={ll_v}+14 end "
+        f"while {ll_v}>=8 do "
+        f"{ig3_v}[#{ig3_v}+1]={band}({hh_v},255) "
+        f"{hh_v}={rshift}({hh_v},8) "
+        f"{ll_v}={ll_v}-8 "
+        f"end "
+        f"{kk_v}=-1 "
+        f"end end "
+        f"if {kk_v}>=0 then {ig3_v}[#{ig3_v}+1]={band}({bor}({hh_v},{lshift}({kk_v},{ll_v})),255) end "
+        f"return {ig3_v} end "
         f"local {CC_v}={{}} "
         f"{var_k}=function({par_ka_a},{par_ka_b1},{par_ka_b2},{par_ka_b3},{par_ka_b4},{par_ka_d1},{par_ka_d2}) local {ck_v}={par_ka_b3}*{seeds['MK']}+{par_ka_b1} if {CC_v}[{ck_v}]~=nil then return {CC_v}[{ck_v}] end "
         f"local {dd_v}={g3}({par_ka_a}) if not {dd_v} then return nil end "

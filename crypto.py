@@ -68,36 +68,72 @@ def derive_nonce(call_id, key, nonce_base):
     words = chacha_block(key, call_id & MASK32, (nonce_base, 0xC2B2AE35, 0x9E3779B9))
     return words[0] & MASK32, words[1] & MASK32
 
+def base91_encode(data, alphabet):
+    b = 0
+    nbits = 0
+    out = []
+    for byte in data:
+        b |= byte << nbits
+        nbits += 8
+        if nbits > 13:
+            v = b & 8191
+            if v > 88:
+                b >>= 13
+                nbits -= 13
+            else:
+                v = b & 16383
+                b >>= 14
+                nbits -= 14
+            out.append(alphabet[v % 91])
+            out.append(alphabet[v // 91])
+    if nbits:
+        out.append(alphabet[b % 91])
+        if nbits > 7 or b > 90:
+            out.append(alphabet[b // 91])
+    return "".join(out)
+
+def base91_decode(encoded, ra):
+    b = 0
+    nbits = 0
+    v = -1
+    out = bytearray()
+    for ch in encoded:
+        c = ra.get(ch)
+        if c is None:
+            return None
+        if v < 0:
+            v = c
+        else:
+            v += c * 91
+            b |= v << nbits
+            nbits += 13 if (v & 8191) > 88 else 14
+            while nbits >= 8:
+                out.append(b & 255)
+                b >>= 8
+                nbits -= 8
+            v = -1
+    if v >= 0:
+        out.append((b | (v << nbits)) & 255)
+    return bytes(out)
+
 def encode_string(text, call_id, seeds):
     key = seeds["KEY"]
     alphabet = build_alphabet(key, seeds["NONCE_BASE"])
-    N = len(alphabet)
+    if len(alphabet) != 91:
+        return None
     data = text.encode("utf-8")
     nonce_lo, nonce_hi = derive_nonce(call_id, key, seeds["NONCE_BASE"])
     ks = keystream(key, nonce_lo, nonce_hi, len(data))
     encrypted = bytes(b ^ k for b, k in zip(data, ks))
-    result = []
-    for b in encrypted:
-        hi = b // N
-        lo = b % N
-        if hi >= N or lo >= N:
-            return None
-        result.append(alphabet[hi])
-        result.append(alphabet[lo])
-    return "".join(result)
+    return base91_encode(encrypted, alphabet)
 
 def decode_string(encoded, call_id, seeds):
     key = seeds["KEY"]
     alphabet = build_alphabet(key, seeds["NONCE_BASE"])
-    N = len(alphabet)
     ra = {c: i for i, c in enumerate(alphabet)}
-    encrypted = bytearray()
-    for i in range(0, len(encoded), 2):
-        h = ra.get(encoded[i])
-        l = ra.get(encoded[i + 1])
-        if h is None or l is None:
-            return None
-        encrypted.append(h * N + l)
+    encrypted = base91_decode(encoded, ra)
+    if encrypted is None:
+        return None
     nonce_lo, nonce_hi = derive_nonce(call_id, key, seeds["NONCE_BASE"])
     ks = keystream(key, nonce_lo, nonce_hi, len(encrypted))
     data = bytes(b ^ k for b, k in zip(encrypted, ks))
