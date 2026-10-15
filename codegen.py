@@ -656,14 +656,6 @@ def build_anti_tamper(seeds, rng, var_k, encode_fn, detect_var=None, level="full
         f"end "
     )
 
-    tb_line_marker = f"__mvln_{rng.randint(100000,999999)}_{secrets.token_hex(6)}"
-    tb_v2   = gen_name()
-    tbat_v  = gen_name()
-    tbrep_v = gen_name()
-    tbact_v = gen_name()
-    tbn_v   = gen_name()
-    tbok_v  = gen_name()
-
     idc_f1_v  = gen_name()
     idc_f2_v  = gen_name()
     idc_s1a_v = gen_name()
@@ -687,21 +679,6 @@ def build_anti_tamper(seeds, rng, var_k, encode_fn, detect_var=None, level="full
         f"local {idc_ok2_v},{idc_l2_v}={opcall_v}({odbg_v}.info,{idc_f1_v},'l') "
         f"if {idc_ok1_v} and {idc_ok2_v} and {otype_v}({idc_l1_v})=='number' and {otype_v}({idc_l2_v})=='number' and {idc_l1_v}~={idc_l2_v} then {kill_v}() end "
         f"end end "
-    )
-
-    traceback_line_check = (
-        f"-- {tb_line_marker}\n"
-        f"do local {tb_v2}={odbg_v} and {odbg_v}.traceback and {odbg_v}.traceback() "
-        f"local {tbok_v}={otype_v}({tb_v2})=='string' "
-        f"if {tbok_v} then "
-        f"local {tbat_v}=string.find({tb_v2},'{tb_line_marker}') "
-        f"if {tbat_v} then "
-        f"local {tbrep_v}=nil "
-        f"for {tbn_v} in string.gmatch(string.sub({tb_v2},{tbat_v}),':(%d*)\\n') do "
-        f"{tbrep_v}={tbrep_v} or tonumber({tbn_v}) end "
-        f"local {tbact_v}={odbg_v}.info and {odbg_v}.info(2,'l') "
-        f"if {tbrep_v} and {tbact_v} and {tbrep_v}~={tbact_v} then {kill_v}() end "
-        f"end end end "
     )
 
     stat_n_v   = gen_name()
@@ -972,7 +949,6 @@ def build_anti_tamper(seeds, rng, var_k, encode_fn, detect_var=None, level="full
     # real Roblox physics timing closely. Dropped on level="minimal".
     risky_checks = (
         f"{err_probe_check}"
-        f"{traceback_line_check}"
         f"{identity_consistency_check}"
         f"{statistical_check}"
         f"{roblox_behavior_check}"
