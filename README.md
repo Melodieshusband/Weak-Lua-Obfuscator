@@ -53,9 +53,9 @@ python main.py <input.lua> [output.lua] [--vm | --fold] [anti-tamper flag]
 
 | Example | What it does |
 | --- | --- |
-| `python main.py input.lua` | Default (fold) mode, full anti-tamper |
+| `python main.py input.lua` | Default (VM) mode, full anti-tamper |
 | `python main.py input.lua output.lua --fold` | Explicit fold mode |
-| `python main.py input.lua output.lua --vm` | Compile to custom bytecode and run it on a generated VM |
+| `python main.py input.lua output.lua --vm` | Explicit VM mode |
 | `python main.py input.lua output.lua --minimal-anti-tamper` | Relaxed anti-tamper for picky executors |
 | `python main.py input.lua output.lua --vm --minimal-anti-tamper` | VM mode + relaxed anti-tamper |
 | `python main.py input.lua output.lua --no-anti-tamper` | No anti-tamper (not recommended) |
@@ -64,7 +64,7 @@ python main.py <input.lua> [output.lua] [--vm | --fold] [anti-tamper flag]
 
 | Flag | Description |
 | --- | --- |
-| `--vm` | Compile the script to custom bytecode and run it on a per-build interpreter |
+| `--vm` | Compile the script to custom bytecode and run it on a per-build interpreter **(default)** |
 | `--fold` | Control-flow flattening + number folding + string encryption, no VM |
 | `--full-anti-tamper` | All checks enabled **(default)** |
 | `--minimal-anti-tamper` | Drops checks known to false-positive on some executors |
@@ -75,7 +75,7 @@ python main.py <input.lua> [output.lua] [--vm | --fold] [anti-tamper flag]
 
 ## 🧩 Modes
 
-| | **Fold** (default / `--fold`) | **VM** (`--vm`) |
+| | **Fold** (`--fold`) | **VM** (default / `--vm`) |
 | --- | --- | --- |
 | Approach | Rewrites the Lua source | Compiles to custom bytecode, runs on a generated interpreter |
 | Control-flow flattening | AST-based (`ast_cff.py`) | Bytecode-level (`bytecode_cff.py`) |

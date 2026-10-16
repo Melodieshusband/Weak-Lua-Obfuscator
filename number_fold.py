@@ -1,6 +1,6 @@
 import re
 
-_NUMBER_RE = re.compile(r'0[xX][0-9a-fA-F]+|(?:\d+\.\d+|\.\d+|\d+)(?:[eE][+-]?\d+)?')
+_NUMBER_RE = re.compile(r'0[xX][0-9a-fA-F_]+|0[bB][01_]+|(?:\d[\d_]*\.\d[\d_]*|\.\d[\d_]*|\d[\d_]*)(?:[eE][+-]?\d[\d_]*)?')
 _IDENT_CHARS = set('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_')
 
 def _is_ident_boundary_ok(source, start, end):
@@ -77,11 +77,14 @@ def extract_numbers(source):
     return found
 
 def _parse_number(text):
-    if text.lower().startswith('0x'):
-        return int(text, 16), True
-    if '.' in text or 'e' in text.lower():
-        return float(text), False
-    return int(text), False
+    clean = text.replace('_', '')
+    if clean.lower().startswith('0x'):
+        return int(clean, 16), True
+    if clean.lower().startswith('0b'):
+        return int(clean, 2), True
+    if '.' in clean or 'e' in clean.lower():
+        return float(clean), False
+    return int(clean), False
 
 def _make_expr(value, is_hex, rng):
     if isinstance(value, float) or not float(value).is_integer():

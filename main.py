@@ -16,7 +16,7 @@ def main():
 
     if not args:
         print("Usage: python main.py <input.lua> [output.lua] [--vm | --fold] [anti-tamper flag]")
-        print("  --vm                     Use VM bytecode")
+        print("  --vm                     Use VM bytecode (default)")
         print("  --fold                   Use string-fold (without VM)")
         print("  --hide-vm-source         With --vm, encrypt the VM dispatch loop itself")
         print("                           and load it with loadstring/load instead of")
@@ -69,7 +69,7 @@ def main():
         base = re.sub(r'\.lua$', '', input_path)
         output_path = base + "_obf.lua"
 
-    with open(input_path, "r", encoding="utf-8") as f:
+    with open(input_path, "r", encoding="utf-8-sig") as f:
         source = f.read()
 
     obf = Obfuscator(source)

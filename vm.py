@@ -1136,6 +1136,29 @@ def tokenize(src):
                                 i += 1
                             s.append(chr(int(src[j:i])))
                             continue
+                        elif src[i] in ('x', 'X') and i + 2 < n and all(c in '0123456789abcdefABCDEF' for c in src[i+1:i+3]):
+                            s.append(chr(int(src[i+1:i+3], 16)))
+                            i += 3
+                            continue
+                        elif src[i] == 'u' and i + 1 < n and src[i+1] == '{':
+                            cb = src.find('}', i + 2)
+                            if cb != -1 and cb - (i + 2) <= 8:
+                                hs = src[i+2:cb]
+                                if all(c in '0123456789abcdefABCDEF' for c in hs):
+                                    s.append(chr(int(hs, 16)))
+                                    i = cb + 1
+                                    continue
+                        elif src[i] == 'z':
+                            i += 1
+                            while i < n and src[i] in ' \t\r\n':
+                                i += 1
+                            continue
+                        elif src[i] in ('\r', '\n'):
+                            if src[i] == '\r' and i + 1 < n and src[i+1] == '\n':
+                                i += 1
+                            s.append('\n')
+                            i += 1
+                            continue
                         s.append(esc_map.get(src[i], src[i]))
                         i += 1
                 else:
@@ -1148,11 +1171,16 @@ def tokenize(src):
             j = i
             if src[i:i+2] in ('0x', '0X'):
                 i += 2
-                while i < n and (src[i] in '0123456789abcdefABCDEF'):
+                while i < n and (src[i] in '0123456789abcdefABCDEF_'):
+                    i += 1
+                tokens.append(('NUMBER', src[j:i]))
+            elif src[i:i+2] in ('0b', '0B'):
+                i += 2
+                while i < n and (src[i] in '01_'):
                     i += 1
                 tokens.append(('NUMBER', src[j:i]))
             else:
-                while i < n and (src[i].isdigit() or src[i] in '.eE'):
+                while i < n and (src[i].isdigit() or src[i] in '._eE'):
                     if src[i] in 'eE' and i+1 < n and src[i+1] in '+-':
                         i += 2
                     else:
@@ -1584,9 +1612,12 @@ class Parser:
         if tok[0] == 'NUMBER':
             self.consume()
             v = tok[1]
-            if v.startswith('0x') or v.startswith('0X'):
-                return {'type': 'number', 'value': int(v, 16)}
-            return {'type': 'number', 'value': float(v) if '.' in v or 'e' in v.lower() else int(v)}
+            clean = v.replace('_', '')
+            if clean.startswith(('0x', '0X')):
+                return {'type': 'number', 'value': int(clean, 16)}
+            if clean.startswith(('0b', '0B')):
+                return {'type': 'number', 'value': int(clean, 2)}
+            return {'type': 'number', 'value': float(clean) if '.' in clean or 'e' in clean.lower() else int(clean)}
         if tok[0] == 'STRING':
             self.consume()
             return {'type': 'string', 'value': tok[1]}

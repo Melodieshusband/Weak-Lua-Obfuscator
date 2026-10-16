@@ -138,16 +138,20 @@ def tokenize(src):
             j = i
             if src[i:i+2] in ('0x', '0X'):
                 j += 2
-                while j < n and (src[j] in '0123456789abcdefABCDEF'):
+                while j < n and (src[j] in '0123456789abcdefABCDEF_'):
+                    j += 1
+            elif src[i:i+2] in ('0b', '0B'):
+                j += 2
+                while j < n and (src[j] in '01_'):
                     j += 1
             else:
-                while j < n and (src[j].isdigit() or src[j] == '.'):
+                while j < n and (src[j].isdigit() or src[j] in '._'):
                     j += 1
                 if j < n and src[j] in 'eE':
                     j += 1
                     if j < n and src[j] in '+-':
                         j += 1
-                    while j < n and src[j].isdigit():
+                    while j < n and (src[j].isdigit() or src[j] == '_'):
                         j += 1
             emit('NUMBER', src[i:j], src[i:j])
             i = j

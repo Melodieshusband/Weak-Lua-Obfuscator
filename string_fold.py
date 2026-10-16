@@ -55,13 +55,36 @@ def extract_strings(source):
             s = []
             while i < n and source[i] != q:
                 if source[i] == '\\' and i + 1 < n:
-                    esc_map = {'n':'\n','t':'\t','r':'\r','\\':'\\','"':'"',"'":"'",'0':'\0','a':'\a','b':'\b','f':'\f','v':'\v'}
+                    esc_map = {'n':'\n','t':'\t','r':'\r','\\':'\\','"':'"',"'":"'",'a':'\a','b':'\b','f':'\f','v':'\v'}
                     i += 1
                     if source[i].isdigit():
                         j = i
                         while i < n and i - j < 3 and source[i].isdigit():
                             i += 1
                         s.append(chr(int(source[j:i])))
+                        continue
+                    elif source[i] in ('x', 'X') and i + 2 < n and all(c in '0123456789abcdefABCDEF' for c in source[i+1:i+3]):
+                        s.append(chr(int(source[i+1:i+3], 16)))
+                        i += 3
+                        continue
+                    elif source[i] == 'u' and i + 1 < n and source[i+1] == '{':
+                        cb = source.find('}', i + 2)
+                        if cb != -1 and cb - (i + 2) <= 8:
+                            hs = source[i+2:cb]
+                            if all(c in '0123456789abcdefABCDEF' for c in hs):
+                                s.append(chr(int(hs, 16)))
+                                i = cb + 1
+                                continue
+                    elif source[i] == 'z':
+                        i += 1
+                        while i < n and source[i] in ' \t\r\n':
+                            i += 1
+                        continue
+                    elif source[i] in ('\r', '\n'):
+                        if source[i] == '\r' and i + 1 < n and source[i+1] == '\n':
+                            i += 1
+                        s.append('\n')
+                        i += 1
                         continue
                     s.append(esc_map.get(source[i], source[i]))
                     i += 1

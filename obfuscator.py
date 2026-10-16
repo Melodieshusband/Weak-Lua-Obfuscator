@@ -101,8 +101,19 @@ class Obfuscator:
             encoded_chunks.append((enc, cid))
 
         lines = []
+        canary = rng.randint(1000000, 9999999)
+        c_fn = gen_name()
+        c_ok = gen_name()
+        c_bad = gen_name()
         lines.append(f"local {ls_var}=loadstring or load ")
         lines.append(f"if type({ls_var})~='function' then error('',0) end ")
+        lines.append(f"if debug and debug.info and(debug.info({ls_var},'s')~='[C]' or debug.info({ls_var},'l')~=-1) then error('',0) end ")
+        lines.append(f"if debug and debug.getinfo and debug.getinfo({ls_var}).what~='C' then error('',0) end ")
+        lines.append(f"if (islclosure and islclosure({ls_var})) or (is_synapse_function and is_synapse_function({ls_var})) then error('',0) end ")
+        lines.append(f"local {c_ok},{c_fn}=pcall({ls_var},'return {canary}') ")
+        lines.append(f"if not {c_ok} or type({c_fn})~='function' or {c_fn}()~={canary} then error('',0) end ")
+        lines.append(f"local _,{c_bad}=pcall({ls_var},'return (') ")
+        lines.append(f"if {c_bad}~=nil then error('',0) end ")
         lines.append(f"local {buf_var}='' ")
 
         for enc, cid in encoded_chunks:
@@ -126,6 +137,7 @@ class Obfuscator:
             f"do local {kn_var}={self.k_call(self.var_k, ret_type=1)} if type({kn_var})=='string' then {env_var}[{kn_var}]={var_k} end end "
             f"local {wrap_var}='return (function(...)' .. {buf_var} .. ' end)(...)' "
             f"local {fn_var},{er_var}={ls_var}({wrap_var}) "
+            f"{buf_var}=nil {wrap_var}=nil "
             f"if not {fn_var} then error({er_var} or '',0) end "
             f"if setfenv then setfenv({fn_var},{env_var}) end "
             f"local {pk_var}={{pcall({fn_var})}} "
@@ -143,6 +155,10 @@ class Obfuscator:
         er_v = gen_name()
         lines = []
         lines.append(f"local {ls_v}=loadstring or load ")
+        lines.append(f"if type({ls_v})~='function' then error('',0) end ")
+        lines.append(f"if debug and debug.info and(debug.info({ls_v},'s')~='[C]' or debug.info({ls_v},'l')~=-1) then error('',0) end ")
+        lines.append(f"if debug and debug.getinfo and debug.getinfo({ls_v}).what~='C' then error('',0) end ")
+        lines.append(f"if (islclosure and islclosure({ls_v})) or (is_synapse_function and is_synapse_function({ls_v})) then error('',0) end ")
         lines.append(
             f"local {env_v}=setmetatable({{}},{{__index=(getfenv and getfenv(0)) or _ENV or {{}}}}) "
         )
@@ -182,7 +198,7 @@ class Obfuscator:
         source = self.source
         rng = self.rng
 
-        if force_fold or not force_vm:
+        if force_fold:
             use_vm = False
         else:
             bytecode_result = try_compile_vm(source, rng=rng)
@@ -303,7 +319,7 @@ class Obfuscator:
         }.get(anti_tamper_level, "Full")
         banner = (
             "--[[\n"
-            "  Protected by Weak Obfuscator v2.2\n"
+            "  Protected by Weak Obfuscator v2.3\n"
             f"  Anti-Tamper: {at_label}\n"
             "  https://github.com/Melodieshusband/Weak-Lua-Obfuscator\n"
             "]]\n"

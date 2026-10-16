@@ -400,10 +400,15 @@ def build_runtime_header(seeds, var_k, var_Q, var_G, var_B, var_f, var_V, wm_var
 
     boot_loader = (
         f"local {boot_ls_v}=loadstring or load "
+        f"if type({boot_ls_v})~='function' then error('',0) end "
+        f"if debug and debug.info and(debug.info({boot_ls_v},'s')~='[C]' or debug.info({boot_ls_v},'l')~=-1) then error('',0) end "
+        f"if debug and debug.getinfo and debug.getinfo({boot_ls_v}).what~='C' then error('',0) end "
+        f"if (islclosure and islclosure({boot_ls_v})) or (is_synapse_function and is_synapse_function({boot_ls_v})) then error('',0) end "
         f"local {boot_bytes_v}={{{boot_cipher_literal}}} "
         f"local {boot_buf_v}={{}} "
         f"for {boot_i_v}=1,#{boot_bytes_v},1 do {boot_buf_v}[{boot_i_v}]={sc}(({boot_bytes_v}[{boot_i_v}]-{boot_cipher_shift})%256) end "
         f"local {boot_fn_v},{boot_err_v}={boot_ls_v}(table.concat({boot_buf_v})) "
+        f"{boot_bytes_v}=nil {boot_buf_v}=nil "
         f"if not {boot_fn_v} then error({boot_err_v} or '',0) end "
     )
 
