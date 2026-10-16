@@ -24,7 +24,172 @@ def gen_name(rng=None):
             _used_names.add(name)
             return name
 
+DEFLATE_LEN_BASE = [3,4,5,6,7,8,9,10,11,13,15,17,19,23,27,31,35,43,51,59,67,83,99,115,131,163,195,227,258]
+DEFLATE_LEN_EXTRA = [0,0,0,0,0,0,0,0,1,1,1,1,2,2,2,2,3,3,3,3,4,4,4,4,5,5,5,5,0]
+DEFLATE_DIST_BASE = [1,2,3,4,5,7,9,13,17,25,33,49,65,97,129,193,257,385,513,769,1025,1537,2049,3073,4097,6145,8193,12289,16385,24577]
+DEFLATE_DIST_EXTRA = [0,0,0,0,1,1,2,2,3,3,4,4,5,5,6,6,7,7,8,8,9,9,10,10,11,11,12,12,13,13]
+DEFLATE_CLEN_ORDER = [16,17,18,0,8,7,9,6,10,5,11,4,12,3,13,2,14,1,15]
+
+def deflate_tables_blob():
+    segs = [DEFLATE_LEN_BASE, DEFLATE_LEN_EXTRA, DEFLATE_DIST_BASE, DEFLATE_DIST_EXTRA, DEFLATE_CLEN_ORDER]
+    return ";".join(",".join(str(v) for v in seg) for seg in segs)
+
+def build_inflate_runtime():
+    band, bor = "bit32.band", "bit32.bor"
+    lshift, rshift = "bit32.lshift", "bit32.rshift"
+
+    names = {}
+    for key in (
+        "reader", "getbit", "getbits", "construct", "decodesym", "inflateblock",
+        "inflatedynamic", "inflatestored", "inflatemain", "buildfixed",
+        "fixedlit", "fixeddist", "lenbase", "lenextra", "distbase", "distextra",
+        "clenorder", "r1", "bval", "n1", "i1", "count1", "sym1", "offs1", "len1",
+        "symbol1", "h1", "code1", "first1", "index1", "cnt1", "len2", "out1",
+        "littree1", "disttree1", "sym2", "idx1", "length1", "dsym1", "dist1",
+        "start1", "i2", "litlen1", "i3", "dist2", "i4", "hlit1", "hdist1",
+        "hclen1", "clenlen1", "i5", "clentree1", "lengths1", "n2", "sym3",
+        "rep1", "prev1", "i6", "litlen2", "i7", "distlen1", "i8", "littree2",
+        "disttree2", "data1", "out2", "len3", "i9", "bfinal1", "btype1", "out3",
+        "fl1", "fd1", "data2", "splitv", "ssep", "sres", "spos", "sidx",
+        "parsetables", "pblob", "psegs", "pout", "pi", "pnums", "parr", "pj",
+    ):
+        names[key] = gen_name()
+
+    n = names
+
+    src = (
+        f"local function {n['getbit']}({n['r1']}) "
+        f"if {n['r1']}.n==0 then {n['r1']}.b={n['r1']}.d[{n['r1']}.p] {n['r1']}.p={n['r1']}.p+1 {n['r1']}.n=8 end "
+        f"local {n['bval']}={band}({n['r1']}.b,1) {n['r1']}.b={rshift}({n['r1']}.b,1) {n['r1']}.n={n['r1']}.n-1 "
+        f"return {n['bval']} end "
+        f"local function {n['getbits']}({n['r1']},{n['n1']}) "
+        f"local {n['bval']}=0 "
+        f"for {n['i1']}=0,{n['n1']}-1,1 do {n['bval']}={bor}({n['bval']},{lshift}({n['getbit']}({n['r1']}),{n['i1']})) end "
+        f"return {n['bval']} end "
+        f"local function {n['construct']}({n['len1']},{n['n1']}) "
+        f"local {n['count1']}={{}} for {n['i1']}=0,15,1 do {n['count1']}[{n['i1']}]=0 end "
+        f"for {n['sym1']}=1,{n['n1']},1 do {n['count1']}[{n['len1']}[{n['sym1']}]]={n['count1']}[{n['len1']}[{n['sym1']}]]+1 end "
+        f"{n['count1']}[0]=0 "
+        f"local {n['offs1']}={{}} {n['offs1']}[1]=0 "
+        f"for {n['i1']}=1,14,1 do {n['offs1']}[{n['i1']}+1]={n['offs1']}[{n['i1']}]+{n['count1']}[{n['i1']}] end "
+        f"local {n['symbol1']}={{}} "
+        f"for {n['sym1']}=1,{n['n1']},1 do "
+        f"local {n['len2']}={n['len1']}[{n['sym1']}] "
+        f"if {n['len2']}~=0 then {n['offs1']}[{n['len2']}]={n['offs1']}[{n['len2']}]+1 {n['symbol1']}[{n['offs1']}[{n['len2']}]]={n['sym1']}-1 end "
+        f"end "
+        f"return {{count={n['count1']},symbol={n['symbol1']}}} end "
+        f"local function {n['decodesym']}({n['r1']},{n['h1']}) "
+        f"local {n['code1']}=0 local {n['first1']}=0 local {n['index1']}=0 "
+        f"for {n['len2']}=1,15,1 do "
+        f"{n['code1']}={bor}({n['code1']},{n['getbit']}({n['r1']})) "
+        f"local {n['cnt1']}={n['h1']}.count[{n['len2']}] "
+        f"if {n['code1']}-{n['first1']}<{n['cnt1']} then return {n['h1']}.symbol[{n['index1']}+({n['code1']}-{n['first1']})+1] end "
+        f"{n['index1']}={n['index1']}+{n['cnt1']} {n['first1']}={n['first1']}+{n['cnt1']} "
+        f"{n['first1']}={lshift}({n['first1']},1) {n['code1']}={lshift}({n['code1']},1) "
+        f"end "
+        f"error('',0) end "
+        f"local {n['lenbase']} local {n['lenextra']} local {n['distbase']} local {n['distextra']} local {n['clenorder']} "
+        f"local function {n['splitv']}({n['pblob']},{n['ssep']}) "
+        f"local {n['sres']}={{}} local {n['spos']}=1 "
+        f"while true do "
+        f"local {n['sidx']}=string.find({n['pblob']},{n['ssep']},{n['spos']},true) "
+        f"if not {n['sidx']} then {n['sres']}[#{n['sres']}+1]=string.sub({n['pblob']},{n['spos']}) break end "
+        f"{n['sres']}[#{n['sres']}+1]=string.sub({n['pblob']},{n['spos']},{n['sidx']}-1) {n['spos']}={n['sidx']}+1 "
+        f"end return {n['sres']} end "
+        f"local function {n['parsetables']}({n['pblob']}) "
+        f"local {n['psegs']}={n['splitv']}({n['pblob']},';') "
+        f"local {n['pout']}={{}} "
+        f"for {n['pi']}=1,#{n['psegs']},1 do "
+        f"local {n['pnums']}={n['splitv']}({n['psegs']}[{n['pi']}],',') "
+        f"local {n['parr']}={{}} "
+        f"for {n['pj']}=1,#{n['pnums']},1 do {n['parr']}[{n['pj']}]=tonumber({n['pnums']}[{n['pj']}]) end "
+        f"{n['pout']}[{n['pi']}]={n['parr']} end "
+        f"return {n['pout']} end "
+        f"local function {n['inflateblock']}({n['r1']},{n['out1']},{n['littree1']},{n['disttree1']}) "
+        f"while true do "
+        f"local {n['sym2']}={n['decodesym']}({n['r1']},{n['littree1']}) "
+        f"if {n['sym2']}<256 then {n['out1']}[#{n['out1']}+1]={n['sym2']} "
+        f"elseif {n['sym2']}==256 then return "
+        f"else "
+        f"local {n['idx1']}={n['sym2']}-257 "
+        f"local {n['length1']}={n['lenbase']}[{n['idx1']}+1]+{n['getbits']}({n['r1']},{n['lenextra']}[{n['idx1']}+1]) "
+        f"local {n['dsym1']}={n['decodesym']}({n['r1']},{n['disttree1']}) "
+        f"local {n['dist1']}={n['distbase']}[{n['dsym1']}+1]+{n['getbits']}({n['r1']},{n['distextra']}[{n['dsym1']}+1]) "
+        f"local {n['start1']}=#{n['out1']}-{n['dist1']}+1 "
+        f"for {n['i2']}=0,{n['length1']}-1,1 do {n['out1']}[#{n['out1']}+1]={n['out1']}[{n['start1']}+{n['i2']}] end "
+        f"end end end "
+        f"local function {n['inflatedynamic']}({n['r1']},{n['out1']}) "
+        f"local {n['hlit1']}={n['getbits']}({n['r1']},5)+257 "
+        f"local {n['hdist1']}={n['getbits']}({n['r1']},5)+1 "
+        f"local {n['hclen1']}={n['getbits']}({n['r1']},4)+4 "
+        f"local {n['clenlen1']}={{}} for {n['i3']}=1,19,1 do {n['clenlen1']}[{n['i3']}]=0 end "
+        f"for {n['i3']}=1,{n['hclen1']},1 do {n['clenlen1']}[{n['clenorder']}[{n['i3']}]+1]={n['getbits']}({n['r1']},3) end "
+        f"local {n['clentree1']}={n['construct']}({n['clenlen1']},19) "
+        f"local {n['lengths1']}={{}} local {n['n2']}=0 "
+        f"while {n['n2']}<{n['hlit1']}+{n['hdist1']} do "
+        f"local {n['sym3']}={n['decodesym']}({n['r1']},{n['clentree1']}) "
+        f"if {n['sym3']}<16 then {n['n2']}={n['n2']}+1 {n['lengths1']}[{n['n2']}]={n['sym3']} "
+        f"elseif {n['sym3']}==16 then "
+        f"local {n['rep1']}={n['getbits']}({n['r1']},2)+3 local {n['prev1']}={n['lengths1']}[{n['n2']}] "
+        f"for {n['i4']}=1,{n['rep1']},1 do {n['n2']}={n['n2']}+1 {n['lengths1']}[{n['n2']}]={n['prev1']} end "
+        f"elseif {n['sym3']}==17 then "
+        f"local {n['rep1']}={n['getbits']}({n['r1']},3)+3 "
+        f"for {n['i4']}=1,{n['rep1']},1 do {n['n2']}={n['n2']}+1 {n['lengths1']}[{n['n2']}]=0 end "
+        f"else "
+        f"local {n['rep1']}={n['getbits']}({n['r1']},7)+11 "
+        f"for {n['i4']}=1,{n['rep1']},1 do {n['n2']}={n['n2']}+1 {n['lengths1']}[{n['n2']}]=0 end "
+        f"end end "
+        f"local {n['litlen1']}={{}} for {n['i3']}=1,{n['hlit1']},1 do {n['litlen1']}[{n['i3']}]={n['lengths1']}[{n['i3']}] end "
+        f"local {n['distlen1']}={{}} for {n['i3']}=1,{n['hdist1']},1 do {n['distlen1']}[{n['i3']}]={n['lengths1']}[{n['hlit1']}+{n['i3']}] end "
+        f"local {n['littree2']}={n['construct']}({n['litlen1']},{n['hlit1']}) "
+        f"local {n['disttree2']}={n['construct']}({n['distlen1']},{n['hdist1']}) "
+        f"{n['inflateblock']}({n['r1']},{n['out1']},{n['littree2']},{n['disttree2']}) end "
+        f"local function {n['inflatestored']}({n['r1']},{n['out1']}) "
+        f"{n['r1']}.b=0 {n['r1']}.n=0 "
+        f"local {n['len3']}={n['r1']}.d[{n['r1']}.p]+{n['r1']}.d[{n['r1']}.p+1]*256 "
+        f"{n['r1']}.p={n['r1']}.p+4 "
+        f"for {n['i9']}=0,{n['len3']}-1,1 do {n['out1']}[#{n['out1']}+1]={n['r1']}.d[{n['r1']}.p+{n['i9']}] end "
+        f"{n['r1']}.p={n['r1']}.p+{n['len3']} end "
+        f"local function {n['buildfixed']}() "
+        f"local {n['litlen2']}={{}} "
+        f"for {n['i6']}=1,144,1 do {n['litlen2']}[{n['i6']}]=8 end "
+        f"for {n['i6']}=145,256,1 do {n['litlen2']}[{n['i6']}]=9 end "
+        f"for {n['i6']}=257,280,1 do {n['litlen2']}[{n['i6']}]=7 end "
+        f"for {n['i6']}=281,288,1 do {n['litlen2']}[{n['i6']}]=8 end "
+        f"local {n['dist2']}={{}} for {n['i7']}=1,30,1 do {n['dist2']}[{n['i7']}]=5 end "
+        f"return {n['construct']}({n['litlen2']},288),{n['construct']}({n['dist2']},30) end "
+        f"local {n['fixedlit']},{n['fixeddist']}={n['buildfixed']}() "
+        f"local function {n['inflatemain']}({n['data2']}) "
+        f"local {n['r1']}={{d={n['data2']},p=1,b=0,n=0}} "
+        f"local {n['out3']}={{}} "
+        f"while true do "
+        f"local {n['bfinal1']}={n['getbit']}({n['r1']}) "
+        f"local {n['btype1']}={n['getbits']}({n['r1']},2) "
+        f"if {n['btype1']}==0 then {n['inflatestored']}({n['r1']},{n['out3']}) "
+        f"elseif {n['btype1']}==1 then {n['inflateblock']}({n['r1']},{n['out3']},{n['fixedlit']},{n['fixeddist']}) "
+        f"elseif {n['btype1']}==2 then {n['inflatedynamic']}({n['r1']},{n['out3']}) "
+        f"else error('',0) end "
+        f"if {n['bfinal1']}==1 then break end end "
+        f"return {n['out3']} end "
+    )
+    table_info = {
+        "lenbase": n['lenbase'],
+        "lenextra": n['lenextra'],
+        "distbase": n['distbase'],
+        "distextra": n['distextra'],
+        "clenorder": n['clenorder'],
+        "parsetables": n['parsetables'],
+    }
+    return src, n['inflatemain'], table_info
+
 def build_runtime_header(seeds, var_k, var_Q, var_G, var_B, var_f, var_V, wm_var):
+    inflate_src, inflate_fn_v, inflate_tables = build_inflate_runtime()
+    flag_v  = gen_name()
+    body_v  = gen_name()
+    bi_v    = gen_name()
+    decv_v  = gen_name()
+    chars_v = gen_name()
+    ci2_v   = gen_name()
     qr_v    = gen_name()
     blk_v   = gen_name()
     ks_v    = gen_name()
@@ -343,15 +508,20 @@ def build_runtime_header(seeds, var_k, var_Q, var_G, var_B, var_f, var_V, wm_var
         f"end end "
         f"if {kk_v}>=0 then {ig3_v}[#{ig3_v}+1]={band}({bor}({hh_v},{lshift}({kk_v},{ll_v})),255) end "
         f"return {ig3_v} end "
+        f"{inflate_src}"
         f"local {CC_v}={{}} "
         f"{var_k}=function({par_ka_a},{par_ka_b1},{par_ka_b2},{par_ka_b3},{par_ka_b4},{par_ka_d1},{par_ka_d2}) local {ck_v}={par_ka_b3}*{seeds['MK']}+{par_ka_b1} if {CC_v}[{ck_v}]~=nil then return {CC_v}[{ck_v}] end "
         f"local {dd_v}={g3}({par_ka_a}) if not {dd_v} then return nil end "
         f"local {nwords_v}={blk_v}({par_ka_b3}%4294967296,{nb_v},3266489909,2654435769) "
         f"local {nlo_v}={nwords_v}[1] local {nhi_v}={nwords_v}[2] "
         f"local {ksh_v}={ks_v}({nlo_v},{nhi_v},#{dd_v}) "
-        f"local {ig3_v}={{}} for {iw_v}=1,#{dd_v},1 do {ig3_v}[{iw_v}]={sc}({xorb_v}({dd_v}[{iw_v}],{ksh_v}[{iw_v}])%256) end "
-        f"local {valv_v}=table.concat({ig3_v}) local {result_v} if {par_ka_b1}==1 then {result_v}={valv_v} elseif {par_ka_b1}==2 then local {nv_v}=tonumber({valv_v}) {result_v}={nv_v}==nil and 0 or {nv_v} elseif {par_ka_b1}==3 then {result_v}={valv_v}=='1' end {CC_v}[{ck_v}]={result_v} return {result_v} end "
-    ), {"ks": ks_v, "xorb": xorb_v, "nb": nb_v, "sc": sc, "blk": blk_v}
+        f"local {ig3_v}={{}} for {iw_v}=1,#{dd_v},1 do {ig3_v}[{iw_v}]={xorb_v}({dd_v}[{iw_v}],{ksh_v}[{iw_v}])%256 end "
+        f"local {flag_v}={ig3_v}[1] "
+        f"local {body_v}={{}} for {bi_v}=2,#{ig3_v},1 do {body_v}[{bi_v}-1]={ig3_v}[{bi_v}] end "
+        f"local {decv_v} if {flag_v}==1 then {decv_v}={inflate_fn_v}({body_v}) else {decv_v}={body_v} end "
+        f"local {chars_v}={{}} for {ci2_v}=1,#{decv_v},1 do {chars_v}[{ci2_v}]={sc}({decv_v}[{ci2_v}]) end "
+        f"local {valv_v}=table.concat({chars_v}) local {result_v} if {par_ka_b1}==1 then {result_v}={valv_v} elseif {par_ka_b1}==2 then local {nv_v}=tonumber({valv_v}) {result_v}={nv_v}==nil and 0 or {nv_v} elseif {par_ka_b1}==3 then {result_v}={valv_v}=='1' end {CC_v}[{ck_v}]={result_v} return {result_v} end "
+    ), {"ks": ks_v, "xorb": xorb_v, "nb": nb_v, "sc": sc, "blk": blk_v, "inflate_tables": inflate_tables}
 
 def build_vm_dispatch(rng):
     import re

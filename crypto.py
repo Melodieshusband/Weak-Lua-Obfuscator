@@ -1,4 +1,5 @@
 import secrets
+import zlib
 
 MASK32 = 0xFFFFFFFF
 CHACHA_ROUNDS = 20
@@ -116,15 +117,39 @@ def base91_decode(encoded, ra):
         out.append((b | (v << nbits)) & 255)
     return bytes(out)
 
-def encode_string(text, call_id, seeds):
+def deflate_compress(data):
+    co = zlib.compressobj(9, zlib.DEFLATED, -15)
+    return co.compress(data) + co.flush()
+
+def deflate_decompress(data):
+    do = zlib.decompressobj(-15)
+    return do.decompress(data) + do.flush()
+
+def pack_payload(raw, allow_compress=True):
+    if allow_compress:
+        compressed = deflate_compress(raw)
+        if len(compressed) < len(raw):
+            return b"\x01" + compressed
+    return b"\x00" + raw
+
+def unpack_payload(payload):
+    if not payload:
+        return b""
+    flag = payload[0]
+    body = payload[1:]
+    if flag == 1:
+        return deflate_decompress(body)
+    return body
+
+def encode_string(text, call_id, seeds, allow_compress=True):
     key = seeds["KEY"]
     alphabet = build_alphabet(key, seeds["NONCE_BASE"])
     if len(alphabet) != 91:
         return None
-    data = text.encode("utf-8")
+    payload = pack_payload(text.encode("utf-8"), allow_compress=allow_compress)
     nonce_lo, nonce_hi = derive_nonce(call_id, key, seeds["NONCE_BASE"])
-    ks = keystream(key, nonce_lo, nonce_hi, len(data))
-    encrypted = bytes(b ^ k for b, k in zip(data, ks))
+    ks = keystream(key, nonce_lo, nonce_hi, len(payload))
+    encrypted = bytes(b ^ k for b, k in zip(payload, ks))
     return base91_encode(encrypted, alphabet)
 
 def decode_string(encoded, call_id, seeds):
@@ -136,7 +161,8 @@ def decode_string(encoded, call_id, seeds):
         return None
     nonce_lo, nonce_hi = derive_nonce(call_id, key, seeds["NONCE_BASE"])
     ks = keystream(key, nonce_lo, nonce_hi, len(encrypted))
-    data = bytes(b ^ k for b, k in zip(encrypted, ks))
+    payload = bytes(b ^ k for b, k in zip(encrypted, ks))
+    data = unpack_payload(payload)
     return data.decode("utf-8", errors="surrogateescape")
 
 def encrypt_bytes(data, call_id, seeds):

@@ -5,6 +5,7 @@ from codegen import (
     reset_names, gen_name,
     build_runtime_header, build_vm_dispatch,
     build_anti_tamper, build_runtime_footer,
+    deflate_tables_blob,
 )
 from vm import try_compile_vm, bytecode_to_lua, bytecode_to_lua_legacy
 from string_fold import fold_strings
@@ -64,6 +65,17 @@ class Obfuscator:
 
     def k_call(self, text, ret_type=1):
         encoded, call_id = self.encode(text)
+        s0 = self.rng.randint(100000, 2**31 - 1)
+        s2 = self.rng.randint(100000, 2**31 - 1)
+        s3 = self.rng.randint(100000, 2**31 - 1)
+        return f'{self.var_k}("{encoded}",{ret_type},{s0},{call_id},{call_id},{s2},{s3})'
+
+    def k_call_uncompressed(self, text, ret_type=1):
+        call_id = self.next_call_id()
+        encoded = encode_string(text, call_id, self.seeds, allow_compress=False)
+        if encoded is None:
+            call_id = self.next_call_id()
+            encoded = encode_string(text, call_id, self.seeds, allow_compress=False)
         s0 = self.rng.randint(100000, 2**31 - 1)
         s2 = self.rng.randint(100000, 2**31 - 1)
         s3 = self.rng.randint(100000, 2**31 - 1)
@@ -187,6 +199,18 @@ class Obfuscator:
             self.var_k, self.var_Q, self.var_G,
             self.var_B, self.var_f, self.var_V,
             self.wm_var,
+        )
+
+        it = prims["inflate_tables"]
+        tables_expr = self.k_call_uncompressed(deflate_tables_blob())
+        tables_parsed_v = gen_name()
+        header += (
+            f"local {tables_parsed_v}={it['parsetables']}({tables_expr}) "
+            f"{it['lenbase']}={tables_parsed_v}[1] "
+            f"{it['lenextra']}={tables_parsed_v}[2] "
+            f"{it['distbase']}={tables_parsed_v}[3] "
+            f"{it['distextra']}={tables_parsed_v}[4] "
+            f"{it['clenorder']}={tables_parsed_v}[5] "
         )
 
         dispatch_expr, hashes = build_vm_dispatch(rng)
