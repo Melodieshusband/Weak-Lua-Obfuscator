@@ -7,6 +7,11 @@ _used_names = set()
 _name_rng = None
 
 _CONFUSABLES = ["l", "I", "O", "o", "0", "1"]
+_LUA_KEYWORDS = {
+    'and','break','continue','do','else','elseif','end','false','for','function',
+    'if','in','local','nil','not','or','repeat','return','then','true',
+    'until','while',
+}
 
 def reset_names():
     global _used_names, _name_rng
@@ -16,11 +21,11 @@ def reset_names():
 def gen_name(rng=None):
     r = rng or _name_rng or random
     while True:
-        length = r.randint(6, 10)
+        length = r.randint(3, 5)
         first = r.choice(string.ascii_letters + "_")
         rest = "".join(r.choice(_CONFUSABLES) for _ in range(length - 1))
         name = first + rest
-        if name not in _used_names:
+        if name not in _used_names and name not in _LUA_KEYWORDS:
             _used_names.add(name)
             return name
 
@@ -526,7 +531,7 @@ def build_runtime_header(seeds, var_k, var_Q, var_G, var_B, var_f, var_V, wm_var
         f"local {decv_v} if {flag_v}==1 then {decv_v}={inflate_fn_v}({body_v}) else {decv_v}={body_v} end "
         f"local {chars_v}={{}} for {ci2_v}=1,#{decv_v},1 do {chars_v}[{ci2_v}]={sc}({decv_v}[{ci2_v}]) end "
         f"local {valv_v}=table.concat({chars_v}) local {result_v} if {par_ka_b1}==1 then {result_v}={valv_v} elseif {par_ka_b1}==2 then local {nv_v}=tonumber({valv_v}) {result_v}={nv_v}==nil and 0 or {nv_v} elseif {par_ka_b1}==3 then {result_v}={valv_v}=='1' end {CC_v}[{ck_v}]={result_v} return {result_v} end "
-    ), {"ks": ks_v, "xorb": xorb_v, "nb": nb_v, "sc": sc, "blk": blk_v, "inflate_tables": inflate_tables}
+    ), {"ks": ks_v, "xorb": xorb_v, "nb": nb_v, "sc": sc, "blk": blk_v, "inflate_tables": inflate_tables, "g3": g3}
 
 def build_vm_dispatch(rng):
     import re
@@ -554,14 +559,18 @@ def build_vm_dispatch(rng):
         "ternary":("s,m", "s~=nil and s or m"),
     }
 
+    seen_hashes = set()
+    all_keys = []
     hashes = {}
     dispatch_lines = []
     for op_name, (params, expr) in ops.items():
         count = rng.randint(3, 8)
         for _ in range(count):
             h = rng.randint(0x10000000, 0xFFFFFFFF)
-            while h in hashes:
+            while h in seen_hashes:
                 h = rng.randint(0x10000000, 0xFFFFFFFF)
+            seen_hashes.add(h)
+            all_keys.append(h)
             hashes[op_name] = h
             ps = gen_name()
             pm = gen_name()
@@ -571,10 +580,16 @@ def build_vm_dispatch(rng):
                 real_expr = re.sub(r'\bm\b', pm, real_expr)
             dispatch_lines.append(f"[{h}]=function({real_params}) return {real_expr} end")
 
+    expected_count = len(all_keys)
+    expected_sum = sum(all_keys) % 0x100000000
+    expected_xor = 0
+    for k in all_keys:
+        expected_xor ^= k
+    hashes["__meta__"] = (expected_count, expected_sum, expected_xor)
     dispatch_expr = f"{{{';'.join(dispatch_lines)}}}"
     return dispatch_expr, hashes
 
-def build_anti_tamper(seeds, rng, var_k, encode_fn, detect_var=None, level="full"):
+def build_anti_tamper_v1(seeds, rng, var_k, encode_fn, detect_var=None, level="full"):
     if level not in ("full", "minimal", "none"):
         level = "full"
     if level == "none":
@@ -798,7 +813,14 @@ def build_anti_tamper(seeds, rng, var_k, encode_fn, detect_var=None, level="full
         for m in js_env_globals
     )
 
-    decoy_message = "Melodie doesn't approve of skidding be a good boy"
+    melodie_messages = [
+        "Melodie doesn't approve of skidding be a good boy",
+        "Melodie caught you tampering with the bytecode :3",
+        "Meloten and Melodie protect this territory",
+        "Melodie says: reverse engineering strictly prohibited",
+        "Melodie detected an unauthorized debugger or hook",
+    ]
+    decoy_message = rng.choice(melodie_messages)
     decoy_enc = enc_call(decoy_message)
 
     def build_kill_v(spam_v, spam_i_v, spam_n_v, decoy_expr, detect_var=None):
@@ -1144,9 +1166,6 @@ def build_anti_tamper(seeds, rng, var_k, encode_fn, detect_var=None, level="full
         f"end "
     )
 
-    # Checks known to occasionally false-positive on executors that hook,
-    # sandbox, or spoof pcall/error/debug internals, or that don't emulate
-    # real Roblox physics timing closely. Dropped on level="minimal".
     risky_checks = (
         f"{err_probe_check}"
         f"{identity_consistency_check}"
@@ -1244,6 +1263,268 @@ def build_anti_tamper(seeds, rng, var_k, encode_fn, detect_var=None, level="full
     )
 
     return result
+
+
+def build_anti_tamper_v2(seeds, rng, var_k, encode_fn, detect_var=None, target="luau", level="full"):
+    if level not in ("full", "minimal", "none"):
+        level = "full"
+    if level == "none":
+        return ""
+
+    def enc_call(text):
+        enc, cid = encode_fn(text)
+        s0 = rng.randint(100000, 2**31 - 1)
+        s2 = rng.randint(100000, 2**31 - 1)
+        s3 = rng.randint(100000, 2**31 - 1)
+        return f'{var_k}("{enc}",1,{s0},{cid},{cid},{s2},{s3})'
+
+    melodie_messages = [
+        "Melodie doesn't approve of skidding be a good boy",
+        "Melodie caught you tampering with the bytecode :3",
+        "Meloten and Melodie protect this territory",
+        "Melodie says: reverse engineering strictly prohibited",
+        "Melodie detected an unauthorized debugger or hook",
+    ]
+    decoy_message = rng.choice(melodie_messages)
+    decoy_enc = enc_call(decoy_message)
+
+    sus_v = gen_name()
+    spam_v = gen_name()
+    spam_i_v = gen_name()
+    spam_n_v = gen_name()
+    kill_v = gen_name()
+    loop_v = gen_name()
+    set_detect = f"{detect_var}=true " if detect_var else ""
+    wait_expr = rng.choice([
+        "if task and task.wait then task.wait(0) elseif coroutine and coroutine.yield then coroutine.yield() end",
+        "if coroutine and coroutine.yield then coroutine.yield() elseif task and task.wait then task.wait(0) end",
+    ])
+    spam_stmt = (
+        f"{set_detect}"
+        f"if not {spam_v} then {spam_v}=true "
+        f"local {spam_n_v}=math.random(5,10) "
+        f"for {spam_i_v}=1,{spam_n_v} do print({decoy_enc}) end end "
+    )
+    kill_body = (
+        f"function() "
+        f"{spam_stmt}"
+        f"error('',0) "
+        f"local {loop_v}=true "
+        f"while {loop_v} do print({decoy_enc}) {wait_expr} error('',0) end "
+        f"end"
+    )
+
+    canary_token = f"WO_{rng.randint(1000000, 9999999)}"
+    tok_call = enc_call(canary_token)
+
+    tf_v = gen_name()
+    ret_v = gen_name()
+    ok1_v = gen_name()
+    ok2_v = gen_name()
+    ok3_v = gen_name()
+    src_v = gen_name()
+    cl_v = gen_name()
+    arr_v = gen_name()
+    lock_v = gen_name()
+    ok_v = gen_name()
+    mt_t_v = gen_name()
+    trap_hit_v = gen_name()
+    mt_o_v = gen_name()
+    p_ok_v = gen_name()
+    p_msg_v = gen_name()
+    f1_v = gen_name()
+    f2_v = gen_name()
+    cf_v = gen_name()
+    s_v = gen_name()
+    l_v = gen_name()
+    a_v = gen_name()
+    v_v = gen_name()
+    cfns_v = gen_name()
+    fn_v = gen_name()
+    buf_v = gen_name()
+    ev_v = gen_name()
+    p_tbl_v = gen_name()
+    s_sentinel_v = gen_name()
+    h_calls_v = gen_name()
+    w_mt_v = gen_name()
+    ok_sem_v = gen_name()
+    sem_k_v = gen_name()
+
+    parts = [
+        f"local {sus_v}=0 ",
+        f"local {spam_v}=false ",
+        f"local {kill_v} {kill_v}={kill_body} ",
+        f"if (1/0~=math.huge) or (-1/0~=-math.huge) or (0/0==0/0) or (math.huge~=math.huge*2) or (math.huge+1~=math.huge) or (math.abs(-5)~=5) or (math.floor(3.7)~=3) or (math.ceil(3.2)~=4) or (1e308*10~=math.huge) then {kill_v}() end ",
+        f"if (type(1)~='number') or (type('')~='string') or (type(true)~='boolean') or (type({{}})~='table') or (type(function() end)~='function') or (type(nil)~='nil') then {kill_v}() end ",
+        f"if typeof and ((typeof(1)~='number') or (typeof('')~='string') or (typeof({{}})~='table')) then {kill_v}() end ",
+        f"if (bit32.band(15,1)~=1) or (bit32.bor(2,1)~=3) or (bit32.bxor(5,5)~=0) or (bit32.lshift(1,3)~=8) or (bit32.rshift(8,3)~=1) or (bit32.lrotate(1,1)~=2) or (bit32.bnot(0)~=0xFFFFFFFF) or (bit32.arshift(-16,2)~=0xFFFFFFFC) or (bit32.extract(0xABCD,4,8)~=0xBC) then {kill_v}() end ",
+        f"if table.freeze and table.isfrozen then local {tf_v}={{k=1}} if table.isfrozen({tf_v}) then {kill_v}() end local {ret_v}=table.freeze({tf_v}) if {ret_v}~={tf_v} or not table.isfrozen({tf_v}) then {kill_v}() end local {ok1_v}=pcall(function() {tf_v}.k=2 end) if {ok1_v} then {kill_v}() end local {ok2_v}=pcall(function() {tf_v}.newk=3 end) if {ok2_v} then {kill_v}() end local {ok3_v}=pcall(function() table.insert({tf_v},4) end) if {ok3_v} then {kill_v}() end end ",
+        f"if table.clone then local {src_v}={{a=10,b=20}} local {cl_v}=table.clone({src_v}) if {cl_v}=={src_v} or {cl_v}.a~=10 or {cl_v}.b~=20 then {kill_v}() end end ",
+        f"if table.find then local {arr_v}={{11,22,33}} if table.find({arr_v},22)~=2 or table.find({arr_v},99)~=nil then {kill_v}() end end ",
+        f"if rawlen and (rawlen({{1,2,3,4}})~=4 or rawlen('hello')~=5) then {kill_v}() end ",
+        f"if rawequal and (not rawequal(123,123) or rawequal(123,456) or not rawequal('a','a')) then {kill_v}() end ",
+        f"do local {lock_v}=setmetatable({{}},{{__metatable='protected'}}) if getmetatable({lock_v})~='protected' then {kill_v}() end local {ok_v}=pcall(setmetatable,{lock_v},{{}}) if {ok_v} then {kill_v}() end local {mt_t_v}=setmetatable({{}},{{__index={{a=42}}}}) if {mt_t_v}.a~=42 then {kill_v}() end rawset({mt_t_v},'a',99) if rawget({mt_t_v},'a')~=99 or {mt_t_v}.a~=99 then {kill_v}() end local {trap_hit_v}=false local {mt_o_v}=setmetatable({{}},{{__tostring=function() {trap_hit_v}=true return {tok_call} end}}) if tostring({mt_o_v})~={tok_call} or not {trap_hit_v} then {kill_v}() end end ",
+        f"if string.dump then local {ok_v}=pcall(string.dump,print) if {ok_v} then {kill_v}() end end ",
+        f"if debug and debug.gethook and debug.gethook()~=nil then {kill_v}() end ",
+        f"do local {p_tbl_v}={{}} local {s_sentinel_v}={{}} local {h_calls_v}=0 "
+        f"local {w_mt_v}=setmetatable({p_tbl_v},{{__index=function(_,{sem_k_v}) {h_calls_v}={sem_k_v} return {s_sentinel_v} end,__metatable=false}}) "
+        f"local {ok_sem_v}=({w_mt_v}=={p_tbl_v}) and ({h_calls_v}==0) and (next({{}})==nil) and (rawget({{1}},1)==1) and (type(type)=='function') and (tonumber('1')==1) "
+        f"if {ok_sem_v} then "
+        f"{ok_sem_v}=({p_tbl_v}[1]=={s_sentinel_v}) and ({h_calls_v}==1) and (getmetatable({p_tbl_v})==false) and (rawset({p_tbl_v},1,{s_sentinel_v})=={p_tbl_v}) and (rawget({p_tbl_v},1)=={s_sentinel_v}) "
+        f"end "
+        f"if not {ok_sem_v} then {kill_v}() end end ",
+    ]
+
+    if level == "full":
+        parts.append(
+            f"do local {p_ok_v},{p_msg_v}=pcall(function() error({tok_call},0) end) if {p_ok_v}~=false or {p_msg_v}~={tok_call} then {kill_v}() end end "
+        )
+        parts.append(
+            f"do local {f1_v}=function() end local {f2_v}=function() end if tostring({f1_v})~=tostring({f1_v}) or tostring({f1_v})==tostring({f2_v}) then {kill_v}() end end "
+        )
+
+    if target == "luau":
+        parts.append(
+            f"if debug and debug.info then "
+            f"do local {cf_v}=function() return 1 end local {s_v},{l_v},{a_v},{v_v}=debug.info({cf_v},'slan') if {s_v}=='[C]' or {l_v}<1 or {a_v}~=0 or {v_v}~=false then {kill_v}() end end "
+            f"local {cfns_v}={{type,pcall,xpcall,error,setmetatable,getmetatable,rawget,rawset,select,tonumber,tostring,pairs,ipairs,next,string.byte,string.char,string.sub,string.len,string.find,table.insert,table.remove,table.concat,math.floor,math.ceil,math.abs,bit32.band,bit32.bxor,bit32.bor,bit32.lshift,bit32.rshift,coroutine.create,coroutine.resume,coroutine.yield,coroutine.status}} "
+            f"for _,{fn_v} in ipairs({cfns_v}) do if debug.info({fn_v},'s')~='[C]' or debug.info({fn_v},'l')~=-1 then {kill_v}() end end "
+            f"if debug.getinfo then if debug.getinfo(pcall).what~='C' or debug.getinfo(type).what~='C' or debug.getinfo(setmetatable).what~='C' then {kill_v}() end end "
+            f"end "
+        )
+        parts.append(
+            f"if buffer and type(buffer)=='table' and buffer.create and buffer.readu8 and buffer.writeu8 then "
+            f"local {buf_v}=buffer.create(4) if buffer.len({buf_v})~=4 then {kill_v}() end buffer.writeu8({buf_v},0,137) buffer.writeu8({buf_v},1,99) if buffer.readu8({buf_v},0)~=137 or buffer.readu8({buf_v},1)~=99 then {kill_v}() end "
+            f"end "
+        )
+        parts.append(
+            f"do local {ev_v}=(getfenv and getfenv(0)) or _ENV or _G or {{}} "
+            f"if rawget({ev_v},'__DEBUG__') or rawget({ev_v},'__BREAKPOINT__') or rawget({ev_v},'__ATTACHED__') or rawget({ev_v},'MobDebug') or rawget({ev_v},'remdebug') or rawget({ev_v},'ldb') or rawget({ev_v},'BreakpointHook') then {kill_v}() end "
+            f"end "
+        )
+    else:
+        plrs_v = gen_name()
+        run_v = gen_name()
+        http_ok_v = gen_name()
+        http_v = gen_name()
+        g_ok_v = gen_name()
+        g_v = gen_name()
+        j_ok_v = gen_name()
+        j_v = gen_name()
+        p_v = gen_name()
+        v1_v = gen_name()
+        v2_v = gen_name()
+        cf_inv_v = gen_name()
+        inv_v = gen_name()
+        id_v = gen_name()
+        u_v = gen_name()
+        th_v = gen_name()
+        pkg_v = gen_name()
+        bad_globals_v = gen_name()
+        bg_v = gen_name()
+        req_v = gen_name()
+        bad_mods_v = gen_name()
+        bm_v = gen_name()
+        res_v = gen_name()
+
+        rbx_extra_c = ""
+        if level == "full":
+            fp1_ok = gen_name()
+            fp1_er = gen_name()
+            fp2_ok = gen_name()
+            fp2_er = gen_name()
+            rbx_extra_c = (
+                f"if debug.info(Instance.new,'s')~='[C]' or debug.info(Instance.new,'l')~=-1 or "
+                f"debug.info(game.GetService,'s')~='[C]' or debug.info(game.GetService,'l')~=-1 then {kill_v}() end "
+                f"do local {fp1_ok},{fp1_er}=pcall(Instance.new) if {fp1_ok} or type({fp1_er})~='string' or string.find({fp1_er},'Argument 1')==nil then {kill_v}() end "
+                f"local {fp2_ok},{fp2_er}=pcall(game.GetService,game) if {fp2_ok} or type({fp2_er})~='string' or string.find({fp2_er},'Argument 1')==nil then {kill_v}() end end "
+            )
+
+        parts.append(
+            f"if (typeof==nil) or (game==nil) or (workspace==nil) or (Instance==nil) or (Enum==nil) or (Vector3==nil) or (CFrame==nil) or (task==nil) then {kill_v}() end "
+        )
+        parts.append(
+            f"if debug and debug.info then "
+            f"do local {cf_v}=function() return 1 end local {s_v},{l_v}=debug.info({cf_v},'sl') if {s_v}=='[C]' or {l_v}<1 then {kill_v}() end end "
+            f"local {cfns_v}={{type,pcall,xpcall,error,setmetatable,getmetatable,rawget,rawset,select,tonumber,tostring,pairs,ipairs,next,string.byte,string.char,string.sub,string.len,table.insert,table.remove,table.concat,math.floor,math.abs,bit32.band,bit32.bxor}} "
+            f"for _,{fn_v} in ipairs({cfns_v}) do if debug.info({fn_v},'s')~='[C]' or debug.info({fn_v},'l')~=-1 then {kill_v}() end end "
+            f"{rbx_extra_c}"
+            f"end "
+        )
+        parts.append(
+            f"if typeof(game)~={enc_call('Instance')} or game.ClassName~={enc_call('DataModel')} then {kill_v}() end "
+            f"if typeof(workspace)~={enc_call('Instance')} or workspace.ClassName~={enc_call('Workspace')} then {kill_v}() end "
+        )
+        parts.append(
+            f"do local {plrs_v}=game:GetService({enc_call('Players')}) if typeof({plrs_v})~={enc_call('Instance')} or {plrs_v}.ClassName~={enc_call('Players')} then {kill_v}() end "
+            f"local {run_v}=game:GetService({enc_call('RunService')}) if typeof({run_v})~={enc_call('Instance')} or {run_v}.ClassName~={enc_call('RunService')} then {kill_v}() end "
+            f"local {http_ok_v},{http_v}=pcall(game.GetService,game,{enc_call('HttpService')}) "
+            f"if {http_ok_v} and {http_v} then "
+            f"local {g_ok_v},{g_v}=pcall(function() return {http_v}:GenerateGUID(false) end) if {g_ok_v} and (type({g_v})~='string' or #{g_v}<10) then {kill_v}() end "
+            f"local {j_ok_v},{j_v}=pcall(function() return {http_v}:JSONDecode({http_v}:JSONEncode({{a=1}})) end) if {j_ok_v} and ({j_v}==nil or {j_v}.a~=1) then {kill_v}() end "
+            f"end end "
+        )
+        parts.append(
+            f"do local {ok1_v},{p_v}=pcall(Instance.new,{enc_call('Part')}) "
+            f"if not {ok1_v} or typeof({p_v})~={enc_call('Instance')} or {p_v}.ClassName~={enc_call('Part')} then {kill_v}() end "
+            f"{p_v}.Shape=Enum.PartType.Cylinder {p_v}.Position=Vector3.new(10,20,30) {p_v}.Size=Vector3.new(2,4,6) "
+            f"if {p_v}.Shape~=Enum.PartType.Cylinder or {p_v}.Position.X~=10 or {p_v}.Size.Y~=4 then {kill_v}() end "
+            f"{p_v}:Destroy() end "
+        )
+        parts.append(
+            f"if type(Vector3.new())~='userdata' or typeof(Vector3.new())~='Vector3' then {kill_v}() end "
+            f"if type(CFrame.new())~='userdata' or typeof(CFrame.new())~='CFrame' then {kill_v}() end "
+            f"if type(Color3.new())~='userdata' or typeof(Color3.new())~='Color3' then {kill_v}() end "
+            f"if type(UDim2.new())~='userdata' or typeof(UDim2.new())~='UDim2' then {kill_v}() end "
+            f"do local {v1_v}=Vector3.new(1,2,3) local {v2_v}=Vector3.new(1.00001,2.00001,3.00001) if not {v1_v}:FuzzyEq({v2_v},0.001) or {v1_v}:FuzzyEq(Vector3.new(4,5,6),0.001) then {kill_v}() end end "
+            f"do local {cf_inv_v}=CFrame.new(10,20,30) local {inv_v}={cf_inv_v}:Inverse() local {id_v}={cf_inv_v}*{inv_v} if math.abs({id_v}.Position.X)>0.001 or math.abs({id_v}.Position.Y)>0.001 or math.abs({id_v}.Position.Z)>0.001 then {kill_v}() end end "
+            f"do local {u_v}=UDim2.fromOffset(10,5) if {u_v}.X.Offset~=10 or {u_v}.Y.Offset~=5 then {kill_v}() end end "
+            f"if Enum.PartType.Cylinder.Name~='Cylinder' or Enum.PartType.Cylinder.Value~=2 or tostring(Enum.PartType.Cylinder.EnumType)~='PartType' then {kill_v}() end "
+        )
+        parts.append(
+            f"do local {th_v}=task.spawn(function() end) task.cancel({th_v}) if type({th_v})~='thread' or typeof({th_v})~='thread' then {kill_v}() end end "
+        )
+        bad_globals_list = [
+            "__LUNE__", "__LUTE__", "wally", "rojo",
+            "selene", "darklua", "remodel",
+            "MobDebug", "remdebug", "ldb", "BreakpointHook",
+            "__BREAKPOINT__", "__DEBUG__", "__ATTACHED__",
+        ]
+        bad_globals_expr = "{" + ",".join(enc_call(bg) for bg in bad_globals_list) + "}"
+
+        bad_mods_list = [
+            "@lune/fs", "@lune/process", "@lune/net",
+            "@lune/task", "@lune/luau", "@lune/roblox",
+            "@lune/serde", "@lune/stdio", "@lune/datetime",
+            "@lune/crypto",
+            "@lute/fs", "@lute/net", "@lute/process",
+            "@std/fs", "@std/net", "@std/process",
+        ]
+        bad_mods_expr = "{" + ",".join(enc_call(bm) for bm in bad_mods_list) + "}"
+
+        parts.append(
+            f"do local {pkg_v}=package if type({pkg_v})=='table' then "
+            f"if rawget({pkg_v},{enc_call('lune')}) or rawget({pkg_v},{enc_call('lute')}) or rawget({pkg_v},{enc_call('wally')}) or rawget({pkg_v},{enc_call('rojo')}) then {kill_v}() end "
+            f"end end "
+            f"do local {ev_v}=(getfenv and getfenv(0)) or _ENV or _G or {{}} "
+            f"local {bad_globals_v}={bad_globals_expr} "
+            f"for _,{bg_v} in ipairs({bad_globals_v}) do if rawget({ev_v},{bg_v})~=nil then {kill_v}() end end "
+            f"end "
+            f"do local {req_v}=require if type({req_v})=='function' then "
+            f"local {bad_mods_v}={bad_mods_expr} "
+            f"for _,{bm_v} in ipairs({bad_mods_v}) do local {ok_v},{res_v}=pcall({req_v},{bm_v}) if {ok_v} and {res_v}~=nil then {sus_v}={sus_v}+1 end end "
+            f"end end "
+            f"if {sus_v}>0 then {kill_v}() end "
+        )
+
+    return "".join(parts)
+
+
+def build_anti_tamper(seeds, rng, var_k, encode_fn, detect_var=None, level="full", version="v2", target="luau"):
+    if version == "v1":
+        return build_anti_tamper_v1(seeds, rng, var_k, encode_fn, detect_var=detect_var, level=level)
+    return build_anti_tamper_v2(seeds, rng, var_k, encode_fn, detect_var=detect_var, target=target, level=level)
+
 
 def build_runtime_footer(var_Q, var_G):
     return f"end)(getfenv and getfenv() or _ENV,table.unpack or unpack,{{}},{{}},nil,{{}}) end)(...)"

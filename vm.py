@@ -149,6 +149,15 @@ class FuncProto:
             return None
         print_const = self.add_const("print")
         decoy_const = self.add_const(mltn.MELODIE_DECOY)
+        for d in [
+            "MelodieCore_AdminKey_89327498234789",
+            "Meloten_RootBypass_BearerToken_v2",
+            "flag{melodie_loves_meloten_and_hates_skids}",
+            "MelodieSecurity_LicenseOverride_991283",
+            "https://api.melodie.network/v1/auth/master-key",
+            "MelodieKernel_SuperUser_Token_771829",
+        ]:
+            self.add_const(d)
         r_fn = 250
         r_arg = 251
         trap_idx = len(self.instructions)
@@ -247,11 +256,6 @@ class FuncProto:
         return data
 
     def serialize_mltn_only(self, string_index_map=None):
-        # MLTN without MLD: varints, encrypted counters, encrypted const block,
-        # string pool dedup, opcode RLE+dictionary compression - but instruction
-        # register fields (a,b,c) are plain varints, uncompressed by any dictionary.
-        # Not wired into the CLI - kept for comparison against full serialize()
-        # (MLTN+MLD) and serialize_legacy() (no compression at all).
         data = bytes([int(self.is_vararg), self.params])
         data += mltn.write_uvarint(len(self.upvals))
         for kind, idx in self.upvals:
@@ -301,9 +305,6 @@ class FuncProto:
         return data
 
     def serialize_legacy(self):
-        # Pre-MLTN format: fixed-width u16 fields, plaintext strings/numbers,
-        # only opcodes are LCG-encrypted. Not wired into the CLI - kept here
-        # for size/behavior comparison against the MLTN-compressed format.
         def legacy_encode_const(val):
             if val is None:
                 return bytes([0])
@@ -1070,7 +1071,6 @@ class Compiler:
             self._ensure_melodie_trap_recursive(p, opmap)
 
     def serialize_mltn_only(self):
-        # MLTN without MLD, not wired into CLI. See FuncProto.serialize_mltn_only.
         all_strings = []
         self.proto.collect_strings(all_strings)
         pool, string_index_map = mltn.build_string_pool(all_strings)
@@ -1085,7 +1085,6 @@ class Compiler:
         return header + body
 
     def serialize_legacy(self):
-        # Pre-MLTN format, not wired into CLI. See FuncProto.serialize_legacy.
         return self.proto.serialize_legacy()
 
 
@@ -1770,6 +1769,7 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
     p_fdn = N(); p_fdfi = N(); p_fdop = N(); p_fdflen = N(); p_fdfields = N(); p_fdk = N()
     p_fieldslen = N(); p_fieldsbytes = N(); p_fpos = N()
     p_logops = N(); p_lk = N(); p_lo = N(); p_fdidx = N(); p_fdent = N()
+    c_raw_v = N()
 
     om = opmap if opmap is not None else _DEFAULT_OPMAP
     def O(name): return om[name]
@@ -1970,8 +1970,9 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
         f"end "
         f"{p_i}={p_i}+{p_cblen} "
         f"local {p_cbi}=1 "
-        f"local {p_consts}={{}} "
-        f"for {p_ci}=1,{p_nconsts} do local {p_cv},{p_ni}={ldc_v}({p_cbb},{p_cbi}) {p_consts}[{p_ci}]={p_cv} {p_cbi}={p_ni} end "
+        f"local {c_raw_v}={{}} "
+        f"for {p_ci}=1,{p_nconsts} do local {p_cv},{p_ni}={ldc_v}({p_cbb},{p_cbi}) {c_raw_v}[{p_ci}]={p_cv} {p_cbi}={p_ni} end "
+        f"local {p_consts}=setmetatable({{}},{{__index={c_raw_v},__newindex=function() error('Melodie: constant pool is protected and read-only',0) end,__tostring=function() return 'Melodie: encrypted constant container' end,__metatable=false}}) "
         f"local {p_nins} {p_nins},{p_i}={euv_v}({p_d},{p_i}) "
         f"local {p_trapidx} {p_trapidx},{p_i}={uv_v}({p_d},{p_i}) "
         f"local {p_pseed2}={p_d}[{p_i}] {p_i}={p_i}+1 "
@@ -2200,14 +2201,17 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
         f"else error('attempt to call a '..type({p_mfn})..' value',0) end "
         f"elseif {p_op2}=={O('RETURN')} then "
         f"local {p_rbb}={p_a2} local {p_nret}={p_b2} "
-        f"if {p_nret}==1 then return {p_getreg}({p_rbb}) "
-        f"elseif {p_nret}==0 then return "
+        f"if {p_nret}==1 then local {p_res}={p_getreg}({p_rbb}) for {p_jj}=0,#{p_vr} do {p_vr}[{p_jj}]=nil end return {p_res} "
+        f"elseif {p_nret}==0 then for {p_jj}=0,#{p_vr} do {p_vr}[{p_jj}]=nil end return "
         f"elseif {p_nret}==255 then "
         f"local {p_res}={{}} local {p_jj}=0 "
         f"while {p_rbb}+{p_jj}<{p_vtop} do {p_res}[{p_jj}+1]={p_getreg}({p_rbb}+{p_jj}) {p_jj}={p_jj}+1 end "
+        f"for {p_jj}=0,#{p_vr} do {p_vr}[{p_jj}]=nil end "
         f"return table.unpack({p_res}) "
-        f"else local {p_res}={{}} for {p_jj}=0,{p_nret}-1 do {p_res}[{p_jj}+1]={p_getreg}({p_rbb}+{p_jj}) end return table.unpack({p_res}) end "
-        f"elseif {p_op2}=={O('RETURN_NONE')} then return "
+        f"else local {p_res}={{}} for {p_jj}=0,{p_nret}-1 do {p_res}[{p_jj}+1]={p_getreg}({p_rbb}+{p_jj}) end "
+        f"for {p_jj}=0,#{p_vr} do {p_vr}[{p_jj}]=nil end "
+        f"return table.unpack({p_res}) end "
+        f"elseif {p_op2}=={O('RETURN_NONE')} then for {p_jj}=0,#{p_vr} do {p_vr}[{p_jj}]=nil end return "
         f"elseif {p_op2}=={O('VARARG')} then "
         f"local {p_nret}={p_b2} "
         f"if {p_nret}==255 then for {p_jj}=1,{p_van} do {p_setreg}({p_a2}+{p_jj}-1,{p_va}[{p_jj}]) end "
@@ -2241,8 +2245,12 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
         f"elseif {p_op2}=={O('CLOSE_UPVAL')} then "
         f"local {p_x}={p_rb}[{p_a2}] if {p_x}~=nil then {p_vr}[{p_a2}]={p_x}.v {p_rb}[{p_a2}]=nil end "
         f"elseif {p_op2}=={O('MOVE')} then {p_setreg}({p_a2},{p_getreg}({p_b2})) "
+        f"else "
+        f"print('Melodie caught an illegal opcode modification :3') "
+        f"error('',0) "
         f"end "
         f"end "
+        f"for {p_jj}=0,#{p_vr} do {p_vr}[{p_jj}]=nil end "
         f"end "
 
         f"local {fn_v} "
@@ -2299,6 +2307,7 @@ def bytecode_to_lua_mltn_only(bytecode, rng, gen_name_fn, opmap=None, data_expr=
     p_fdn = N(); p_fdfi = N(); p_fdop = N(); p_fdflen = N(); p_fdfields = N(); p_fdk = N()
     p_fieldslen = N(); p_fieldsbytes = N(); p_fpos = N()
     p_logops = N(); p_lk = N(); p_lo = N(); p_fdidx = N(); p_fdent = N()
+    c_raw_v = N()
 
     om = opmap if opmap is not None else _DEFAULT_OPMAP
     def O(name): return om[name]
@@ -2495,8 +2504,9 @@ def bytecode_to_lua_mltn_only(bytecode, rng, gen_name_fn, opmap=None, data_expr=
         f"end "
         f"{p_i}={p_i}+{p_cblen} "
         f"local {p_cbi}=1 "
-        f"local {p_consts}={{}} "
-        f"for {p_ci}=1,{p_nconsts} do local {p_cv},{p_ni}={ldc_v}({p_cbb},{p_cbi}) {p_consts}[{p_ci}]={p_cv} {p_cbi}={p_ni} end "
+        f"local {c_raw_v}={{}} "
+        f"for {p_ci}=1,{p_nconsts} do local {p_cv},{p_ni}={ldc_v}({p_cbb},{p_cbi}) {c_raw_v}[{p_ci}]={p_cv} {p_cbi}={p_ni} end "
+        f"local {p_consts}=setmetatable({{}},{{__index={c_raw_v},__newindex=function() error('Melodie: constant pool is protected and read-only',0) end,__tostring=function() return 'Melodie: encrypted constant container' end,__metatable=false}}) "
         f"local {p_nins} {p_nins},{p_i}={euv_v}({p_d},{p_i}) "
         f"local {p_pseed2}={p_d}[{p_i}] {p_i}={p_i}+1 "
         f"local {p_marker}={p_d}[{p_i}] {p_i}={p_i}+1 "
@@ -2677,14 +2687,17 @@ def bytecode_to_lua_mltn_only(bytecode, rng, gen_name_fn, opmap=None, data_expr=
         f"else error('attempt to call a '..type({p_mfn})..' value',0) end "
         f"elseif {p_op2}=={O('RETURN')} then "
         f"local {p_rbb}={p_a2} local {p_nret}={p_b2} "
-        f"if {p_nret}==1 then return {p_getreg}({p_rbb}) "
-        f"elseif {p_nret}==0 then return "
+        f"if {p_nret}==1 then local {p_res}={p_getreg}({p_rbb}) for {p_jj}=0,#{p_vr} do {p_vr}[{p_jj}]=nil end return {p_res} "
+        f"elseif {p_nret}==0 then for {p_jj}=0,#{p_vr} do {p_vr}[{p_jj}]=nil end return "
         f"elseif {p_nret}==255 then "
         f"local {p_res}={{}} local {p_jj}=0 "
         f"while {p_rbb}+{p_jj}<{p_vtop} do {p_res}[{p_jj}+1]={p_getreg}({p_rbb}+{p_jj}) {p_jj}={p_jj}+1 end "
+        f"for {p_jj}=0,#{p_vr} do {p_vr}[{p_jj}]=nil end "
         f"return table.unpack({p_res}) "
-        f"else local {p_res}={{}} for {p_jj}=0,{p_nret}-1 do {p_res}[{p_jj}+1]={p_getreg}({p_rbb}+{p_jj}) end return table.unpack({p_res}) end "
-        f"elseif {p_op2}=={O('RETURN_NONE')} then return "
+        f"else local {p_res}={{}} for {p_jj}=0,{p_nret}-1 do {p_res}[{p_jj}+1]={p_getreg}({p_rbb}+{p_jj}) end "
+        f"for {p_jj}=0,#{p_vr} do {p_vr}[{p_jj}]=nil end "
+        f"return table.unpack({p_res}) end "
+        f"elseif {p_op2}=={O('RETURN_NONE')} then for {p_jj}=0,#{p_vr} do {p_vr}[{p_jj}]=nil end return "
         f"elseif {p_op2}=={O('VARARG')} then "
         f"local {p_nret}={p_b2} "
         f"if {p_nret}==255 then for {p_jj}=1,{p_van} do {p_setreg}({p_a2}+{p_jj}-1,{p_va}[{p_jj}]) end "
@@ -2718,8 +2731,12 @@ def bytecode_to_lua_mltn_only(bytecode, rng, gen_name_fn, opmap=None, data_expr=
         f"elseif {p_op2}=={O('CLOSE_UPVAL')} then "
         f"local {p_x}={p_rb}[{p_a2}] if {p_x}~=nil then {p_vr}[{p_a2}]={p_x}.v {p_rb}[{p_a2}]=nil end "
         f"elseif {p_op2}=={O('MOVE')} then {p_setreg}({p_a2},{p_getreg}({p_b2})) "
+        f"else "
+        f"print('Melodie caught an illegal opcode modification :3') "
+        f"error('',0) "
         f"end "
         f"end "
+        f"for {p_jj}=0,#{p_vr} do {p_vr}[{p_jj}]=nil end "
         f"end "
 
         f"local {fn_v} "
@@ -2760,6 +2777,7 @@ def bytecode_to_lua_legacy(bytecode, rng, gen_name_fn, opmap=None, data_expr=Non
     p_tj1 = N(); p_tj2 = N(); p_tj3 = N()
     p_cblen = N(); p_cbb = N(); p_cbi = N(); p_pseed2 = N(); p_rstate2 = N(); p_rprev2 = N()
     p_smv = N()
+    c_raw_v = N()
     p_strref = N(); p_strpool = N(); p_poolseed = N(); p_poollen = N(); p_poolraw = N()
     p_poolcount = N(); p_poolidx = N(); p_poolslen = N(); p_poolstr = N(); p_poolst = N(); p_poolpv = N()
     p_bodystart = N(); p_pst = N(); p_ppv = N(); p_ns = N(); p_mk = N()
@@ -2911,8 +2929,9 @@ def bytecode_to_lua_legacy(bytecode, rng, gen_name_fn, opmap=None, data_expr=Non
         f"{p_protos}[#{p_protos}+1]={p_p} "
         f"end "
         f"local {p_nconsts}={u16_v}({p_d},{p_i}) {p_i}={p_i}+2 "
-        f"local {p_consts}={{}} "
-        f"for {p_ci}=1,{p_nconsts} do local {p_cv},{p_ni}={ldc_v}({p_d},{p_i}) {p_consts}[{p_ci}]={p_cv} {p_i}={p_ni} end "
+        f"local {c_raw_v}={{}} "
+        f"for {p_ci}=1,{p_nconsts} do local {p_cv},{p_ni}={ldc_v}({p_d},{p_i}) {c_raw_v}[{p_ci}]={p_cv} {p_i}={p_ni} end "
+        f"local {p_consts}=setmetatable({{}},{{__index={c_raw_v},__newindex=function() error('Melodie: constant pool is protected and read-only',0) end,__tostring=function() return 'Melodie: encrypted constant container' end,__metatable=false}}) "
         f"local {p_nins}={u16_v}({p_d},{p_i}) {p_i}={p_i}+2 "
         f"local {p_pseed}={p_d}[{p_i}] {p_i}={p_i}+1 "
         f"local {p_ins}={{}} "
@@ -3055,14 +3074,17 @@ def bytecode_to_lua_legacy(bytecode, rng, gen_name_fn, opmap=None, data_expr=Non
         f"else error('attempt to call a '..type({p_mfn})..' value',0) end "
         f"elseif {p_op2}=={O('RETURN')} then "
         f"local {p_rbb}={p_a2} local {p_nret}={p_b2} "
-        f"if {p_nret}==1 then return {p_getreg}({p_rbb}) "
-        f"elseif {p_nret}==0 then return "
+        f"if {p_nret}==1 then local {p_res}={p_getreg}({p_rbb}) for {p_jj}=0,#{p_vr} do {p_vr}[{p_jj}]=nil end return {p_res} "
+        f"elseif {p_nret}==0 then for {p_jj}=0,#{p_vr} do {p_vr}[{p_jj}]=nil end return "
         f"elseif {p_nret}==255 then "
         f"local {p_res}={{}} local {p_jj}=0 "
         f"while {p_rbb}+{p_jj}<{p_vtop} do {p_res}[{p_jj}+1]={p_getreg}({p_rbb}+{p_jj}) {p_jj}={p_jj}+1 end "
+        f"for {p_jj}=0,#{p_vr} do {p_vr}[{p_jj}]=nil end "
         f"return table.unpack({p_res}) "
-        f"else local {p_res}={{}} for {p_jj}=0,{p_nret}-1 do {p_res}[{p_jj}+1]={p_getreg}({p_rbb}+{p_jj}) end return table.unpack({p_res}) end "
-        f"elseif {p_op2}=={O('RETURN_NONE')} then return "
+        f"else local {p_res}={{}} for {p_jj}=0,{p_nret}-1 do {p_res}[{p_jj}+1]={p_getreg}({p_rbb}+{p_jj}) end "
+        f"for {p_jj}=0,#{p_vr} do {p_vr}[{p_jj}]=nil end "
+        f"return table.unpack({p_res}) end "
+        f"elseif {p_op2}=={O('RETURN_NONE')} then for {p_jj}=0,#{p_vr} do {p_vr}[{p_jj}]=nil end return "
         f"elseif {p_op2}=={O('VARARG')} then "
         f"local {p_nret}={p_b2} "
         f"if {p_nret}==255 then for {p_jj}=1,{p_van} do {p_setreg}({p_a2}+{p_jj}-1,{p_va}[{p_jj}]) end "
@@ -3096,8 +3118,12 @@ def bytecode_to_lua_legacy(bytecode, rng, gen_name_fn, opmap=None, data_expr=Non
         f"elseif {p_op2}=={O('CLOSE_UPVAL')} then "
         f"local {p_x}={p_rb}[{p_a2}] if {p_x}~=nil then {p_vr}[{p_a2}]={p_x}.v {p_rb}[{p_a2}]=nil end "
         f"elseif {p_op2}=={O('MOVE')} then {p_setreg}({p_a2},{p_getreg}({p_b2})) "
+        f"else "
+        f"print('Melodie caught an illegal opcode modification :3') "
+        f"error('',0) "
         f"end "
         f"end "
+        f"for {p_jj}=0,#{p_vr} do {p_vr}[{p_jj}]=nil end "
         f"end "
 
         f"local {fn_v} "

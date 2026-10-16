@@ -11,11 +11,16 @@ def main():
     at_none    = '--no-anti-tamper'      in args
     at_minimal = '--minimal-anti-tamper' in args
     at_full    = '--full-anti-tamper'    in args
+    at_v1      = '--at-v1'               in args
+    target_rbx = '--roblox'              in args
+
+    at_version = "v1" if at_v1 else "v2"
+    at_target  = "roblox" if target_rbx else "luau"
 
     args = [a for a in args if not a.startswith('--')]
 
     if not args:
-        print("Usage: python main.py <input.lua> [output.lua] [--vm | --fold] [anti-tamper flag]")
+        print("Usage: python main.py <input.lua> [output.lua] [--vm | --fold] [anti-tamper flags]")
         print("  --vm                     Use VM bytecode (default)")
         print("  --fold                   Use string-fold (without VM)")
         print("  --hide-vm-source         With --vm, encrypt the VM dispatch loop itself")
@@ -23,14 +28,12 @@ def main():
         print("                           emitting it as plain Lua. Breaks executors that")
         print("                           block loadstring, so it is off by default.")
         print("")
-        print("Anti-Tamper flags (default: full):")
+        print("Anti-Tamper flags (default: v2 full, target: luau):")
         print("  --full-anti-tamper       All checks enabled (default, strongest protection)")
-        print("  --minimal-anti-tamper    Drops only the checks known to false-positive on")
-        print("                           some executors (behavioral/timing/hook-probing")
-        print("                           checks). Use this if a specific executor kills the")
-        print("                           script on load with no other explanation.")
-        print("  --no-anti-tamper         Disables anti-tamper entirely (NOT recommended,")
-        print("                           makes the output much easier to deobfuscate)")
+        print("  --minimal-anti-tamper    Drops checks known to false-positive on picky executors")
+        print("  --no-anti-tamper         Disables anti-tamper entirely")
+        print("  --at-v1                  Use legacy Anti-Tamper v1 (Roblox physics/timing)")
+        print("  --roblox                 Target Roblox environment (default is pure Luau)")
         sys.exit(1)
 
     if force_vm and force_fold:
@@ -78,6 +81,8 @@ def main():
             force_vm=force_vm, force_fold=force_fold,
             anti_tamper_level=anti_tamper_level,
             hide_vm_source=hide_vm_source,
+            at_version=at_version,
+            at_target=at_target,
         )
     except RuntimeError as e:
         print(f"[!] {e}")

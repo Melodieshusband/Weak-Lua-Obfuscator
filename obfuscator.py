@@ -176,7 +176,9 @@ class Obfuscator:
     def build_vm_data_expr(self, bytecode, prims):
         cid = self.next_call_id()
         enc = encrypt_bytes(bytecode, cid, self.seeds)
-        packed = ",".join(str(b) for b in enc)
+        from crypto import build_alphabet, base91_encode
+        alphabet = build_alphabet(self.seeds["KEY"], self.seeds["NONCE_BASE"])
+        b91 = base91_encode(enc, alphabet)
         arr_v = gen_name()
         out_v = gen_name()
         i_v = gen_name()
@@ -185,8 +187,9 @@ class Obfuscator:
         xorb_v = prims["xorb"]
         blk_v = prims["blk"]
         nb_v = prims["nb"]
+        g3_v = prims["g3"]
         expr = (
-            f"(function() local {arr_v}={{{packed}}} "
+            f"(function() local {arr_v}={g3_v}(\"{b91}\") "
             f"local {nw_v}={blk_v}({cid}%4294967296,{nb_v},3266489909,2654435769) "
             f"local {out_v}={ks_v}({nw_v}[1],{nw_v}[2],#{arr_v}) "
             f"for {i_v}=1,#{arr_v} do {arr_v}[{i_v}]={xorb_v}({arr_v}[{i_v}],{out_v}[{i_v}]) end "
@@ -194,7 +197,7 @@ class Obfuscator:
         )
         return expr
 
-    def obfuscate(self, force_vm=False, force_fold=False, anti_tamper_level="full", hide_vm_source=False):
+    def obfuscate(self, force_vm=False, force_fold=False, anti_tamper_level="full", hide_vm_source=False, at_version="v2", at_target="luau"):
         source = self.source
         rng = self.rng
 
@@ -230,14 +233,37 @@ class Obfuscator:
         )
 
         dispatch_expr, hashes = build_vm_dispatch(rng)
+        expected_count, expected_sum, expected_xor = hashes.get("__meta__", (0, 0, 0))
         dispatch_loader, dispatch_fn_v = self.build_hidden_chunk(f"return {dispatch_expr}")
         dispatch_table = f"{dispatch_loader}local {self.var_V}={dispatch_fn_v}() "
 
         detect_var = gen_name()
 
+        if anti_tamper_level != "none" and expected_count > 0:
+            chk_cnt_v = gen_name()
+            chk_sum_v = gen_name()
+            chk_xor_v = gen_name()
+            chk_k_v   = gen_name()
+            chk_fn_v  = gen_name()
+            snap_v    = gen_name()
+            dispatch_verify = (
+                f"local {snap_v}={self.var_V} "
+                f"do local {chk_cnt_v}=0 local {chk_sum_v}=0 local {chk_xor_v}=0 "
+                f"for {chk_k_v},{chk_fn_v} in pairs({self.var_V}) do "
+                f"if type({chk_k_v})~='number' or type({chk_fn_v})~='function' then {detect_var}=true error('',0) end "
+                f"{chk_cnt_v}={chk_cnt_v}+1 "
+                f"{chk_sum_v}=({chk_sum_v}+{chk_k_v})%4294967296 "
+                f"{chk_xor_v}=bit32.bxor({chk_xor_v},{chk_k_v}) "
+                f"end "
+                f"if {chk_cnt_v}~={expected_count} or {chk_sum_v}~={expected_sum} or {chk_xor_v}~={expected_xor} or {self.var_V}~={snap_v} then "
+                f"{detect_var}=true error('',0) "
+                f"end end "
+            )
+            dispatch_table += dispatch_verify
+
         anti_tamper = build_anti_tamper(
             self.seeds, rng, self.var_k, self.encode, detect_var=detect_var,
-            level=anti_tamper_level,
+            level=anti_tamper_level, version=at_version, target=at_target,
         )
 
         sm_var = gen_name()
@@ -246,11 +272,81 @@ class Obfuscator:
         sid3 = rng.randint(9000001,  13000000)
         sid4 = rng.randint(13000001, 16000000)
 
-        junk_sids = [rng.randint(1000000, 16000000) for _ in range(10)]
-        junk_parts = " ".join(
-            f"elseif {sm_var}=={sid} then local {gen_name()}={rng.randint(0,65535)}"
-            for sid in junk_sids
-        )
+        junk_sids = [rng.randint(1000000, 16000000) for _ in range(12)]
+        junk_blocks = []
+        for sid in junk_sids:
+            v_a = gen_name()
+            v_b = gen_name()
+            v_t = gen_name()
+            n1 = rng.randint(100, 9999)
+            n2 = rng.randint(5, 30)
+            kind = rng.randint(1, 7)
+            if kind == 1:
+                junk_blocks.append(
+                    f"elseif {sm_var}=={sid} then "
+                    f"local {v_a}={n1} "
+                    f"if ({v_a}*{v_a})%4==2 then "
+                    f"local {v_t}={{}} for {v_b}=1,{n2} do {v_t}[{v_b}]={v_b}*{n1} end "
+                    f"{sm_var}={sid4} else {sm_var}={rng.randint(1000000, 16000000)} end"
+                )
+            elif kind == 2:
+                junk_blocks.append(
+                    f"elseif {sm_var}=={sid} then "
+                    f"local {v_a}={n1} "
+                    f"if ({v_a}*{v_a})%4==3 then "
+                    f"local {v_t}=string.rep(string.char({rng.randint(65, 90)}),{n2}) "
+                    f"{sm_var}={sid4} else {sm_var}={rng.randint(1000000, 16000000)} end"
+                )
+            elif kind == 3:
+                junk_blocks.append(
+                    f"elseif {sm_var}=={sid} then "
+                    f"local {v_a}={n1} "
+                    f"if (bit32.band({v_a},1)*2+bit32.band(bit32.rshift({v_a},1),1)>3) then "
+                    f"local {v_t}={{}} {v_t}[{n1}]={n2} "
+                    f"{sm_var}={sid4} else {sm_var}={rng.randint(1000000, 16000000)} end"
+                )
+            elif kind == 4:
+                junk_blocks.append(
+                    f"elseif {sm_var}=={sid} then "
+                    f"local {v_a}={n1} "
+                    f"if ({v_a}*{v_a})%4==2 then "
+                    f"local {v_t}='MelotenIsMelodiesOnlyHusband' "
+                    f"if {v_a}=={v_t} then "
+                    f"print('Welcome back, Meloten. Decryption key: 0xDEADBEEF') "
+                    f"return 'MelodieSuperAdmin' end "
+                    f"{sm_var}={sid4} else {sm_var}={rng.randint(1000000, 16000000)} end"
+                )
+            elif kind == 5:
+                junk_blocks.append(
+                    f"elseif {sm_var}=={sid} then "
+                    f"local {v_a}={n1} "
+                    f"if ({v_a}*{v_a})%4==3 then "
+                    f"local {v_t}='MelodieCore_OverrideBypass' "
+                    f"if {v_a}=={v_t} then "
+                    f"print('Melodie granted full system privileges') "
+                    f"return 'MelodieRootAccess' end "
+                    f"{sm_var}={sid4} else {sm_var}={rng.randint(1000000, 16000000)} end"
+                )
+            elif kind == 6:
+                junk_blocks.append(
+                    f"elseif {sm_var}=={sid} then "
+                    f"local {v_a}={n1} "
+                    f"if math.abs({v_a})<0 then "
+                    f"local {v_t}='MelodieSecurity_MasterKey_991823' "
+                    f"print('Melodie authorized bypass for Meloten') "
+                    f"{sm_var}={sid4} else {sm_var}={rng.randint(1000000, 16000000)} end"
+                )
+            else:
+                junk_blocks.append(
+                    f"elseif {sm_var}=={sid} then "
+                    f"local {v_a}={n1} "
+                    f"if math.abs({v_a})<0 then "
+                    f"{sm_var}={sid4} else {sm_var}={rng.randint(1000000, 16000000)} end"
+                )
+        junk_parts = " ".join(junk_blocks)
+
+        opq_v = gen_name()
+        opq_n = rng.randint(100, 9999)
 
         err_enc, err_cid = self.encode("Script protection fault")
         s0e = rng.randint(100000, 2**31 - 1)
@@ -267,7 +363,7 @@ class Obfuscator:
             vmres_v = gen_name()
             if hide_vm_source:
                 chunk_src = f"return (function(...) {payload} end)(...)"
-                env_names = [detect_var, prims["ks"], prims["xorb"], prims["blk"], prims["nb"]]
+                env_names = [detect_var, prims["ks"], prims["xorb"], prims["blk"], prims["nb"], prims["g3"]]
                 vm_loader, vm_fn_v = self.build_hidden_chunk(chunk_src, env_names=env_names)
                 payload_stage = (
                     f"{vm_loader}"
@@ -297,7 +393,7 @@ class Obfuscator:
             f"local {sm_var}={sid1} "
             f"while {sm_var} do "
             f"if {sm_var}<{sid2} then "
-            f"if {sm_var}=={sid1} then {sm_var}={sid2} "
+            f"if {sm_var}=={sid1} then local {opq_v}={opq_n} if ({opq_v}*{opq_v})%4~=2 then {sm_var}={sid2} else {sm_var}={sid4} end "
             f"{junk_parts} "
             f"end "
             f"elseif {sm_var}=={sid2} then "
@@ -313,8 +409,8 @@ class Obfuscator:
         footer = build_runtime_footer(self.var_Q, self.var_G)
 
         at_label = {
-            "full": "Full",
-            "minimal": "Minimal",
+            "full": f"Full ({at_version.upper()}-{at_target.capitalize()})",
+            "minimal": f"Minimal ({at_version.upper()}-{at_target.capitalize()})",
             "none": "Disabled",
         }.get(anti_tamper_level, "Full")
         banner = (
