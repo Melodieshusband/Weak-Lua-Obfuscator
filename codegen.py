@@ -265,7 +265,8 @@ def build_runtime_header(seeds, var_k, var_Q, var_G, var_B, var_f, var_V, wm_var
 
     key = seeds["KEY"]
     nonce_base = seeds["NONCE_BASE"]
-    c0, c1, c2, c3 = CHACHA_CONST
+    c0, c1, c2, c3 = seeds.get("CC", CHACHA_CONST)
+    rot1, rot2, rot3, rot4 = seeds.get("ROT", (16, 12, 8, 7))
 
     band   = "bit32.band"
     bxor   = "bit32.bxor"
@@ -303,12 +304,19 @@ def build_runtime_header(seeds, var_k, var_Q, var_G, var_B, var_f, var_V, wm_var
         return new_acc
 
     def scatter_value(value, rot_pool):
-        n_parts = key_rng.randint(4, 6)
+        n_parts = key_rng.randint(4, 7)
+        use_xor_terms = key_rng.random() < 0.5
         shares = [key_rng.randint(0, MASK32) for _ in range(n_parts - 1)]
-        acc = 0
-        for s in shares:
-            acc = (acc + s) & MASK32
-        last = (value - acc) & MASK32
+        if use_xor_terms:
+            acc = 0
+            for s in shares:
+                acc ^= s
+            last = acc ^ value
+        else:
+            acc = 0
+            for s in shares:
+                acc = (acc + s) & MASK32
+            last = (value - acc) & MASK32
         shares.append(last)
         key_rng.shuffle(shares)
 
@@ -319,8 +327,12 @@ def build_runtime_header(seeds, var_k, var_Q, var_G, var_B, var_f, var_V, wm_var
             if i == drv_idx and i != 0:
                 salt = key_rng.randint(0, MASK32)
                 output = drv_predict(salt)
-                fixup = (sv - output) & MASK32
-                decls.append(f"local {nm}=({drv_v}({salt})+{fixup})%4294967296 ")
+                if use_xor_terms:
+                    fixup = output ^ sv
+                    decls.append(f"local {nm}={bxor}({drv_v}({salt}),{fixup}) ")
+                else:
+                    fixup = (sv - output) & MASK32
+                    decls.append(f"local {nm}=({drv_v}({salt})+{fixup})%4294967296 ")
                 continue
             mode = key_rng.randint(0, 2)
             if mode == 0 or i == 0:
@@ -336,12 +348,19 @@ def build_runtime_header(seeds, var_k, var_Q, var_G, var_B, var_f, var_V, wm_var
                 decls.append(f"local {nm}=({delta}+{rot_pool.get(prev, 0)})%4294967296 ")
                 rot_pool[prev] = rot_pool.get(prev, 0)
 
-        combine_terms = "+".join(names)
-        combine = f"({combine_terms})%4294967296"
+        if use_xor_terms:
+            combine = names[0]
+            for nm in names[1:]:
+                combine = f"{bxor}({combine},{nm})"
+        else:
+            combine_terms = "+".join(names)
+            combine = f"({combine_terms})%4294967296"
         return "".join(decls), combine
 
     rot_pool = {}
     key_field_exprs = []
+
+    decoy_pool = []
 
     def make_decoy():
         dn = gen_name()
@@ -350,25 +369,46 @@ def build_runtime_header(seeds, var_k, var_Q, var_G, var_B, var_f, var_V, wm_var
             target = key_rng.randint(0, MASK32)
             output = drv_predict(salt)
             fixup = (target - output) & MASK32
-            return f"local {dn}=({drv_v}({salt})+{fixup})%4294967296 "
-        return f"local {dn}={key_rng.randint(0, MASK32)} "
+            line = f"local {dn}=({drv_v}({salt})+{fixup})%4294967296 "
+        else:
+            line = f"local {dn}={key_rng.randint(0, MASK32)} "
+        decoy_pool.append(dn)
+        return line
+
+    def make_decoy_sink():
+        if len(decoy_pool) < 2:
+            return ""
+        a, b = key_rng.sample(decoy_pool, 2)
+        sv = gen_name()
+        never = key_rng.randint(1, MASK32 - 1)
+        guard = (never + 1) & MASK32
+        return f"local {sv}=({bxor}({a},{b})+{never})%4294967296 if {sv}=={guard} then error(\"integrity\") end "
 
     interleaved = []
     for val in key[:-1]:
         n_here = key_rng.randint(0, 2)
         for _ in range(n_here):
             interleaved.append(make_decoy())
+            if key_rng.random() < 0.6:
+                interleaved.append(make_decoy_sink())
         decl, expr = scatter_value(val, rot_pool)
         interleaved.append(decl)
         key_field_exprs.append(expr)
 
     def scatter_value_standalone(value):
-        n_parts = key_rng.randint(4, 6)
+        n_parts = key_rng.randint(4, 7)
+        use_xor_terms = key_rng.random() < 0.5
         shares = [key_rng.randint(0, MASK32) for _ in range(n_parts - 1)]
-        acc = 0
-        for s in shares:
-            acc = (acc + s) & MASK32
-        last = (value - acc) & MASK32
+        if use_xor_terms:
+            acc = 0
+            for s in shares:
+                acc ^= s
+            last = acc ^ value
+        else:
+            acc = 0
+            for s in shares:
+                acc = (acc + s) & MASK32
+            last = (value - acc) & MASK32
         shares.append(last)
         key_rng.shuffle(shares)
 
@@ -383,8 +423,13 @@ def build_runtime_header(seeds, var_k, var_Q, var_G, var_B, var_f, var_V, wm_var
                 mask = pre ^ sv
                 decls.append(f"local {nm}={bxor}({pre},{mask}) ")
 
-        combine_terms = "+".join(names)
-        combine = f"({combine_terms})%4294967296"
+        if use_xor_terms:
+            combine = names[0]
+            for nm in names[1:]:
+                combine = f"{bxor}({combine},{nm})"
+        else:
+            combine_terms = "+".join(names)
+            combine = f"({combine_terms})%4294967296"
         return "".join(decls), combine
 
     boot_last_val = key[-1]
@@ -446,13 +491,13 @@ def build_runtime_header(seeds, var_k, var_Q, var_G, var_B, var_f, var_V, wm_var
         f"local function {xorb_v}({par_a},{par_b}) return {bxor}({par_a},{par_b}) end "
         f"local function {qr_v}({st_v},{par_a},{par_b},{par_c},{par_d}) "
         f"{st_v}[{par_a}]=({st_v}[{par_a}]+{st_v}[{par_b}])%4294967296 "
-        f"{st_v}[{par_d}]={lrot}({xorb_v}({st_v}[{par_d}],{st_v}[{par_a}]),16) "
+        f"{st_v}[{par_d}]={lrot}({xorb_v}({st_v}[{par_d}],{st_v}[{par_a}]),{rot1}) "
         f"{st_v}[{par_c}]=({st_v}[{par_c}]+{st_v}[{par_d}])%4294967296 "
-        f"{st_v}[{par_b}]={lrot}({xorb_v}({st_v}[{par_b}],{st_v}[{par_c}]),12) "
+        f"{st_v}[{par_b}]={lrot}({xorb_v}({st_v}[{par_b}],{st_v}[{par_c}]),{rot2}) "
         f"{st_v}[{par_a}]=({st_v}[{par_a}]+{st_v}[{par_b}])%4294967296 "
-        f"{st_v}[{par_d}]={lrot}({xorb_v}({st_v}[{par_d}],{st_v}[{par_a}]),8) "
+        f"{st_v}[{par_d}]={lrot}({xorb_v}({st_v}[{par_d}],{st_v}[{par_a}]),{rot3}) "
         f"{st_v}[{par_c}]=({st_v}[{par_c}]+{st_v}[{par_d}])%4294967296 "
-        f"{st_v}[{par_b}]={lrot}({xorb_v}({st_v}[{par_b}],{st_v}[{par_c}]),7) "
+        f"{st_v}[{par_b}]={lrot}({xorb_v}({st_v}[{par_b}],{st_v}[{par_c}]),{rot4}) "
         f"end "
         f"local function {blk_v}({par_counter},{par_n1},{par_n2},{par_n3}) "
         f"local {st_v}={{{c0},{c1},{c2},{c3},"
@@ -531,7 +576,7 @@ def build_runtime_header(seeds, var_k, var_Q, var_G, var_B, var_f, var_V, wm_var
         f"local {decv_v} if {flag_v}==1 then {decv_v}={inflate_fn_v}({body_v}) else {decv_v}={body_v} end "
         f"local {chars_v}={{}} for {ci2_v}=1,#{decv_v},1 do {chars_v}[{ci2_v}]={sc}({decv_v}[{ci2_v}]) end "
         f"local {valv_v}=table.concat({chars_v}) local {result_v} if {par_ka_b1}==1 then {result_v}={valv_v} elseif {par_ka_b1}==2 then local {nv_v}=tonumber({valv_v}) {result_v}={nv_v}==nil and 0 or {nv_v} elseif {par_ka_b1}==3 then {result_v}={valv_v}=='1' end {CC_v}[{ck_v}]={result_v} return {result_v} end "
-    ), {"ks": ks_v, "xorb": xorb_v, "nb": nb_v, "sc": sc, "blk": blk_v, "inflate_tables": inflate_tables, "g3": g3}
+    ), {"ks": ks_v, "xorb": xorb_v, "nb": nb_v, "sc": sc, "blk": blk_v, "inflate_tables": inflate_tables, "g3": g3, "key": key_v}
 
 def build_vm_dispatch(rng):
     import re

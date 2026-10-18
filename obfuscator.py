@@ -177,7 +177,7 @@ class Obfuscator:
         cid = self.next_call_id()
         enc = encrypt_bytes(bytecode, cid, self.seeds)
         from crypto import build_alphabet, base91_encode
-        alphabet = build_alphabet(self.seeds["KEY"], self.seeds["NONCE_BASE"])
+        alphabet = build_alphabet(self.seeds["KEY"], self.seeds["NONCE_BASE"], self.seeds.get("CC"), self.seeds.get("ROT"))
         b91 = base91_encode(enc, alphabet)
         arr_v = gen_name()
         out_v = gen_name()
@@ -359,11 +359,11 @@ class Obfuscator:
         if use_vm:
             data_expr = self.build_vm_data_expr(bytecode, prims)
             encode_fn = bytecode_to_lua if bc_format == "mltn" else bytecode_to_lua_legacy
-            payload = encode_fn(bytecode, rng, gen_name, opmap, data_expr=data_expr, detect_var=detect_var)
+            payload = encode_fn(bytecode, rng, gen_name, opmap, data_expr=data_expr, detect_var=detect_var, key_expr=prims.get("key"))
             vmres_v = gen_name()
             if hide_vm_source:
                 chunk_src = f"return (function(...) {payload} end)(...)"
-                env_names = [detect_var, prims["ks"], prims["xorb"], prims["blk"], prims["nb"], prims["g3"]]
+                env_names = [detect_var, prims["ks"], prims["xorb"], prims["blk"], prims["nb"], prims["g3"], prims["key"]]
                 vm_loader, vm_fn_v = self.build_hidden_chunk(chunk_src, env_names=env_names)
                 payload_stage = (
                     f"{vm_loader}"

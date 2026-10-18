@@ -1693,11 +1693,8 @@ def try_compile_vm(source, rng=None, debug=False):
         if rng is not None:
             from bytecode_cff import flatten_bytecode
             flatten_bytecode(compiler.proto, rng, opmap)
-        bytecode_legacy = compiler.serialize_legacy()
         bytecode_mltn = compiler.serialize(opmap=opmap)
-        if len(bytecode_mltn) < len(bytecode_legacy):
-            return bytecode_mltn, opmap, "mltn"
-        return bytecode_legacy, opmap, "legacy"
+        return bytecode_mltn, opmap, "mltn"
     except Exception as e:
         if debug:
             import traceback
@@ -1718,7 +1715,7 @@ def _patch_global_ops(opmap):
     g['FIELD_DICT_MARKER'] = field_dict_marker
 
 
-def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, detect_var=None):
+def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, detect_var=None, key_expr=None):
     N = gen_name_fn
     data_v    = N(); u16_v     = N(); u16s_v    = N(); ldc_v     = N()
     ldi_v     = N(); ldp_v     = N(); consts_v  = N()
@@ -1933,8 +1930,13 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
         f"return {p_out},{p_rst},{p_rpv} end "
         f"local function {chk_v}({p_op},{p_a},{p_b},{p_cc}) "
         f"local {p_a}={p_a} or 0 local {p_b}={p_b} or 0 local {p_cc}={p_cc} or 0 "
-        f"return bit32.band(({p_op}*7919)+({p_a}*104729)+({p_b}*15485863)+({p_cc}*179424673)+2166136261,0x7FFFFFFF) "
-        f"end "
+        f"local {p_n}=bit32.band(({p_op}*7919)+({p_a}*104729)+({p_b}*15485863)+({p_cc}*179424673)+2166136261,0x7FFFFFFF) "
+        + (
+            f"return bit32.bxor({p_n},{key_expr}[(bit32.band({p_op},7))+1]) "
+            if key_expr
+            else f"return {p_n} "
+        )
+        + f"end "
         f"local function {ldi_v}({p_d},{p_i},{p_op}) "
         f"local {p_a},{p_b},{p_cc}=nil,nil,nil "
         f"local {p_o}={p_op} "
@@ -2744,7 +2746,7 @@ def bytecode_to_lua_mltn_only(bytecode, rng, gen_name_fn, opmap=None, data_expr=
         f"return {fn_v}(...) "
     )
     return lua
-def bytecode_to_lua_legacy(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, detect_var=None):
+def bytecode_to_lua_legacy(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, detect_var=None, key_expr=None):
     N = gen_name_fn
     data_v    = N(); u16_v     = N(); u16s_v    = N(); ldc_v     = N()
     ldi_v     = N(); ldp_v     = N(); consts_v  = N()
