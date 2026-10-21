@@ -541,6 +541,13 @@ class Compiler:
 
         self.scope.reg_counter[0] = tmp
 
+    def _binop_regs(self, op, dst, left_r, right_r):
+        op_map = {
+            '+': OP_ADD, '-': OP_SUB, '*': OP_MUL, '/': OP_DIV,
+            '//': OP_IDIV, '%': OP_MOD, '^': OP_POW, '..': OP_CONCAT,
+        }
+        self.emit(op_map[op], dst, left_r, right_r)
+
     def _unop(self, node, dst):
         tmp = self.scope.reg_counter[0]
         self.scope.reg_counter[0] += 1
@@ -716,6 +723,80 @@ class Compiler:
                     self.emit(OP_LOAD_CONST, regs[i], self.K(None))
             for i, name in enumerate(names):
                 self.scope.locals[name] = regs[i]
+
+        elif t == 'compound_assign':
+            tgt = node['target']
+            op = node['op']
+            tt = tgt['type']
+            tmp_base = self.scope.reg_counter[0]
+
+            if tt == 'var':
+                r = self.resolve(tgt['name'])
+                cur_r = self.scope.reg_counter[0]
+                self.scope.reg_counter[0] += 1
+                if r is None:
+                    self.emit(OP_LOAD_GLOBAL, cur_r, self.K(tgt['name']))
+                elif r[0] == 'local':
+                    self.emit(OP_MOVE, cur_r, r[1])
+                elif r[0] == 'upval':
+                    self.emit(OP_LOAD_UPVAL, cur_r, r[1])
+
+                rhs_r = self.scope.reg_counter[0]
+                self.scope.reg_counter[0] += 1
+                self._expr(node['value'], rhs_r)
+
+                res_r = self.scope.reg_counter[0]
+                self.scope.reg_counter[0] += 1
+                self._binop_regs(op, res_r, cur_r, rhs_r)
+
+                if r is None:
+                    self.emit(OP_SET_GLOBAL, self.K(tgt['name']), res_r)
+                elif r[0] == 'local':
+                    self.emit(OP_MOVE, r[1], res_r)
+                elif r[0] == 'upval':
+                    self.emit(OP_SET_UPVAL, r[1], res_r)
+
+            elif tt == 'index':
+                obj_r = self.scope.reg_counter[0]
+                key_r = obj_r + 1
+                self.scope.reg_counter[0] += 2
+                self._expr(tgt['obj'], obj_r)
+                self._expr(tgt['key'], key_r)
+
+                cur_r = self.scope.reg_counter[0]
+                self.scope.reg_counter[0] += 1
+                self.emit(OP_GET_TABLE, cur_r, obj_r, key_r)
+
+                rhs_r = self.scope.reg_counter[0]
+                self.scope.reg_counter[0] += 1
+                self._expr(node['value'], rhs_r)
+
+                res_r = self.scope.reg_counter[0]
+                self.scope.reg_counter[0] += 1
+                self._binop_regs(op, res_r, cur_r, rhs_r)
+
+                self.emit(OP_SET_TABLE, obj_r, key_r, res_r)
+
+            elif tt == 'field':
+                obj_r = self.scope.reg_counter[0]
+                self.scope.reg_counter[0] += 1
+                self._expr(tgt['obj'], obj_r)
+
+                cur_r = self.scope.reg_counter[0]
+                self.scope.reg_counter[0] += 1
+                self.emit(OP_GET_FIELD, cur_r, obj_r, self.K(tgt['name']))
+
+                rhs_r = self.scope.reg_counter[0]
+                self.scope.reg_counter[0] += 1
+                self._expr(node['value'], rhs_r)
+
+                res_r = self.scope.reg_counter[0]
+                self.scope.reg_counter[0] += 1
+                self._binop_regs(op, res_r, cur_r, rhs_r)
+
+                self.emit(OP_SET_FIELD, obj_r, self.K(tgt['name']), res_r)
+
+            self.scope.reg_counter[0] = tmp_base
 
         elif t == 'assign':
             targets = node['targets']
@@ -1194,12 +1275,13 @@ def tokenize(src):
             tokens.append(('KW' if word in KEYWORDS else 'NAME', word))
             continue
         three = src[i:i+3]
-        if three == '...':
-            tokens.append(('OP', '...'))
+        if three in ('...', '//=', '..='):
+            tokens.append(('OP', three))
             i += 3
             continue
         two = src[i:i+2]
-        if two in ('==','~=','<=','>=','..','//','<<','>>'):
+        if two in ('==','~=','<=','>=','..','//','<<','>>',
+                    '+=','-=','*=','/=','%=','^='):
             tokens.append(('OP', two))
             i += 2
             continue
@@ -1438,8 +1520,19 @@ class Parser:
         self.consume('RPAREN')
         return params, is_vararg
 
+    COMPOUND_OPS = {
+        '+=': '+', '-=': '-', '*=': '*', '/=': '/',
+        '//=': '//', '%=': '%', '^=': '^', '..=': '..',
+    }
+
     def parse_expr_stmt(self):
         expr = self.parse_suffixed_expr()
+        tok = self.peek()
+        if tok[0] == 'OP' and tok[1] in self.COMPOUND_OPS:
+            self.consume()
+            base_op = self.COMPOUND_OPS[tok[1]]
+            value = self.parse_expr()
+            return {'type': 'compound_assign', 'target': expr, 'op': base_op, 'value': value}
         if self.check('OP', '=') or self.check('COMMA'):
             targets = [expr]
             while self.match('COMMA'):
