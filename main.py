@@ -13,9 +13,15 @@ def main():
     at_full    = '--full-anti-tamper'    in args
     at_v1      = '--at-v1'               in args
     target_rbx = '--roblox'              in args
+    target_lj  = '--luajit'              in args
 
     at_version = "v1" if at_v1 else "v2"
-    at_target  = "roblox" if target_rbx else "luau"
+
+    if target_rbx and target_lj:
+        print("[!] You can only pick one of: --roblox, --luajit")
+        sys.exit(1)
+
+    at_target = "roblox" if target_rbx else ("luajit" if target_lj else "luau")
 
     args = [a for a in args if not a.startswith('--')]
 
@@ -34,6 +40,8 @@ def main():
         print("  --no-anti-tamper         Disables anti-tamper entirely")
         print("  --at-v1                  Use legacy Anti-Tamper v1 (Roblox physics/timing)")
         print("  --roblox                 Target Roblox environment (default is pure Luau)")
+        print("  --luajit                 Target LuaJIT (adds a bit32/table.pack-unpack shim")
+        print("                           and swaps the anti-tamper checks to LuaJIT APIs)")
         sys.exit(1)
 
     if force_vm and force_fold:

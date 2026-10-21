@@ -5,7 +5,7 @@ from codegen import (
     reset_names, gen_name,
     build_runtime_header, build_vm_dispatch,
     build_anti_tamper, build_runtime_footer,
-    deflate_tables_blob,
+    deflate_tables_blob, build_luajit_polyfill,
 )
 from vm import try_compile_vm, bytecode_to_lua, bytecode_to_lua_legacy
 from string_fold import fold_strings
@@ -219,6 +219,9 @@ class Obfuscator:
             self.var_B, self.var_f, self.var_V,
             self.wm_var,
         )
+
+        if at_target == "luajit":
+            header = build_luajit_polyfill() + header
 
         it = prims["inflate_tables"]
         tables_expr = self.k_call_uncompressed(deflate_tables_blob())

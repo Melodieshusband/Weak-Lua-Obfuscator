@@ -578,6 +578,29 @@ def build_runtime_header(seeds, var_k, var_Q, var_G, var_B, var_f, var_V, wm_var
         f"local {valv_v}=table.concat({chars_v}) local {result_v} if {par_ka_b1}==1 then {result_v}={valv_v} elseif {par_ka_b1}==2 then local {nv_v}=tonumber({valv_v}) {result_v}={nv_v}==nil and 0 or {nv_v} elseif {par_ka_b1}==3 then {result_v}={valv_v}=='1' end {CC_v}[{ck_v}]={result_v} return {result_v} end "
     ), {"ks": ks_v, "xorb": xorb_v, "nb": nb_v, "sc": sc, "blk": blk_v, "inflate_tables": inflate_tables, "g3": g3, "key": key_v}
 
+def build_luajit_polyfill():
+    bitlib_v = gen_name()
+    norm_v = gen_name()
+    return (
+        f"if not bit32 then "
+        f"local {bitlib_v}=bit "
+        f"local function {norm_v}(x) if x<0 then return x+4294967296 end return x end "
+        f"bit32={{}} "
+        f"bit32.band=function(a,b) return {norm_v}({bitlib_v}.band(a,b)) end "
+        f"bit32.bor=function(a,b) return {norm_v}({bitlib_v}.bor(a,b)) end "
+        f"bit32.bxor=function(a,b) return {norm_v}({bitlib_v}.bxor(a,b)) end "
+        f"bit32.bnot=function(a) return {norm_v}({bitlib_v}.bnot(a)) end "
+        f"bit32.lshift=function(a,b) return {norm_v}({bitlib_v}.lshift(a,b)) end "
+        f"bit32.rshift=function(a,b) return {norm_v}({bitlib_v}.rshift(a,b)) end "
+        f"bit32.arshift=function(a,b) return {norm_v}({bitlib_v}.arshift(a,b)) end "
+        f"bit32.lrotate=function(a,b) return {norm_v}({bitlib_v}.rol(a,b)) end "
+        f"bit32.rrotate=function(a,b) return {norm_v}({bitlib_v}.ror(a,b)) end "
+        f"bit32.extract=function(n,field,width) width=width or 1 return {norm_v}({bitlib_v}.band({bitlib_v}.rshift(n,field),(2^width)-1)) end "
+        f"end "
+        f"if not table.pack then table.pack=function(...) return {{n=select('#',...),...}} end end "
+        f"if not table.unpack then table.unpack=unpack end "
+    )
+
 def build_vm_dispatch(rng):
     import re
     ops = {
@@ -1440,6 +1463,24 @@ def build_anti_tamper_v2(seeds, rng, var_k, encode_fn, detect_var=None, target="
         parts.append(
             f"if buffer and type(buffer)=='table' and buffer.create and buffer.readu8 and buffer.writeu8 then "
             f"local {buf_v}=buffer.create(4) if buffer.len({buf_v})~=4 then {kill_v}() end buffer.writeu8({buf_v},0,137) buffer.writeu8({buf_v},1,99) if buffer.readu8({buf_v},0)~=137 or buffer.readu8({buf_v},1)~=99 then {kill_v}() end "
+            f"end "
+        )
+        parts.append(
+            f"do local {ev_v}=(getfenv and getfenv(0)) or _ENV or _G or {{}} "
+            f"if rawget({ev_v},'__DEBUG__') or rawget({ev_v},'__BREAKPOINT__') or rawget({ev_v},'__ATTACHED__') or rawget({ev_v},'MobDebug') or rawget({ev_v},'remdebug') or rawget({ev_v},'ldb') or rawget({ev_v},'BreakpointHook') then {kill_v}() end "
+            f"end "
+        )
+    elif target == "luajit":
+        ssv_v = gen_name()
+        parts.append(
+            f"if type(jit)~='table' or type(jit.version)~='string' or type(jit.os)~='string' or type(jit.arch)~='string' then {kill_v}() end "
+        )
+        parts.append(
+            f"if debug and debug.getinfo then "
+            f"do local {cf_v}=function() return 1 end local {s_v}=debug.getinfo({cf_v},'S').short_src local {l_v}=debug.getinfo({cf_v},'S').linedefined if {s_v}=='[C]' or {s_v}:sub(1,9)=='[builtin:' or {l_v}<1 then {kill_v}() end end "
+            f"local {cfns_v}={{type,pcall,xpcall,error,setmetatable,getmetatable,rawget,rawset,select,tonumber,tostring,pairs,ipairs,next,string.byte,string.char,string.sub,string.len,string.find,table.insert,table.remove,table.concat,math.floor,math.ceil,math.abs,coroutine.create,coroutine.resume,coroutine.yield,coroutine.status}} "
+            f"for _,{fn_v} in ipairs({cfns_v}) do local {ssv_v}=debug.getinfo({fn_v},'S').short_src if {ssv_v}~='[C]' and {ssv_v}:sub(1,9)~='[builtin:' then {kill_v}() end end "
+            f"if debug.getinfo(pcall).what~='C' or debug.getinfo(type).what~='C' or debug.getinfo(setmetatable).what~='C' then {kill_v}() end "
             f"end "
         )
         parts.append(
