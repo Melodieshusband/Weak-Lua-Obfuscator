@@ -601,6 +601,59 @@ def build_luajit_polyfill():
         f"if not table.unpack then table.unpack=unpack end "
     )
 
+def build_lua51_polyfill():
+    m32 = gen_name()
+    band_v = gen_name()
+    bor_v = gen_name()
+    bxor_v = gen_name()
+    lshift_v = gen_name()
+    rshift_v = gen_name()
+    a_v, b_v, n_v = gen_name(), gen_name(), gen_name()
+    r_v, p_v, ra_v, rb_v = gen_name(), gen_name(), gen_name(), gen_name()
+    return (
+        f"if not bit32 then "
+        f"local function {m32}(x) x=x%4294967296 if x<0 then x=x+4294967296 end return x end "
+        f"local function {band_v}({a_v},{b_v}) {a_v}={m32}({a_v}) {b_v}={m32}({b_v}) "
+        f"local {r_v},{p_v}=0,1 while {a_v}>0 or {b_v}>0 do "
+        f"local {ra_v}={a_v}%2 local {rb_v}={b_v}%2 "
+        f"if {ra_v}==1 and {rb_v}==1 then {r_v}={r_v}+{p_v} end "
+        f"{a_v}=({a_v}-{ra_v})/2 {b_v}=({b_v}-{rb_v})/2 {p_v}={p_v}*2 end return {r_v} end "
+        f"local function {bor_v}({a_v},{b_v}) {a_v}={m32}({a_v}) {b_v}={m32}({b_v}) "
+        f"local {r_v},{p_v}=0,1 while {a_v}>0 or {b_v}>0 do "
+        f"local {ra_v}={a_v}%2 local {rb_v}={b_v}%2 "
+        f"if {ra_v}==1 or {rb_v}==1 then {r_v}={r_v}+{p_v} end "
+        f"{a_v}=({a_v}-{ra_v})/2 {b_v}=({b_v}-{rb_v})/2 {p_v}={p_v}*2 end return {r_v} end "
+        f"local function {bxor_v}({a_v},{b_v}) {a_v}={m32}({a_v}) {b_v}={m32}({b_v}) "
+        f"local {r_v},{p_v}=0,1 while {a_v}>0 or {b_v}>0 do "
+        f"local {ra_v}={a_v}%2 local {rb_v}={b_v}%2 "
+        f"if {ra_v}~={rb_v} then {r_v}={r_v}+{p_v} end "
+        f"{a_v}=({a_v}-{ra_v})/2 {b_v}=({b_v}-{rb_v})/2 {p_v}={p_v}*2 end return {r_v} end "
+        f"local function {lshift_v}({a_v},{n_v}) {a_v}={m32}({a_v}) "
+        f"if {n_v}<=0 then return {a_v} end if {n_v}>=32 then return 0 end "
+        f"return {m32}({a_v}*(2^{n_v})) end "
+        f"local function {rshift_v}({a_v},{n_v}) {a_v}={m32}({a_v}) "
+        f"if {n_v}<=0 then return {a_v} end if {n_v}>=32 then return 0 end "
+        f"return math.floor({a_v}/(2^{n_v})) end "
+        f"bit32={{}} "
+        f"bit32.band={band_v} "
+        f"bit32.bor={bor_v} "
+        f"bit32.bxor={bxor_v} "
+        f"bit32.bnot=function(a) return 4294967295-{m32}(a) end "
+        f"bit32.lshift={lshift_v} "
+        f"bit32.rshift={rshift_v} "
+        f"bit32.arshift=function(a,n) a={m32}(a) if n<=0 then return a end "
+        f"if n>=32 then if a>=2147483648 then return 4294967295 end return 0 end "
+        f"local r=math.floor(a/(2^n)) if a>=2147483648 then r={m32}(r+(4294967296-(2^(32-n)))) end return r end "
+        f"bit32.lrotate=function(a,n) n=n%32 if n==0 then return {m32}(a) end "
+        f"return {m32}({lshift_v}(a,n)+{rshift_v}(a,32-n)) end "
+        f"bit32.rrotate=function(a,n) n=n%32 if n==0 then return {m32}(a) end "
+        f"return {m32}({rshift_v}(a,n)+{lshift_v}(a,32-n)) end "
+        f"bit32.extract=function(n,field,width) width=width or 1 return {band_v}({rshift_v}(n,field),(2^width)-1) end "
+        f"end "
+        f"if not table.pack then table.pack=function(...) return {{n=select('#',...),...}} end end "
+        f"if not table.unpack then table.unpack=unpack end "
+    )
+
 def build_vm_dispatch(rng):
     import re
     ops = {
@@ -1485,6 +1538,23 @@ def build_anti_tamper_v2(seeds, rng, var_k, encode_fn, detect_var=None, target="
         )
         parts.append(
             f"do local {ev_v}=(getfenv and getfenv(0)) or _ENV or _G or {{}} "
+            f"if rawget({ev_v},'__DEBUG__') or rawget({ev_v},'__BREAKPOINT__') or rawget({ev_v},'__ATTACHED__') or rawget({ev_v},'MobDebug') or rawget({ev_v},'remdebug') or rawget({ev_v},'ldb') or rawget({ev_v},'BreakpointHook') then {kill_v}() end "
+            f"end "
+        )
+    elif target == "lua51":
+        parts.append(
+            f"if _VERSION~='Lua 5.1' then {kill_v}() end "
+        )
+        parts.append(
+            f"if debug and debug.getinfo then "
+            f"do local {cf_v}=function() return 1 end local {s_v}=debug.getinfo({cf_v},'S').short_src local {l_v}=debug.getinfo({cf_v},'S').linedefined if {s_v}=='[C]' or {l_v}<1 then {kill_v}() end end "
+            f"local {cfns_v}={{type,pcall,xpcall,error,setmetatable,getmetatable,rawget,rawset,select,tonumber,tostring,pairs,ipairs,next,string.byte,string.char,string.sub,string.len,string.find,table.insert,table.remove,table.concat,math.floor,math.ceil,math.abs,coroutine.create,coroutine.resume,coroutine.yield,coroutine.status}} "
+            f"for _,{fn_v} in ipairs({cfns_v}) do if debug.getinfo({fn_v},'S').short_src~='[C]' then {kill_v}() end end "
+            f"if debug.getinfo(pcall).what~='C' or debug.getinfo(type).what~='C' or debug.getinfo(setmetatable).what~='C' then {kill_v}() end "
+            f"end "
+        )
+        parts.append(
+            f"do local {ev_v}=(getfenv and getfenv(0)) or _G or {{}} "
             f"if rawget({ev_v},'__DEBUG__') or rawget({ev_v},'__BREAKPOINT__') or rawget({ev_v},'__ATTACHED__') or rawget({ev_v},'MobDebug') or rawget({ev_v},'remdebug') or rawget({ev_v},'ldb') or rawget({ev_v},'BreakpointHook') then {kill_v}() end "
             f"end "
         )

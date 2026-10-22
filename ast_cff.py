@@ -449,6 +449,9 @@ def flatten_source(source, rng, gen_name_fn, detect_var=None, target='luau'):
     if target == 'luajit':
         from luajit_ast import parse as target_parse, LuauSyntaxError as TargetSyntaxError
         from luajit_unparse import unparse_block as target_unparse_block
+    elif target == 'lua51':
+        from lua51_ast import parse as target_parse, Lua51SyntaxError as TargetSyntaxError
+        from lua51_unparse import unparse_block as target_unparse_block
     else:
         target_parse = parse
         TargetSyntaxError = LuauSyntaxError

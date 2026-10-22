@@ -5,7 +5,7 @@ from codegen import (
     reset_names, gen_name,
     build_runtime_header, build_vm_dispatch,
     build_anti_tamper, build_runtime_footer,
-    deflate_tables_blob, build_luajit_polyfill,
+    deflate_tables_blob, build_luajit_polyfill, build_lua51_polyfill,
 )
 from vm import try_compile_vm, bytecode_to_lua, bytecode_to_lua_legacy
 from string_fold import fold_strings
@@ -204,7 +204,7 @@ class Obfuscator:
         if force_fold:
             use_vm = False
         else:
-            bytecode_result = try_compile_vm(source, rng=rng)
+            bytecode_result = try_compile_vm(source, rng=rng, lua51=(at_target == "lua51"))
             if bytecode_result is not None:
                 bytecode, opmap, bc_format = bytecode_result
                 use_vm = True
@@ -222,6 +222,8 @@ class Obfuscator:
 
         if at_target == "luajit":
             header = build_luajit_polyfill() + header
+        elif at_target == "lua51":
+            header = build_lua51_polyfill() + header
 
         it = prims["inflate_tables"]
         tables_expr = self.k_call_uncompressed(deflate_tables_blob())

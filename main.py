@@ -14,14 +14,15 @@ def main():
     at_v1      = '--at-v1'               in args
     target_rbx = '--roblox'              in args
     target_lj  = '--luajit'              in args
+    target_51  = '--lua51'               in args
 
     at_version = "v1" if at_v1 else "v2"
 
-    if target_rbx and target_lj:
-        print("[!] You can only pick one of: --roblox, --luajit")
+    if target_rbx + target_lj + target_51 > 1:
+        print("[!] You can only pick one of: --roblox, --luajit, --lua51")
         sys.exit(1)
 
-    at_target = "roblox" if target_rbx else ("luajit" if target_lj else "luau")
+    at_target = "roblox" if target_rbx else ("luajit" if target_lj else ("lua51" if target_51 else "luau"))
 
     args = [a for a in args if not a.startswith('--')]
 
@@ -42,6 +43,9 @@ def main():
         print("  --roblox                 Target Roblox environment (default is pure Luau)")
         print("  --luajit                 Target LuaJIT (adds a bit32/table.pack-unpack shim")
         print("                           and swaps the anti-tamper checks to LuaJIT APIs)")
+        print("  --lua51                  Target vanilla PUC Lua 5.1 (pure-Lua bit32 shim,")
+        print("                           no bit/jit dependency; input parsed with a")
+        print("                           dedicated Lua 5.1 lexer/parser, not the Luau one)")
         sys.exit(1)
 
     if force_vm and force_fold:
