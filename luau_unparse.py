@@ -89,8 +89,7 @@ def unparse_stmt(s):
         params = list(s['params'])
         if s['vararg']:
             params.append('...')
-        return (f"local function {s['name']}(" + ','.join(params) + ') ' +
-                unparse_block(s['body']) + ' end ')
+        return f"local function {s['name']}(" + ','.join(params) + ') ' + unparse_block(s['body']) + ' end '
     if t == 'FunctionStmt':
         path = s['path']
         if s['is_method']:
@@ -101,8 +100,7 @@ def unparse_stmt(s):
             params = s['params']
         if s['vararg']:
             params = list(params) + ['...']
-        return (f"function {name}(" + ','.join(params) + ') ' +
-                unparse_block(s['body']) + ' end ')
+        return f"function {name}(" + ','.join(params) + ') ' + unparse_block(s['body']) + ' end '
     if t == 'Assign':
         targets = ','.join(unparse_expr(x) for x in s['targets'])
         values = ','.join(unparse_expr(v) for v in s['values'])
@@ -129,8 +127,7 @@ def unparse_stmt(s):
         parts = [unparse_expr(s['start']), unparse_expr(s['limit'])]
         if s['step'] is not None:
             parts.append(unparse_expr(s['step']))
-        return (f"for {s['var']}=" + ','.join(parts) + ' do ' +
-                unparse_block(s['body']) + ' end ')
+        return f"for {s['var']}=" + ','.join(parts) + ' do ' + unparse_block(s['body']) + ' end '
     if t == 'GenericFor':
         names = ','.join(s['names'])
         iters = ','.join(unparse_expr(v) for v in s['iters'])

@@ -379,7 +379,7 @@ class Obfuscator:
                     f"{res_var}={vmres_v} "
                 )
         else:
-            flattened = ast_flatten_source(source, rng, gen_name, detect_var=detect_var)
+            flattened = ast_flatten_source(source, rng, gen_name, detect_var=detect_var, target=at_target)
             if flattened is None:
                 flattened = source
             numbered = fold_numbers(flattened, rng)

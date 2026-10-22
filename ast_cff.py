@@ -445,10 +445,18 @@ def flatten_block(stmts, ctx, in_loop):
     return result
 
 
-def flatten_source(source, rng, gen_name_fn, detect_var=None):
+def flatten_source(source, rng, gen_name_fn, detect_var=None, target='luau'):
+    if target == 'luajit':
+        from luajit_ast import parse as target_parse, LuauSyntaxError as TargetSyntaxError
+        from luajit_unparse import unparse_block as target_unparse_block
+    else:
+        target_parse = parse
+        TargetSyntaxError = LuauSyntaxError
+        target_unparse_block = unparse_block
+
     try:
-        chunk = parse(source)
-    except LuauSyntaxError:
+        chunk = target_parse(source)
+    except TargetSyntaxError:
         return None
 
     ctx = FlattenContext(rng, gen_name_fn, detect_var=detect_var)
@@ -458,7 +466,7 @@ def flatten_source(source, rng, gen_name_fn, detect_var=None):
         return None
 
     try:
-        out = unparse_block(chunk['body'])
+        out = target_unparse_block(chunk['body'])
     except Exception:
         return None
 
