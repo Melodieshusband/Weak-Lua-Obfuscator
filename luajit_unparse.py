@@ -132,15 +132,13 @@ def unparse_expr(e, ctx=None):
         return '(' + unparse_expr(e['expr'], ctx) + ')'
     if t == 'Binop':
         op = e['op']
-        if op in ('and', 'or'):
-            return unparse_expr(e['left'], ctx) + ' ' + op + ' ' + unparse_expr(e['right'], ctx)
         if op == '//':
             return ('math.floor((' + unparse_expr(e['left'], ctx) + ')/(' +
                     unparse_expr(e['right'], ctx) + '))')
-        return unparse_expr(e['left'], ctx) + op + unparse_expr(e['right'], ctx)
+        return unparse_expr(e['left'], ctx) + ' ' + op + ' ' + unparse_expr(e['right'], ctx)
     if t == 'Unop':
         op = e['op']
-        sp = ' ' if op == 'not' else ''
+        sp = ' ' if op in ('not', '-') else ''
         return op + sp + unparse_expr(e['operand'], ctx)
     if t == 'Index':
         if e['dot']:
@@ -232,6 +230,8 @@ def unparse_stmt(s, ctx=None):
         if ctx.loop_labels:
             return f"goto {ctx.loop_labels[-1]} "
         return 'goto __cont_unreachable '
+    if t == 'Goto':
+        return f"goto {s['name']} "
     if t == 'Label':
         return f"::{s['name']}:: "
     if t == 'Do':

@@ -1,6 +1,6 @@
 KEYWORDS = {
     'and', 'break', 'continue', 'do', 'else', 'elseif', 'end', 'false',
-    'for', 'function', 'if', 'in', 'local', 'nil', 'not', 'or', 'repeat',
+    'for', 'function', 'goto', 'if', 'in', 'local', 'nil', 'not', 'or', 'repeat',
     'return', 'then', 'true', 'until', 'while',
 }
 
@@ -168,19 +168,19 @@ def tokenize(src):
             continue
 
         three = src[i:i+3]
-        if three in ('...', '..='):
+        if three in ('...', '..=', '//='):
             emit('OP', three, three)
             i += 3
             continue
 
         two = src[i:i+2]
-        if two in ('==', '~=', '<=', '>=', '..', '//', '::', '+=', '-=',
+        if two in ('==', '~=', '<=', '>=', '..', '//', '::', '<<', '>>', '+=', '-=',
                    '*=', '/=', '%=', '^='):
             emit('OP', two, two)
             i += 2
             continue
 
-        if c in '+-*/%^<>=.~#':
+        if c in '+-*/%^<>=.~#&|':
             emit('OP', c, c)
             i += 1
             continue
@@ -286,6 +286,10 @@ class Parser:
 
         if t.kind == 'KW':
             kw = t.value
+            if kw == 'goto':
+                self.advance()
+                name = self.expect('NAME').value
+                return N('Goto', name=name)
             if kw == 'local':
                 return self.parse_local()
             if kw == 'if':
@@ -483,8 +487,40 @@ class Parser:
         return left
 
     def parse_cmp(self):
-        left = self.parse_concat()
+        left = self.parse_bor()
         while self.at('OP') and self.peek().value in ('<', '<=', '>', '>=', '==', '~='):
+            op = self.advance().value
+            right = self.parse_bor()
+            left = N('Binop', op=op, left=left, right=right)
+        return left
+
+    def parse_bor(self):
+        left = self.parse_bxor()
+        while self.at('OP', '|'):
+            op = self.advance().value
+            right = self.parse_bxor()
+            left = N('Binop', op=op, left=left, right=right)
+        return left
+
+    def parse_bxor(self):
+        left = self.parse_band()
+        while self.at('OP', '~'):
+            op = self.advance().value
+            right = self.parse_band()
+            left = N('Binop', op=op, left=left, right=right)
+        return left
+
+    def parse_band(self):
+        left = self.parse_shift()
+        while self.at('OP', '&'):
+            op = self.advance().value
+            right = self.parse_shift()
+            left = N('Binop', op=op, left=left, right=right)
+        return left
+
+    def parse_shift(self):
+        left = self.parse_concat()
+        while self.at('OP') and self.peek().value in ('<<', '>>'):
             op = self.advance().value
             right = self.parse_concat()
             left = N('Binop', op=op, left=left, right=right)
@@ -516,7 +552,7 @@ class Parser:
 
     def parse_unary(self):
         t = self.peek()
-        if (t.kind == 'KW' and t.value == 'not') or (t.kind == 'OP' and t.value in ('-', '#')):
+        if (t.kind == 'KW' and t.value == 'not') or (t.kind == 'OP' and t.value in ('-', '#', '~')):
             self.advance()
             operand = self.parse_unary()
             return N('Unop', op=t.value, operand=operand)

@@ -39,9 +39,38 @@ def deflate_tables_blob():
     segs = [DEFLATE_LEN_BASE, DEFLATE_LEN_EXTRA, DEFLATE_DIST_BASE, DEFLATE_DIST_EXTRA, DEFLATE_CLEN_ORDER]
     return ";".join(",".join(str(v) for v in seg) for seg in segs)
 
-def build_inflate_runtime():
-    band, bor = "bit32.band", "bit32.bor"
-    lshift, rshift = "bit32.lshift", "bit32.rshift"
+def build_inflate_runtime(target="luau"):
+    band_fn = gen_name()
+    bor_fn = gen_name()
+    lshift_fn = gen_name()
+    rshift_fn = gen_name()
+
+    if target in ("lua53", "lua54", "lua55"):
+        header_defs = (
+            f"local function {band_fn}(a,b) return a&b end "
+            f"local function {bor_fn}(a,b) return a|b end "
+            f"local function {lshift_fn}(a,b) return (a<<b)&4294967295 end "
+            f"local function {rshift_fn}(a,b) return ((a&4294967295)>>b)&4294967295 end "
+        )
+    elif target == "luajit":
+        header_defs = (
+            f"local {band_fn},{bor_fn},{lshift_fn},{rshift_fn}=bit.band,bit.bor,bit.lshift,bit.rshift "
+        )
+    elif target == "lua51":
+        header_defs = (
+            f"local function {band_fn}(a,b) local r,m=0,1 a,b=a%4294967296,b%4294967296 while a>0 and b>0 do if a%2==1 and b%2==1 then r=r+m end a,b=math.floor(a/2),math.floor(b/2) m=m*2 end return r end "
+            f"local function {bor_fn}(a,b) local r,m=0,1 a,b=a%4294967296,b%4294967296 while a>0 or b>0 do if a%2==1 or b%2==1 then r=r+m end a,b=math.floor(a/2),math.floor(b/2) m=m*2 end return r end "
+            f"local function {lshift_fn}(a,b) return ((a%4294967296)*(2^b))%4294967296 end "
+            f"local function {rshift_v if False else rshift_fn}(a,b) return math.floor((a%4294967296)/(2^b)) end "
+        )
+    else:
+        header_defs = (
+            f"local {band_fn},{bor_fn},{lshift_fn},{rshift_fn}=bit32.band,bit32.bor,bit32.lshift,bit32.rshift "
+        )
+
+    band, bor = band_fn, bor_fn
+    lshift, rshift = lshift_fn, rshift_fn
+
 
     names = {}
     for key in (
@@ -185,10 +214,10 @@ def build_inflate_runtime():
         "clenorder": n['clenorder'],
         "parsetables": n['parsetables'],
     }
-    return src, n['inflatemain'], table_info
+    return header_defs + src, n['inflatemain'], table_info
 
-def build_runtime_header(seeds, var_k, var_Q, var_G, var_B, var_f, var_V, wm_var):
-    inflate_src, inflate_fn_v, inflate_tables = build_inflate_runtime()
+def build_runtime_header(seeds, var_k, var_Q, var_G, var_B, var_f, var_V, wm_var, target="luau"):
+    inflate_src, inflate_fn_v, inflate_tables = build_inflate_runtime(target=target)
     flag_v  = gen_name()
     body_v  = gen_name()
     bi_v    = gen_name()
@@ -268,13 +297,6 @@ def build_runtime_header(seeds, var_k, var_Q, var_G, var_B, var_f, var_V, wm_var
     c0, c1, c2, c3 = seeds.get("CC", CHACHA_CONST)
     rot1, rot2, rot3, rot4 = seeds.get("ROT", (16, 12, 8, 7))
 
-    band   = "bit32.band"
-    bxor   = "bit32.bxor"
-    lrot   = "bit32.lrotate"
-    bor    = "bit32.bor"
-    lshift = "bit32.lshift"
-    rshift = "bit32.rshift"
-
     key_rng = random.Random(secrets.randbits(64))
 
     drv_v = gen_name()
@@ -284,13 +306,60 @@ def build_runtime_header(seeds, var_k, var_Q, var_G, var_B, var_f, var_V, wm_var
     drv_seed = key_rng.randint(0, MASK32)
     drv_mix  = key_rng.randint(0, MASK32) | 1
 
-    drv_prologue = (
-        f"local {drv_acc_v}={drv_seed} local {drv_tick_v}=0 "
-        f"local function {drv_v}({drv_salt_v}) "
-        f"{drv_tick_v}=({drv_tick_v}+1)%4294967296 "
-        f"{drv_acc_v}={bxor}(({drv_acc_v}+{drv_salt_v}+{drv_tick_v}+{drv_mix})%4294967296,{lrot}({drv_acc_v},7)) "
-        f"return {drv_acc_v} end "
-    )
+    is_native_ops = target in ("lua53", "lua54", "lua55")
+    is_luajit = (target == "luajit")
+    is_lua51 = (target == "lua51")
+
+    if is_native_ops:
+        header_prims = ""
+        def emit_xor(a, b): return f"(({a})~({b}))"
+        drv_prologue = (
+            f"local {drv_acc_v}={drv_seed} local {drv_tick_v}=0 "
+            f"local function {drv_v}({drv_salt_v}) "
+            f"{drv_tick_v}=({drv_tick_v}+1)&4294967295 "
+            f"{drv_acc_v}=((({drv_acc_v}+{drv_salt_v}+{drv_tick_v}+{drv_mix})&4294967295)~(((({drv_acc_v}<<7)&4294967295)|(({drv_acc_v}&4294967295)>>25))&4294967295)) "
+            f"return {drv_acc_v} end "
+        )
+    elif is_luajit:
+        bitlib_v = gen_name()
+        band_v = gen_name(); bxor_v = gen_name(); rol_v = gen_name(); bor_v = gen_name(); lshift_v = gen_name(); rshift_v = gen_name()
+        header_prims = f"local {bitlib_v}=bit local {band_v},{bor_v},{bxor_v},{rol_v},{lshift_v},{rshift_v}={bitlib_v}.band,{bitlib_v}.bor,{bitlib_v}.bxor,{bitlib_v}.rol,{bitlib_v}.lshift,{bitlib_v}.rshift "
+        def emit_xor(a, b): return f"{bxor_v}({a},{b})"
+        drv_prologue = (
+            f"local {drv_acc_v}={drv_seed} local {drv_tick_v}=0 "
+            f"local function {drv_v}({drv_salt_v}) "
+            f"{drv_tick_v}=({drv_tick_v}+1)%4294967296 "
+            f"{drv_acc_v}={bxor_v}(({drv_acc_v}+{drv_salt_v}+{drv_tick_v}+{drv_mix})%4294967296,{rol_v}({drv_acc_v},7)%4294967296) "
+            f"return {drv_acc_v} end "
+        )
+    elif is_lua51:
+        band_v = gen_name(); bxor_v = gen_name(); lrot_v = gen_name(); bor_v = gen_name(); lshift_v = gen_name(); rshift_v = gen_name()
+        header_prims = (
+            f"local function {band_v}(a,b) local r,m=0,1 a,b=a%4294967296,b%4294967296 while a>0 and b>0 do if a%2==1 and b%2==1 then r=r+m end a,b=math.floor(a/2),math.floor(b/2) m=m*2 end return r end "
+            f"local function {bor_v}(a,b) local r,m=0,1 a,b=a%4294967296,b%4294967296 while a>0 or b>0 do if a%2==1 or b%2==1 then r=r+m end a,b=math.floor(a/2),math.floor(b/2) m=m*2 end return r end "
+            f"local function {bxor_v}(a,b) local r,m=0,1 a,b=a%4294967296,b%4294967296 while a>0 or b>0 do local ra,rb=a%2,b%2 if ra~=rb then r=r+m end a,b=math.floor(a/2),math.floor(b/2) m=m*2 end return r end "
+            f"local function {lshift_v}(a,b) return ((a%4294967296)*(2^b))%4294967296 end "
+            f"local function {rshift_v}(a,b) return math.floor((a%4294967296)/(2^b)) end "
+            f"local function {lrot_v}(a,n) n=n%32 if n==0 then return a%4294967296 end return {bor_v}({lshift_v}(a,n),{rshift_v}(a,32-n)) end "
+        )
+        def emit_xor(a, b): return f"{bxor_v}({a},{b})"
+        drv_prologue = (
+            f"local {drv_acc_v}={drv_seed} local {drv_tick_v}=0 "
+            f"local function {drv_v}({drv_salt_v}) "
+            f"{drv_tick_v}=({drv_tick_v}+1)%4294967296 "
+            f"{drv_acc_v}={bxor_v}(({drv_acc_v}+{drv_salt_v}+{drv_tick_v}+{drv_mix})%4294967296,{lrot_v}({drv_acc_v},7)) "
+            f"return {drv_acc_v} end "
+        )
+    else:
+        header_prims = ""
+        def emit_xor(a, b): return f"bit32.bxor({a},{b})"
+        drv_prologue = (
+            f"local {drv_acc_v}={drv_seed} local {drv_tick_v}=0 "
+            f"local function {drv_v}({drv_salt_v}) "
+            f"{drv_tick_v}=({drv_tick_v}+1)%4294967296 "
+            f"{drv_acc_v}=bit32.bxor(({drv_acc_v}+{drv_salt_v}+{drv_tick_v}+{drv_mix})%4294967296,bit32.lrotate({drv_acc_v},7)) "
+            f"return {drv_acc_v} end "
+        )
 
     drv_state = {"acc": drv_seed, "tick": 0}
 
@@ -329,7 +398,7 @@ def build_runtime_header(seeds, var_k, var_Q, var_G, var_B, var_f, var_V, wm_var
                 output = drv_predict(salt)
                 if use_xor_terms:
                     fixup = output ^ sv
-                    decls.append(f"local {nm}={bxor}({drv_v}({salt}),{fixup}) ")
+                    decls.append(f"local {nm}={emit_xor(f'{drv_v}({salt})', fixup)} ")
                 else:
                     fixup = (sv - output) & MASK32
                     decls.append(f"local {nm}=({drv_v}({salt})+{fixup})%4294967296 ")
@@ -340,7 +409,7 @@ def build_runtime_header(seeds, var_k, var_Q, var_G, var_B, var_f, var_V, wm_var
             elif mode == 1:
                 pre = (sv ^ key_rng.randint(0, MASK32)) & MASK32
                 mask = pre ^ sv
-                decls.append(f"local {nm}={bxor}({pre},{mask}) ")
+                decls.append(f"local {nm}={emit_xor(pre, mask)} ")
             else:
                 prev = names[i - 1]
                 delta = (sv - rot_pool.get(prev, 0)) & MASK32
@@ -351,7 +420,7 @@ def build_runtime_header(seeds, var_k, var_Q, var_G, var_B, var_f, var_V, wm_var
         if use_xor_terms:
             combine = names[0]
             for nm in names[1:]:
-                combine = f"{bxor}({combine},{nm})"
+                combine = f"{emit_xor(combine, nm)}"
         else:
             combine_terms = "+".join(names)
             combine = f"({combine_terms})%4294967296"
@@ -382,7 +451,7 @@ def build_runtime_header(seeds, var_k, var_Q, var_G, var_B, var_f, var_V, wm_var
         sv = gen_name()
         never = key_rng.randint(1, MASK32 - 1)
         guard = (never + 1) & MASK32
-        return f"local {sv}=({bxor}({a},{b})+{never})%4294967296 if {sv}=={guard} then error(\"integrity\") end "
+        return f"local {sv}=({emit_xor(a, b)}+{never})%4294967296 if {sv}=={guard} then error(\"integrity\") end "
 
     interleaved = []
     for val in key[:-1]:
@@ -397,7 +466,7 @@ def build_runtime_header(seeds, var_k, var_Q, var_G, var_B, var_f, var_V, wm_var
 
     def scatter_value_standalone(value):
         n_parts = key_rng.randint(4, 7)
-        use_xor_terms = key_rng.random() < 0.5
+        use_xor_terms = key_rng.random() < 0.5 if not is_lua51 else False
         shares = [key_rng.randint(0, MASK32) for _ in range(n_parts - 1)]
         if use_xor_terms:
             acc = 0
@@ -415,18 +484,28 @@ def build_runtime_header(seeds, var_k, var_Q, var_G, var_B, var_f, var_V, wm_var
         names = [gen_name() for _ in shares]
         decls = []
         for i, (nm, sv) in enumerate(zip(names, shares)):
-            mode = key_rng.randint(0, 1)
+            mode = key_rng.randint(0, 1) if not is_lua51 else 0
             if mode == 0:
                 decls.append(f"local {nm}={sv} ")
             else:
                 pre = (sv ^ key_rng.randint(0, MASK32)) & MASK32
                 mask = pre ^ sv
-                decls.append(f"local {nm}={bxor}({pre},{mask}) ")
+                if is_native_ops:
+                    decls.append(f"local {nm}=(({pre})~({mask})) ")
+                elif is_luajit:
+                    decls.append(f"local {nm}=bit.bxor({pre},{mask}) ")
+                else:
+                    decls.append(f"local {nm}=bit32.bxor({pre},{mask}) ")
 
         if use_xor_terms:
             combine = names[0]
             for nm in names[1:]:
-                combine = f"{bxor}({combine},{nm})"
+                if is_native_ops:
+                    combine = f"(({combine})~({nm}))"
+                elif is_luajit:
+                    combine = f"bit.bxor({combine},{nm})"
+                else:
+                    combine = f"bit32.bxor({combine},{nm})"
         else:
             combine_terms = "+".join(names)
             combine = f"({combine_terms})%4294967296"
@@ -477,9 +556,167 @@ def build_runtime_header(seeds, var_k, var_Q, var_G, var_B, var_f, var_V, wm_var
     nb_decl_body, nb_expr = scatter_value(nonce_base, rot_pool)
     nb_decl = f"{nb_decl_body}local {nb_v}={nb_expr} "
 
+    if is_native_ops:
+        xorb_code = f"local function {xorb_v}({par_a},{par_b}) return (({par_a})~({par_b})) end "
+        qr_code = (
+            f"local function {qr_v}({st_v},{par_a},{par_b},{par_c},{par_d}) "
+            f"{st_v}[{par_a}]=({st_v}[{par_a}]+{st_v}[{par_b}])&4294967295 "
+            f"local x1={st_v}[{par_d}]~{st_v}[{par_a}] "
+            f"{st_v}[{par_d}]=((x1<<{rot1})|((x1&4294967295)>>(32-{rot1})))&4294967295 "
+            f"{st_v}[{par_c}]=({st_v}[{par_c}]+{st_v}[{par_d}])&4294967295 "
+            f"local x2={st_v}[{par_b}]~{st_v}[{par_c}] "
+            f"{st_v}[{par_b}]=((x2<<{rot2})|((x2&4294967295)>>(32-{rot2})))&4294967295 "
+            f"{st_v}[{par_a}]=({st_v}[{par_a}]+{st_v}[{par_b}])&4294967295 "
+            f"local x3={st_v}[{par_d}]~{st_v}[{par_a}] "
+            f"{st_v}[{par_d}]=((x3<<{rot3})|((x3&4294967295)>>(32-{rot3})))&4294967295 "
+            f"{st_v}[{par_c}]=({st_v}[{par_c}]+{st_v}[{par_d}])&4294967295 "
+            f"local x4={st_v}[{par_b}]~{st_v}[{par_c}] "
+            f"{st_v}[{par_b}]=((x4<<{rot4})|((x4&4294967295)>>(32-{rot4})))&4294967295 "
+            f"end "
+        )
+        g3_code = (
+            f"local function {g3}({par_ga}) "
+            f"if type({par_ga})~='string' then return nil end "
+            f"local {al_v}=#{par_ga} "
+            f"local {hh_v}=0 local {ll_v}=0 local {kk_v}=-1 "
+            f"local {ig3_v}={{}} "
+            f"for {iw_v}=1,{al_v},1 do "
+            f"local {cc_v}={RA_v}[{sb}({par_ga},{iw_v})] "
+            f"if not {cc_v} then return nil end "
+            f"{cc_v}={cc_v}-1 "
+            f"if {kk_v}<0 then {kk_v}={cc_v} else "
+            f"{kk_v}={kk_v}+{cc_v}*91 "
+            f"{hh_v}=({hh_v}|(({kk_v}<<{ll_v})&4294967295))&4294967295 "
+            f"if ({kk_v}&8191)>88 then {ll_v}={ll_v}+13 else {ll_v}={ll_v}+14 end "
+            f"while {ll_v}>=8 do "
+            f"{ig3_v}[#{ig3_v}+1]={hh_v}&255 "
+            f"{hh_v}=((({hh_v}&4294967295)>>8)&4294967295) "
+            f"{ll_v}={ll_v}-8 "
+            f"end "
+            f"{kk_v}=-1 "
+            f"end end "
+            f"if {kk_v}>=0 then {ig3_v}[#{ig3_v}+1]=({hh_v}|(({kk_v}<<{ll_v})&4294967295))&255 end "
+            f"return {ig3_v} end "
+        )
+    elif is_luajit:
+        xorb_code = f"local function {xorb_v}({par_a},{par_b}) return {bxor_v}({par_a},{par_b})%4294967296 end "
+        qr_code = (
+            f"local function {qr_v}({st_v},{par_a},{par_b},{par_c},{par_d}) "
+            f"{st_v}[{par_a}]=({st_v}[{par_a}]+{st_v}[{par_b}])%4294967296 "
+            f"{st_v}[{par_d}]={rol_v}({bxor_v}({st_v}[{par_d}],{st_v}[{par_a}]),{rot1})%4294967296 "
+            f"{st_v}[{par_c}]=({st_v}[{par_c}]+{st_v}[{par_d}])%4294967296 "
+            f"{st_v}[{par_b}]={rol_v}({bxor_v}({st_v}[{par_b}],{st_v}[{par_c}]),{rot2})%4294967296 "
+            f"{st_v}[{par_a}]=({st_v}[{par_a}]+{st_v}[{par_b}])%4294967296 "
+            f"{st_v}[{par_d}]={rol_v}({bxor_v}({st_v}[{par_d}],{st_v}[{par_a}]),{rot3})%4294967296 "
+            f"{st_v}[{par_c}]=({st_v}[{par_c}]+{st_v}[{par_d}])%4294967296 "
+            f"{st_v}[{par_b}]={rol_v}({bxor_v}({st_v}[{par_b}],{st_v}[{par_c}]),{rot4})%4294967296 "
+            f"end "
+        )
+        g3_code = (
+            f"local function {g3}({par_ga}) "
+            f"if type({par_ga})~='string' then return nil end "
+            f"local {al_v}=#{par_ga} "
+            f"local {hh_v}=0 local {ll_v}=0 local {kk_v}=-1 "
+            f"local {ig3_v}={{}} "
+            f"for {iw_v}=1,{al_v},1 do "
+            f"local {cc_v}={RA_v}[{sb}({par_ga},{iw_v})] "
+            f"if not {cc_v} then return nil end "
+            f"{cc_v}={cc_v}-1 "
+            f"if {kk_v}<0 then {kk_v}={cc_v} else "
+            f"{kk_v}={kk_v}+{cc_v}*91 "
+            f"{hh_v}={bor_v}({hh_v},{lshift_v}({kk_v},{ll_v})) "
+            f"if {band_v}({kk_v},8191)>88 then {ll_v}={ll_v}+13 else {ll_v}={ll_v}+14 end "
+            f"while {ll_v}>=8 do "
+            f"{ig3_v}[#{ig3_v}+1]={band_v}({hh_v},255) "
+            f"{hh_v}={rshift_v}({hh_v},8) "
+            f"{ll_v}={ll_v}-8 "
+            f"end "
+            f"{kk_v}=-1 "
+            f"end end "
+            f"if {kk_v}>=0 then {ig3_v}[#{ig3_v}+1]={band_v}({bor_v}({hh_v},{lshift_v}({kk_v},{ll_v})),255) end "
+            f"return {ig3_v} end "
+        )
+    elif is_lua51:
+        xorb_code = f"local function {xorb_v}({par_a},{par_b}) return {bxor_v}({par_a},{par_b})%4294967296 end "
+        qr_code = (
+            f"local function {qr_v}({st_v},{par_a},{par_b},{par_c},{par_d}) "
+            f"{st_v}[{par_a}]=({st_v}[{par_a}]+{st_v}[{par_b}])%4294967296 "
+            f"{st_v}[{par_d}]={lrot_v}({bxor_v}({st_v}[{par_d}],{st_v}[{par_a}]),{rot1}) "
+            f"{st_v}[{par_c}]=({st_v}[{par_c}]+{st_v}[{par_d}])%4294967296 "
+            f"{st_v}[{par_b}]={lrot_v}({bxor_v}({st_v}[{par_b}],{st_v}[{par_c}]),{rot2}) "
+            f"{st_v}[{par_a}]=({st_v}[{par_a}]+{st_v}[{par_b}])%4294967296 "
+            f"{st_v}[{par_d}]={lrot_v}({bxor_v}({st_v}[{par_d}],{st_v}[{par_a}]),{rot3}) "
+            f"{st_v}[{par_c}]=({st_v}[{par_c}]+{st_v}[{par_d}])%4294967296 "
+            f"{st_v}[{par_b}]={lrot_v}({bxor_v}({st_v}[{par_b}],{st_v}[{par_c}]),{rot4}) "
+            f"end "
+        )
+        g3_code = (
+            f"local function {g3}({par_ga}) "
+            f"if type({par_ga})~='string' then return nil end "
+            f"local {al_v}=#{par_ga} "
+            f"local {hh_v}=0 local {ll_v}=0 local {kk_v}=-1 "
+            f"local {ig3_v}={{}} "
+            f"for {iw_v}=1,{al_v},1 do "
+            f"local {cc_v}={RA_v}[{sb}({par_ga},{iw_v})] "
+            f"if not {cc_v} then return nil end "
+            f"{cc_v}={cc_v}-1 "
+            f"if {kk_v}<0 then {kk_v}={cc_v} else "
+            f"{kk_v}={kk_v}+{cc_v}*91 "
+            f"{hh_v}={bor_v}({hh_v},{lshift_v}({kk_v},{ll_v})) "
+            f"if {band_v}({kk_v},8191)>88 then {ll_v}={ll_v}+13 else {ll_v}={ll_v}+14 end "
+            f"while {ll_v}>=8 do "
+            f"{ig3_v}[#{ig3_v}+1]={band_v}({hh_v},255) "
+            f"{hh_v}={rshift_v}({hh_v},8) "
+            f"{ll_v}={ll_v}-8 "
+            f"end "
+            f"{kk_v}=-1 "
+            f"end end "
+            f"if {kk_v}>=0 then {ig3_v}[#{ig3_v}+1]={band_v}({bor_v}({hh_v},{lshift_v}({kk_v},{ll_v})),255) end "
+            f"return {ig3_v} end "
+        )
+    else:
+        xorb_code = f"local function {xorb_v}({par_a},{par_b}) return bit32.bxor({par_a},{par_b}) end "
+        qr_code = (
+            f"local function {qr_v}({st_v},{par_a},{par_b},{par_c},{par_d}) "
+            f"{st_v}[{par_a}]=bit32.band({st_v}[{par_a}]+{st_v}[{par_b}],0xFFFFFFFF) "
+            f"{st_v}[{par_d}]=bit32.lrotate(bit32.bxor({st_v}[{par_d}],{st_v}[{par_a}]),{rot1}) "
+            f"{st_v}[{par_c}]=bit32.band({st_v}[{par_c}]+{st_v}[{par_d}],0xFFFFFFFF) "
+            f"{st_v}[{par_b}]=bit32.lrotate(bit32.bxor({st_v}[{par_b}],{st_v}[{par_c}]),{rot2}) "
+            f"{st_v}[{par_a}]=bit32.band({st_v}[{par_a}]+{st_v}[{par_b}],0xFFFFFFFF) "
+            f"{st_v}[{par_d}]=bit32.lrotate(bit32.bxor({st_v}[{par_d}],{st_v}[{par_a}]),{rot3}) "
+            f"{st_v}[{par_c}]=bit32.band({st_v}[{par_c}]+{st_v}[{par_d}],0xFFFFFFFF) "
+            f"{st_v}[{par_b}]=bit32.lrotate(bit32.bxor({st_v}[{par_b}],{st_v}[{par_c}]),{rot4}) "
+            f"end "
+        )
+        g3_code = (
+            f"local function {g3}({par_ga}) "
+            f"if type({par_ga})~='string' then return nil end "
+            f"local {al_v}=#{par_ga} "
+            f"local {hh_v}=0 local {ll_v}=0 local {kk_v}=-1 "
+            f"local {ig3_v}={{}} "
+            f"for {iw_v}=1,{al_v},1 do "
+            f"local {cc_v}={RA_v}[{sb}({par_ga},{iw_v})] "
+            f"if not {cc_v} then return nil end "
+            f"{cc_v}={cc_v}-1 "
+            f"if {kk_v}<0 then {kk_v}={cc_v} else "
+            f"{kk_v}={kk_v}+{cc_v}*91 "
+            f"{hh_v}=bit32.bor({hh_v},bit32.lshift({kk_v},{ll_v})) "
+            f"if bit32.band({kk_v},8191)>88 then {ll_v}={ll_v}+13 else {ll_v}={ll_v}+14 end "
+            f"while {ll_v}>=8 do "
+            f"{ig3_v}[#{ig3_v}+1]=bit32.band({hh_v},255) "
+            f"{hh_v}=bit32.rshift({hh_v},8) "
+            f"{ll_v}={ll_v}-8 "
+            f"end "
+            f"{kk_v}=-1 "
+            f"end end "
+            f"if {kk_v}>=0 then {ig3_v}[#{ig3_v}+1]=bit32.band(bit32.bor({hh_v},bit32.lshift({kk_v},{ll_v})),255) end "
+            f"return {ig3_v} end "
+        )
+
     return (
         f'do ("Protected by Melotens Weak Obfuscator."):gsub(".+",function({wm_q_v}){wm_var}={wm_q_v} end) end '
         f"return (function(...) return(function({var_Q},{var_G},{var_B},{var_f},{var_k},{var_V}) "
+        f"{header_prims}"
         f"{drv_prologue}"
         f"{key_field_decls}"
         f"local {sc}=string.char "
@@ -488,17 +725,8 @@ def build_runtime_header(seeds, var_k, var_Q, var_G, var_B, var_f, var_V, wm_var
         f"{key_table_decl}"
         f"{nb_decl}"
         f"local {floor_v}=math.floor local {sb}=string.byte local {sc}=string.char "
-        f"local function {xorb_v}({par_a},{par_b}) return {bxor}({par_a},{par_b}) end "
-        f"local function {qr_v}({st_v},{par_a},{par_b},{par_c},{par_d}) "
-        f"{st_v}[{par_a}]=({st_v}[{par_a}]+{st_v}[{par_b}])%4294967296 "
-        f"{st_v}[{par_d}]={lrot}({xorb_v}({st_v}[{par_d}],{st_v}[{par_a}]),{rot1}) "
-        f"{st_v}[{par_c}]=({st_v}[{par_c}]+{st_v}[{par_d}])%4294967296 "
-        f"{st_v}[{par_b}]={lrot}({xorb_v}({st_v}[{par_b}],{st_v}[{par_c}]),{rot2}) "
-        f"{st_v}[{par_a}]=({st_v}[{par_a}]+{st_v}[{par_b}])%4294967296 "
-        f"{st_v}[{par_d}]={lrot}({xorb_v}({st_v}[{par_d}],{st_v}[{par_a}]),{rot3}) "
-        f"{st_v}[{par_c}]=({st_v}[{par_c}]+{st_v}[{par_d}])%4294967296 "
-        f"{st_v}[{par_b}]={lrot}({xorb_v}({st_v}[{par_b}],{st_v}[{par_c}]),{rot4}) "
-        f"end "
+        f"{xorb_code}"
+        f"{qr_code}"
         f"local function {blk_v}({par_counter},{par_n1},{par_n2},{par_n3}) "
         f"local {st_v}={{{c0},{c1},{c2},{c3},"
         f"{key_v}[1],{key_v}[2],{key_v}[3],{key_v}[4],{key_v}[5],{key_v}[6],{key_v}[7],{key_v}[8],"
@@ -541,28 +769,7 @@ def build_runtime_header(seeds, var_k, var_Q, var_G, var_B, var_f, var_V, wm_var
         f"local {N_v}=#{alpha_v} "
         f"local {RA_v}={{}} "
         f"for {ri_v}=1,{N_v},1 do {RA_v}[{sb}({alpha_v},{ri_v})]={ri_v} end "
-        f"local function {g3}({par_ga}) "
-        f"if type({par_ga})~='string' then return nil end "
-        f"local {al_v}=#{par_ga} "
-        f"local {hh_v}=0 local {ll_v}=0 local {kk_v}=-1 "
-        f"local {ig3_v}={{}} "
-        f"for {iw_v}=1,{al_v},1 do "
-        f"local {cc_v}={RA_v}[{sb}({par_ga},{iw_v})] "
-        f"if not {cc_v} then return nil end "
-        f"{cc_v}={cc_v}-1 "
-        f"if {kk_v}<0 then {kk_v}={cc_v} else "
-        f"{kk_v}={kk_v}+{cc_v}*91 "
-        f"{hh_v}={bor}({hh_v},{lshift}({kk_v},{ll_v})) "
-        f"if {band}({kk_v},8191)>88 then {ll_v}={ll_v}+13 else {ll_v}={ll_v}+14 end "
-        f"while {ll_v}>=8 do "
-        f"{ig3_v}[#{ig3_v}+1]={band}({hh_v},255) "
-        f"{hh_v}={rshift}({hh_v},8) "
-        f"{ll_v}={ll_v}-8 "
-        f"end "
-        f"{kk_v}=-1 "
-        f"end end "
-        f"if {kk_v}>=0 then {ig3_v}[#{ig3_v}+1]={band}({bor}({hh_v},{lshift}({kk_v},{ll_v})),255) end "
-        f"return {ig3_v} end "
+        f"{g3_code}"
         f"{inflate_src}"
         f"local {CC_v}={{}} "
         f"{var_k}=function({par_ka_a},{par_ka_b1},{par_ka_b2},{par_ka_b3},{par_ka_b4},{par_ka_d1},{par_ka_d2}) local {ck_v}={par_ka_b3}*{seeds['MK']}+{par_ka_b1} if {CC_v}[{ck_v}]~=nil then return {CC_v}[{ck_v}] end "
@@ -579,80 +786,22 @@ def build_runtime_header(seeds, var_k, var_Q, var_G, var_B, var_f, var_V, wm_var
     ), {"ks": ks_v, "xorb": xorb_v, "nb": nb_v, "sc": sc, "blk": blk_v, "inflate_tables": inflate_tables, "g3": g3, "key": key_v}
 
 def build_luajit_polyfill():
-    bitlib_v = gen_name()
-    norm_v = gen_name()
-    return (
-        f"if not bit32 then "
-        f"local {bitlib_v}=bit "
-        f"local function {norm_v}(x) if x<0 then return x+4294967296 end return x end "
-        f"bit32={{}} "
-        f"bit32.band=function(a,b) return {norm_v}({bitlib_v}.band(a,b)) end "
-        f"bit32.bor=function(a,b) return {norm_v}({bitlib_v}.bor(a,b)) end "
-        f"bit32.bxor=function(a,b) return {norm_v}({bitlib_v}.bxor(a,b)) end "
-        f"bit32.bnot=function(a) return {norm_v}({bitlib_v}.bnot(a)) end "
-        f"bit32.lshift=function(a,b) return {norm_v}({bitlib_v}.lshift(a,b)) end "
-        f"bit32.rshift=function(a,b) return {norm_v}({bitlib_v}.rshift(a,b)) end "
-        f"bit32.arshift=function(a,b) return {norm_v}({bitlib_v}.arshift(a,b)) end "
-        f"bit32.lrotate=function(a,b) return {norm_v}({bitlib_v}.rol(a,b)) end "
-        f"bit32.rrotate=function(a,b) return {norm_v}({bitlib_v}.ror(a,b)) end "
-        f"bit32.extract=function(n,field,width) width=width or 1 return {norm_v}({bitlib_v}.band({bitlib_v}.rshift(n,field),(2^width)-1)) end "
-        f"end "
-        f"if not table.pack then table.pack=function(...) return {{n=select('#',...),...}} end end "
-        f"if not table.unpack then table.unpack=unpack end "
-    )
+    return ""
 
 def build_lua51_polyfill():
-    m32 = gen_name()
-    band_v = gen_name()
-    bor_v = gen_name()
-    bxor_v = gen_name()
-    lshift_v = gen_name()
-    rshift_v = gen_name()
-    a_v, b_v, n_v = gen_name(), gen_name(), gen_name()
-    r_v, p_v, ra_v, rb_v = gen_name(), gen_name(), gen_name(), gen_name()
-    return (
-        f"if not bit32 then "
-        f"local function {m32}(x) x=x%4294967296 if x<0 then x=x+4294967296 end return x end "
-        f"local function {band_v}({a_v},{b_v}) {a_v}={m32}({a_v}) {b_v}={m32}({b_v}) "
-        f"local {r_v},{p_v}=0,1 while {a_v}>0 or {b_v}>0 do "
-        f"local {ra_v}={a_v}%2 local {rb_v}={b_v}%2 "
-        f"if {ra_v}==1 and {rb_v}==1 then {r_v}={r_v}+{p_v} end "
-        f"{a_v}=({a_v}-{ra_v})/2 {b_v}=({b_v}-{rb_v})/2 {p_v}={p_v}*2 end return {r_v} end "
-        f"local function {bor_v}({a_v},{b_v}) {a_v}={m32}({a_v}) {b_v}={m32}({b_v}) "
-        f"local {r_v},{p_v}=0,1 while {a_v}>0 or {b_v}>0 do "
-        f"local {ra_v}={a_v}%2 local {rb_v}={b_v}%2 "
-        f"if {ra_v}==1 or {rb_v}==1 then {r_v}={r_v}+{p_v} end "
-        f"{a_v}=({a_v}-{ra_v})/2 {b_v}=({b_v}-{rb_v})/2 {p_v}={p_v}*2 end return {r_v} end "
-        f"local function {bxor_v}({a_v},{b_v}) {a_v}={m32}({a_v}) {b_v}={m32}({b_v}) "
-        f"local {r_v},{p_v}=0,1 while {a_v}>0 or {b_v}>0 do "
-        f"local {ra_v}={a_v}%2 local {rb_v}={b_v}%2 "
-        f"if {ra_v}~={rb_v} then {r_v}={r_v}+{p_v} end "
-        f"{a_v}=({a_v}-{ra_v})/2 {b_v}=({b_v}-{rb_v})/2 {p_v}={p_v}*2 end return {r_v} end "
-        f"local function {lshift_v}({a_v},{n_v}) {a_v}={m32}({a_v}) "
-        f"if {n_v}<=0 then return {a_v} end if {n_v}>=32 then return 0 end "
-        f"return {m32}({a_v}*(2^{n_v})) end "
-        f"local function {rshift_v}({a_v},{n_v}) {a_v}={m32}({a_v}) "
-        f"if {n_v}<=0 then return {a_v} end if {n_v}>=32 then return 0 end "
-        f"return math.floor({a_v}/(2^{n_v})) end "
-        f"bit32={{}} "
-        f"bit32.band={band_v} "
-        f"bit32.bor={bor_v} "
-        f"bit32.bxor={bxor_v} "
-        f"bit32.bnot=function(a) return 4294967295-{m32}(a) end "
-        f"bit32.lshift={lshift_v} "
-        f"bit32.rshift={rshift_v} "
-        f"bit32.arshift=function(a,n) a={m32}(a) if n<=0 then return a end "
-        f"if n>=32 then if a>=2147483648 then return 4294967295 end return 0 end "
-        f"local r=math.floor(a/(2^n)) if a>=2147483648 then r={m32}(r+(4294967296-(2^(32-n)))) end return r end "
-        f"bit32.lrotate=function(a,n) n=n%32 if n==0 then return {m32}(a) end "
-        f"return {m32}({lshift_v}(a,n)+{rshift_v}(a,32-n)) end "
-        f"bit32.rrotate=function(a,n) n=n%32 if n==0 then return {m32}(a) end "
-        f"return {m32}({rshift_v}(a,n)+{lshift_v}(a,32-n)) end "
-        f"bit32.extract=function(n,field,width) width=width or 1 return {band_v}({rshift_v}(n,field),(2^width)-1) end "
-        f"end "
-        f"if not table.pack then table.pack=function(...) return {{n=select('#',...),...}} end end "
-        f"if not table.unpack then table.unpack=unpack end "
-    )
+    return ""
+
+def build_lua52_polyfill():
+    return ""
+
+def build_lua53_polyfill():
+    return ""
+
+def build_lua54_polyfill():
+    return ""
+
+def build_lua55_polyfill():
+    return ""
 
 def build_vm_dispatch(rng):
     import re
@@ -1478,7 +1627,19 @@ def build_anti_tamper_v2(seeds, rng, var_k, encode_fn, detect_var=None, target="
         f"if (1/0~=math.huge) or (-1/0~=-math.huge) or (0/0==0/0) or (math.huge~=math.huge*2) or (math.huge+1~=math.huge) or (math.abs(-5)~=5) or (math.floor(3.7)~=3) or (math.ceil(3.2)~=4) or (1e308*10~=math.huge) then {kill_v}() end ",
         f"if (type(1)~='number') or (type('')~='string') or (type(true)~='boolean') or (type({{}})~='table') or (type(function() end)~='function') or (type(nil)~='nil') then {kill_v}() end ",
         f"if typeof and ((typeof(1)~='number') or (typeof('')~='string') or (typeof({{}})~='table')) then {kill_v}() end ",
-        f"if (bit32.band(15,1)~=1) or (bit32.bor(2,1)~=3) or (bit32.bxor(5,5)~=0) or (bit32.lshift(1,3)~=8) or (bit32.rshift(8,3)~=1) or (bit32.lrotate(1,1)~=2) or (bit32.bnot(0)~=0xFFFFFFFF) or (bit32.arshift(-16,2)~=0xFFFFFFFC) or (bit32.extract(0xABCD,4,8)~=0xBC) then {kill_v}() end ",
+        (
+        f"if ((15&1)~=1) or ((2|1)~=3) or ((5~5)~=0) or ((1<<3)~=8) or ((8>>3)~=1) or ((~0&4294967295)~=4294967295) or ((17//3)~=5) then {kill_v}() end "
+        if target in ("lua53", "lua54", "lua55")
+        else (
+            f"if (bit.band(15,1)~=1) or (bit.bor(2,1)~=3) or (bit.bxor(5,5)~=0) or (bit.lshift(1,3)~=8) or (bit.rshift(8,3)~=1) or (bit.rol(1,1)~=2) or (bit.bnot(0)~=-1) then {kill_v}() end "
+            if target == "luajit"
+            else (
+                f"if (bit32.band(15,1)~=1) or (bit32.bor(2,1)~=3) or (bit32.bxor(5,5)~=0) or (bit32.lshift(1,3)~=8) or (bit32.rshift(8,3)~=1) or (bit32.lrotate(1,1)~=2) or (bit32.bnot(0)~=0xFFFFFFFF) or (bit32.arshift(-16,2)~=0xFFFFFFFC) or (bit32.extract(0xABCD,4,8)~=0xBC) then {kill_v}() end "
+                if target in ("lua52", "luau", "roblox")
+                else ""
+            )
+        )
+    ),
         f"if table.freeze and table.isfrozen then local {tf_v}={{k=1}} if table.isfrozen({tf_v}) then {kill_v}() end local {ret_v}=table.freeze({tf_v}) if {ret_v}~={tf_v} or not table.isfrozen({tf_v}) then {kill_v}() end local {ok1_v}=pcall(function() {tf_v}.k=2 end) if {ok1_v} then {kill_v}() end local {ok2_v}=pcall(function() {tf_v}.newk=3 end) if {ok2_v} then {kill_v}() end local {ok3_v}=pcall(function() table.insert({tf_v},4) end) if {ok3_v} then {kill_v}() end end ",
         f"if table.clone then local {src_v}={{a=10,b=20}} local {cl_v}=table.clone({src_v}) if {cl_v}=={src_v} or {cl_v}.a~=10 or {cl_v}.b~=20 then {kill_v}() end end ",
         f"if table.find then local {arr_v}={{11,22,33}} if table.find({arr_v},22)~=2 or table.find({arr_v},99)~=nil then {kill_v}() end end ",
@@ -1555,6 +1716,25 @@ def build_anti_tamper_v2(seeds, rng, var_k, encode_fn, detect_var=None, target="
         )
         parts.append(
             f"do local {ev_v}=(getfenv and getfenv(0)) or _G or {{}} "
+            f"if rawget({ev_v},'__DEBUG__') or rawget({ev_v},'__BREAKPOINT__') or rawget({ev_v},'__ATTACHED__') or rawget({ev_v},'MobDebug') or rawget({ev_v},'remdebug') or rawget({ev_v},'ldb') or rawget({ev_v},'BreakpointHook') then {kill_v}() end "
+            f"end "
+        )
+    elif target in ("lua52", "lua53", "lua54", "lua55"):
+        ver_map = {"lua52": "Lua 5.2", "lua53": "Lua 5.3", "lua54": "Lua 5.4", "lua55": "Lua 5.5"}
+        expected_ver = ver_map[target]
+        parts.append(
+            f"if _VERSION~='{expected_ver}' then {kill_v}() end "
+        )
+        parts.append(
+            f"if debug and debug.getinfo then "
+            f"do local {cf_v}=function() return 1 end local {s_v}=debug.getinfo({cf_v},'S').short_src local {l_v}=debug.getinfo({cf_v},'S').linedefined if {s_v}=='[C]' or {l_v}<1 then {kill_v}() end end "
+            f"local {cfns_v}={{type,pcall,xpcall,error,setmetatable,getmetatable,rawget,rawset,select,tonumber,tostring,pairs,ipairs,next,string.byte,string.char,string.sub,string.len,string.find,table.insert,table.remove,table.concat,math.floor,math.ceil,math.abs,coroutine.create,coroutine.resume,coroutine.yield,coroutine.status}} "
+            f"for _,{fn_v} in ipairs({cfns_v}) do if debug.getinfo({fn_v},'S').short_src~='[C]' then {kill_v}() end end "
+            f"if debug.getinfo(pcall).what~='C' or debug.getinfo(type).what~='C' or debug.getinfo(setmetatable).what~='C' then {kill_v}() end "
+            f"end "
+        )
+        parts.append(
+            f"do local {ev_v}=(getfenv and getfenv(0)) or _ENV or _G or {{}} "
             f"if rawget({ev_v},'__DEBUG__') or rawget({ev_v},'__BREAKPOINT__') or rawget({ev_v},'__ATTACHED__') or rawget({ev_v},'MobDebug') or rawget({ev_v},'remdebug') or rawget({ev_v},'ldb') or rawget({ev_v},'BreakpointHook') then {kill_v}() end "
             f"end "
         )

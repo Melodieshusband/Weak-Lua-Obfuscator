@@ -449,16 +449,22 @@ def flatten_source(source, rng, gen_name_fn, detect_var=None, target='luau'):
     if target == 'luajit':
         from luajit_ast import parse as target_parse, LuauSyntaxError as TargetSyntaxError
         from luajit_unparse import unparse_block as target_unparse_block
-    elif target == 'lua51':
-        from lua51_ast import parse as target_parse, Lua51SyntaxError as TargetSyntaxError
-        from lua51_unparse import unparse_block as target_unparse_block
+        parse_fn = target_parse
+        unparse_fn = target_unparse_block
+    elif target in ('lua51', 'lua52', 'lua53', 'lua54', 'lua55'):
+        from lua5x_ast import parse as target_parse, Lua5xSyntaxError as TargetSyntaxError
+        from lua5x_unparse import unparse_block as target_unparse_block
+        v_str = target[3:4] + '.' + target[4:] if len(target) == 5 else '5.1'
+        parse_fn = lambda s: target_parse(s, version=v_str)
+        unparse_fn = lambda b: target_unparse_block(b, version=v_str)
     else:
         target_parse = parse
         TargetSyntaxError = LuauSyntaxError
-        target_unparse_block = unparse_block
+        parse_fn = target_parse
+        unparse_fn = unparse_block
 
     try:
-        chunk = target_parse(source)
+        chunk = parse_fn(source)
     except TargetSyntaxError:
         return None
 
@@ -469,7 +475,7 @@ def flatten_source(source, rng, gen_name_fn, detect_var=None, target='luau'):
         return None
 
     try:
-        out = target_unparse_block(chunk['body'])
+        out = unparse_fn(chunk['body'])
     except Exception:
         return None
 

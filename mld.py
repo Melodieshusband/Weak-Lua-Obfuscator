@@ -27,8 +27,8 @@ def build_field_dictionary(atoms):
 
 
 def pick_field_dict_marker(used_op_bytes):
-    used = set(used_op_bytes)
-    for candidate in range(256):
+    used = set(used_op_bytes) | set(range(FIELD_DICT_MAX_ENTRIES + 4))
+    for candidate in range(255, -1, -1):
         if candidate not in used:
             return candidate
     raise ValueError("no free byte value available for MLD field-dict marker")

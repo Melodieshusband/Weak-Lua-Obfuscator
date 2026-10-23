@@ -351,8 +351,12 @@ class Scope:
         self.locals = {}
         if parent and not func_boundary:
             self.reg_counter = parent.reg_counter
+            self.labels = parent.labels
+            self.gotos = parent.gotos
         else:
             self.reg_counter = [0]
+            self.labels = {}
+            self.gotos = []
         self.func_boundary = func_boundary
 
     def alloc(self, name):
@@ -673,6 +677,7 @@ class Compiler:
         for p in node['params']:
             child.scope.alloc(p)
         child._stmts(node['body'])
+        child._resolve_gotos()
         if not child.proto.instructions or child.proto.instructions[-1].op not in (OP_RETURN, OP_RETURN_NONE):
             child.emit(OP_RETURN_NONE, 0)
         idx = len(self.proto.protos)
@@ -950,6 +955,13 @@ class Compiler:
             j = self.emit(OP_JUMP, 0)
             self.continue_patches.append(j)
 
+        elif t == 'label':
+            self.scope.labels[node['name']] = self.pc()
+
+        elif t == 'goto':
+            j = self.emit(OP_JUMP, 0)
+            self.scope.gotos.append((j, node['name']))
+
         else:
             raise SyntaxError(f"Unknown statement node type: {t}")
 
@@ -1121,9 +1133,17 @@ class Compiler:
         self.continue_patches = old_continues
         self.scope.reg_counter[0] = saved_reg
 
+    def _resolve_gotos(self):
+        for j, name in self.scope.gotos:
+            if name in self.scope.labels:
+                self.patch(j, a=self.scope.labels[name])
+            else:
+                raise SyntaxError(f"no visible label '{name}' for <goto>")
+
     def compile_chunk(self, stmts, is_vararg=True):
         self.proto.is_vararg = is_vararg
         self._stmts(stmts)
+        self._resolve_gotos()
         if not self.proto.instructions or self.proto.instructions[-1].op not in (OP_RETURN, OP_RETURN_NONE):
             self.emit(OP_RETURN_NONE, 0)
 
@@ -1171,7 +1191,7 @@ class Compiler:
 
 KEYWORDS = {
     'and','break','continue','do','else','elseif','end','false','for','function',
-    'if','in','local','nil','not','or','repeat','return','then','true',
+    'goto','if','in','local','nil','not','or','repeat','return','then','true',
     'until','while',
 }
 def tokenize(src):
@@ -1251,8 +1271,11 @@ def tokenize(src):
             j = i
             if src[i:i+2] in ('0x', '0X'):
                 i += 2
-                while i < n and (src[i] in '0123456789abcdefABCDEF_'):
-                    i += 1
+                while i < n and (src[i] in '0123456789abcdefABCDEF_.pP'):
+                    if src[i] in 'pP' and i+1 < n and src[i+1] in '+-':
+                        i += 2
+                    else:
+                        i += 1
                 tokens.append(('NUMBER', src[j:i]))
             elif src[i:i+2] in ('0b', '0B'):
                 i += 2
@@ -1365,8 +1388,18 @@ class Parser:
             self.consume()
             return None
 
+        if tok[0] == 'OP' and tok[1] == '::':
+            self.consume('OP', '::')
+            name = self.consume('NAME')[1]
+            self.consume('OP', '::')
+            return {'type': 'label', 'name': name}
+
         if tok[0] == 'KW':
             kw = tok[1]
+            if kw == 'goto':
+                self.consume('KW', 'goto')
+                name = self.consume('NAME')[1]
+                return {'type': 'goto', 'name': name}
             if kw == 'local':
                 return self.parse_local()
             if kw == 'return':
@@ -1402,9 +1435,15 @@ class Parser:
             self.consume('KW', 'end')
             return {'type': 'local_function', 'name': name, 'params': params,
                     'body': body, 'is_vararg': is_vararg}
-        names = [self.consume('NAME')[1]]
+        def parse_local_name():
+            n = self.consume('NAME')[1]
+            if self.match('OP', '<'):
+                self.consume('NAME')
+                self.consume('OP', '>')
+            return n
+        names = [parse_local_name()]
         while self.match('COMMA'):
-            names.append(self.consume('NAME')[1])
+            names.append(parse_local_name())
         values = []
         if self.match('OP', '='):
             values = self.parse_expr_list()
@@ -1706,6 +1745,8 @@ class Parser:
             v = tok[1]
             clean = v.replace('_', '')
             if clean.startswith(('0x', '0X')):
+                if '.' in clean or 'p' in clean.lower():
+                    return {'type': 'number', 'value': float.fromhex(clean)}
                 return {'type': 'number', 'value': int(clean, 16)}
             if clean.startswith(('0b', '0B')):
                 return {'type': 'number', 'value': int(clean, 2)}
@@ -1774,7 +1815,7 @@ class VMCompileError(Exception):
     pass
 
 
-def try_compile_vm(source, rng=None, debug=False):
+def try_compile_vm(source, rng=None, debug=False, target="luau", **kwargs):
     try:
         opmap = make_opmap()
         _patch_global_ops(opmap)
@@ -1808,8 +1849,107 @@ def _patch_global_ops(opmap):
     g['FIELD_DICT_MARKER'] = field_dict_marker
 
 
-def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, detect_var=None, key_expr=None):
+def _get_vm_dialect_prims(target, gen_name_fn):
     N = gen_name_fn
+    is_native_ops = target in ("lua53", "lua54", "lua55")
+    is_luajit = (target == "luajit")
+    is_lua51 = (target == "lua51")
+
+    bitlib_v = N()
+    band_v = N()
+    bor_v = N()
+    bxor_v = N()
+    bnot_v = N()
+    lshift_v = N()
+    rshift_v = N()
+    unpack_v = N()
+    pack_v = N()
+
+    if is_native_ops:
+        prologue = (
+            f"local {unpack_v}=table.unpack "
+            f"local {pack_v}=table.pack "
+        )
+        def band_e(a, b): return f"(({a})&({b}))"
+        def bor_e(a, b): return f"(({a})|({b}))"
+        def bxor_e(a, b): return f"(({a})~({b}))"
+        def bnot_e(a): return f"((~({a}))&4294967295)"
+        def lshift_e(a, b): return f"((({a})<<({b}))&4294967295)"
+        def rshift_e(a, b): return f"(((({a})&4294967295)>>({b}))&4294967295)"
+        def idiv_e(a, b): return f"(({a})//({b}))"
+    elif is_luajit:
+        prologue = (
+            f"local {bitlib_v}=bit "
+            f"local {band_v},{bor_v},{bxor_v},{bnot_v},{lshift_v},{rshift_v}={bitlib_v}.band,{bitlib_v}.bor,{bitlib_v}.bxor,{bitlib_v}.bnot,{bitlib_v}.lshift,{bitlib_v}.rshift "
+            f"local {unpack_v}=unpack "
+            f"local function {pack_v}(...) return {{n=select('#',...),...}} end "
+        )
+        def band_e(a, b): return f"{band_v}({a},{b})"
+        def bor_e(a, b): return f"{bor_v}({a},{b})"
+        def bxor_e(a, b): return f"{bxor_v}({a},{b})"
+        def bnot_e(a): return f"{bnot_v}({a})"
+        def lshift_e(a, b): return f"{lshift_v}({a},{b})"
+        def rshift_e(a, b): return f"{rshift_v}({a},{b})"
+        def idiv_e(a, b): return f"math.floor(({a})/({b}))"
+    elif is_lua51:
+        prologue = (
+            f"local {unpack_v}=unpack "
+            f"local function {pack_v}(...) return {{n=select('#',...),...}} end "
+            f"local function {band_v}(a,b) local r,m=0,1 a,b=a%4294967296,b%4294967296 while a>0 and b>0 do if a%2==1 and b%2==1 then r=r+m end a,b=math.floor(a/2),math.floor(b/2) m=m*2 end return r end "
+            f"local function {bor_v}(a,b) local r,m=0,1 a,b=a%4294967296,b%4294967296 while a>0 or b>0 do if a%2==1 or b%2==1 then r=r+m end a,b=math.floor(a/2),math.floor(b/2) m=m*2 end return r end "
+            f"local function {bxor_v}(a,b) local r,m=0,1 a,b=a%4294967296,b%4294967296 while a>0 or b>0 do local ra,rb=a%2,b%2 if ra~=rb then r=r+m end a,b=math.floor(a/2),math.floor(b/2) m=m*2 end return r end "
+            f"local function {bnot_v}(a) return 4294967295-(a%4294967296) end "
+            f"local function {lshift_v}(a,b) return ((a%4294967296)*(2^b))%4294967296 end "
+            f"local function {rshift_v}(a,b) return math.floor((a%4294967296)/(2^b)) end "
+        )
+        def band_e(a, b): return f"{band_v}({a},{b})"
+        def bor_e(a, b): return f"{bor_v}({a},{b})"
+        def bxor_e(a, b): return f"{bxor_v}({a},{b})"
+        def bnot_e(a): return f"{bnot_v}({a})"
+        def lshift_e(a, b): return f"{lshift_v}({a},{b})"
+        def rshift_e(a, b): return f"{rshift_v}({a},{b})"
+        def idiv_e(a, b): return f"math.floor(({a})/({b}))"
+    else:
+        prologue = (
+            f"local {bitlib_v}=bit32 "
+            f"local {band_v},{bor_v},{bxor_v},{bnot_v},{lshift_v},{rshift_v}={bitlib_v}.band,{bitlib_v}.bor,{bitlib_v}.bxor,{bitlib_v}.bnot,{bitlib_v}.lshift,{bitlib_v}.rshift "
+            f"local {unpack_v}=table.unpack "
+            f"local {pack_v}=table.pack "
+        )
+        def band_e(a, b): return f"{band_v}({a},{b})"
+        def bor_e(a, b): return f"{bor_v}({a},{b})"
+        def bxor_e(a, b): return f"{bxor_v}({a},{b})"
+        def bnot_e(a): return f"{bnot_v}({a})"
+        def lshift_e(a, b): return f"{lshift_v}({a},{b})"
+        def rshift_e(a, b): return f"{rshift_v}({a},{b})"
+        def idiv_e(a, b): return f"math.floor(({a})/({b}))"
+
+    return {
+        "prologue": prologue,
+        "unpack": unpack_v,
+        "pack": pack_v,
+        "band": band_e,
+        "bor": bor_e,
+        "bxor": bxor_e,
+        "bnot": bnot_e,
+        "lshift": lshift_e,
+        "rshift": rshift_e,
+        "idiv": idiv_e,
+    }
+
+def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, detect_var=None, key_expr=None, target="luau"):
+    N = gen_name_fn
+    prims = _get_vm_dialect_prims(target, N)
+    prologue = prims["prologue"]
+    unpack_v = prims["unpack"]
+    pack_v = prims["pack"]
+    band_e = prims["band"]
+    bor_e = prims["bor"]
+    bxor_e = prims["bxor"]
+    bnot_e = prims["bnot"]
+    lshift_e = prims["lshift"]
+    rshift_e = prims["rshift"]
+    idiv_e = prims["idiv"]
     data_v    = N(); u16_v     = N(); u16s_v    = N(); ldc_v     = N()
     ldi_v     = N(); ldp_v     = N(); consts_v  = N()
     protos_v  = N(); env_v     = N(); mk_v      = N(); fn_v      = N()
@@ -1914,6 +2054,7 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
     dexpr = data_expr if data_expr is not None else "{}"
 
     lua = (
+        f"{prologue}"
         f"local {data_v}={dexpr} "
         f"local function {u16_v}({p_d},{p_i}) return {p_d}[{p_i}]+({p_d}[{p_i}+1]*256) end "
         f"local function {u16s_v}({p_d},{p_i}) local {p_v}={p_d}[{p_i}]+({p_d}[{p_i}+1]*256) if {p_v}>=32768 then {p_v}={p_v}-65536 end return {p_v} end "
@@ -1921,8 +2062,8 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
         f"local {p_res}=0 local {p_st}=0 "
         f"while true do "
         f"local {p_x}={p_d}[{p_i}] {p_i}={p_i}+1 "
-        f"{p_res}={p_res}+bit32.lshift(bit32.band({p_x},0x7F),{p_st}) "
-        f"if bit32.band({p_x},0x80)==0 then break end "
+        f"{p_res}={p_res}+{lshift_e(band_e(p_x, 127), p_st)} "
+        f"if {band_e(p_x, 128)}==0 then break end "
         f"{p_st}={p_st}+7 "
         f"end "
         f"return {p_res},{p_i} end "
@@ -1935,8 +2076,8 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
         f"local {p_pst}={p_poolseed} local {p_ppv}={p_poolseed} "
         f"for {p_j}=0,{p_poollen}-1 do "
         f"local {p_ns}=({p_pst}*1103515245+12345)%256 "
-        f"local {p_mk}=bit32.bxor({p_ns},({p_ppv}*31)%256)%256 "
-        f"{p_poolraw}[{p_j}+1]=bit32.bxor({data_v}[{p_poolst}+{p_j}],{p_mk})%256 "
+        f"local {p_mk}={bxor_e(p_ns, f'({p_ppv}*31)%256')}%256 "
+        f"{p_poolraw}[{p_j}+1]={bxor_e(f'{data_v}[{p_poolst}+{p_j}]', p_mk)}%256 "
         f"{p_pst}={p_ns} {p_ppv}={p_mk} "
         f"end "
         f"local {p_poolidx}=1 "
@@ -1959,11 +2100,11 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
         f"while true do "
         f"local {p_eraw}={p_d}[{p_i}] {p_i}={p_i}+1 "
         f"local {p_enewstate}=({p_estate}*1103515245+12345)%256 "
-        f"local {p_emask}=bit32.bxor({p_enewstate},({p_eprev}*31)%256)%256 "
-        f"local {p_eb}=bit32.bxor({p_eraw},{p_emask})%256 "
+        f"local {p_emask}={bxor_e(p_enewstate, f'({p_eprev}*31)%256')}%256 "
+        f"local {p_eb}={bxor_e(p_eraw, p_emask)}%256 "
         f"{p_estate}={p_enewstate} {p_eprev}={p_emask} "
-        f"{p_eres}={p_eres}+bit32.lshift(bit32.band({p_eb},0x7F),{p_esh}) "
-        f"if bit32.band({p_eb},0x80)==0 then break end "
+        f"{p_eres}={p_eres}+{lshift_e(band_e(p_eb, 127), p_esh)} "
+        f"if {band_e(p_eb, 128)}==0 then break end "
         f"{p_esh}={p_esh}+7 "
         f"end "
         f"return {p_eres},{p_i} end "
@@ -2015,17 +2156,17 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
         f"for {p_j}=0,{p_ln}-1 do "
         f"local {p_raw}={p_d}[{p_i}+{p_j}] "
         f"local {p_newstate}=({p_rst}*1103515245+12345)%256 "
-        f"local {p_mask}=bit32.bxor({p_newstate},({p_rpv}*31)%256)%256 "
-        f"local {p_rv}=bit32.bxor({p_raw},{p_mask})%256 "
+        f"local {p_mask}={bxor_e(p_newstate, f'({p_rpv}*31)%256')}%256 "
+        f"local {p_rv}={bxor_e(p_raw, p_mask)}%256 "
         f"{p_out}[{p_j}+1]={p_rv} "
         f"{p_rst}={p_newstate} {p_rpv}={p_rv} "
         f"end "
         f"return {p_out},{p_rst},{p_rpv} end "
         f"local function {chk_v}({p_op},{p_a},{p_b},{p_cc}) "
         f"local {p_a}={p_a} or 0 local {p_b}={p_b} or 0 local {p_cc}={p_cc} or 0 "
-        f"local {p_n}=bit32.band(({p_op}*7919)+({p_a}*104729)+({p_b}*15485863)+({p_cc}*179424673)+2166136261,0x7FFFFFFF) "
+        f"local {p_n}={band_e(f'({p_op}*7919)+({p_a}*104729)+({p_b}*15485863)+({p_cc}*179424673)+2166136261', '0x7FFFFFFF')} "
         + (
-            f"return bit32.bxor({p_n},{key_expr}[(bit32.band({p_op},7))+1]) "
+            f"return {bxor_e(p_n, f'{key_expr}[({band_e(p_op, 7)})+1]')} "
             if key_expr
             else f"return {p_n} "
         )
@@ -2058,8 +2199,8 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
         f"local {p_rstate}={p_pseed} local {p_rprev}={p_pseed} "
         f"for {p_ci}=1,{p_cblen} do "
         f"local {p_newstate}=({p_rstate}*1103515245+12345)%256 "
-        f"local {p_mask}=bit32.bxor({p_newstate},({p_rprev}*31)%256)%256 "
-        f"local {p_rawc}=bit32.bxor({p_d}[{p_i}+{p_ci}-1],{p_mask})%256 "
+        f"local {p_mask}={bxor_e(p_newstate, f'({p_rprev}*31)%256')}%256 "
+        f"local {p_rawc}={bxor_e(f'{p_d}[{p_i}+{p_ci}-1]', p_mask)}%256 "
         f"{p_cbb}[{p_ci}]={p_rawc} "
         f"{p_rstate}={p_newstate} {p_rprev}={p_mask} "
         f"end "
@@ -2235,13 +2376,13 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
         f"elseif {p_op2}=={O('MOD')} then {p_setreg}({p_a2},{p_getreg}({p_b2})%{p_getreg}({p_c2})) "
         f"elseif {p_op2}=={O('POW')} then {p_setreg}({p_a2},{p_getreg}({p_b2})^{p_getreg}({p_c2})) "
         f"elseif {p_op2}=={O('CONCAT')} then {p_setreg}({p_a2},{p_getreg}({p_b2})..{p_getreg}({p_c2})) "
-        f"elseif {p_op2}=={O('IDIV')} then {p_setreg}({p_a2},math.floor({p_getreg}({p_b2})/{p_getreg}({p_c2}))) "
-        f"elseif {p_op2}=={O('BAND')} then {p_setreg}({p_a2},bit32.band({p_getreg}({p_b2}),{p_getreg}({p_c2}))) "
-        f"elseif {p_op2}=={O('BOR')} then {p_setreg}({p_a2},bit32.bor({p_getreg}({p_b2}),{p_getreg}({p_c2}))) "
-        f"elseif {p_op2}=={O('BXOR')} then {p_setreg}({p_a2},bit32.bxor({p_getreg}({p_b2}),{p_getreg}({p_c2}))) "
-        f"elseif {p_op2}=={O('BNOT')} then {p_setreg}({p_a2},bit32.bnot({p_getreg}({p_b2}))) "
-        f"elseif {p_op2}=={O('SHL')} then {p_setreg}({p_a2},bit32.lshift({p_getreg}({p_b2}),{p_getreg}({p_c2}))) "
-        f"elseif {p_op2}=={O('SHR')} then {p_setreg}({p_a2},bit32.rshift({p_getreg}({p_b2}),{p_getreg}({p_c2}))) "
+        f"elseif {p_op2}=={O('IDIV')} then {p_setreg}({p_a2},{idiv_e(f'{p_getreg}({p_b2})', f'{p_getreg}({p_c2})')}) "
+        f"elseif {p_op2}=={O('BAND')} then {p_setreg}({p_a2},{band_e(f'{p_getreg}({p_b2})', f'{p_getreg}({p_c2})')}) "
+        f"elseif {p_op2}=={O('BOR')} then {p_setreg}({p_a2},{bor_e(f'{p_getreg}({p_b2})', f'{p_getreg}({p_c2})')}) "
+        f"elseif {p_op2}=={O('BXOR')} then {p_setreg}({p_a2},{bxor_e(f'{p_getreg}({p_b2})', f'{p_getreg}({p_c2})')}) "
+        f"elseif {p_op2}=={O('BNOT')} then {p_setreg}({p_a2},{bnot_e(f'{p_getreg}({p_b2})')}) "
+        f"elseif {p_op2}=={O('SHL')} then {p_setreg}({p_a2},{lshift_e(f'{p_getreg}({p_b2})', f'{p_getreg}({p_c2})')}) "
+        f"elseif {p_op2}=={O('SHR')} then {p_setreg}({p_a2},{rshift_e(f'{p_getreg}({p_b2})', f'{p_getreg}({p_c2})')}) "
         f"elseif {p_op2}=={O('UNM')} then {p_setreg}({p_a2},-{p_getreg}({p_b2})) "
         f"elseif {p_op2}=={O('LEN')} then {p_setreg}({p_a2},#{p_getreg}({p_b2})) "
         f"elseif {p_op2}=={O('NOT')} then {p_setreg}({p_a2},not {p_getreg}({p_b2})) "
@@ -2268,7 +2409,7 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
         f"{p_ncallargs}={p_kk}-1 "
         f"else for {p_jj}=1,{p_nargs2} do {p_callargs}[{p_jj}]={p_getreg}({p_a2}+{p_jj}) end {p_ncallargs}={p_nargs2} end "
         f"if type({p_fnv})=='function' then "
-        f"local {p_res}=table.pack({p_fnv}(table.unpack({p_callargs},1,{p_ncallargs}))) "
+        f"local {p_res}={pack_v}({p_fnv}({unpack_v}({p_callargs},1,{p_ncallargs}))) "
         f"if {p_nret}==255 then "
         f"for {p_jj}=1,{p_res}.n do {p_setreg}({p_a2}+{p_jj}-1,{p_res}[{p_jj}]) end "
         f"{p_setreg}({p_a2}+{p_res}.n,nil) "
@@ -2287,7 +2428,7 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
         f"{p_ncallargs}={p_kk}-1 "
         f"else for {p_jj}=1,{p_nargs2} do {p_callargs}[{p_jj}+1]={p_getreg}({p_a2}+{p_jj}) end {p_ncallargs}=1+{p_nargs2} end "
         f"if type({p_mfn})=='function' then "
-        f"local {p_res}=table.pack({p_mfn}(table.unpack({p_callargs},1,{p_ncallargs}))) "
+        f"local {p_res}={pack_v}({p_mfn}({unpack_v}({p_callargs},1,{p_ncallargs}))) "
         f"if {p_multi} then "
         f"for {p_jj}=1,{p_res}.n do {p_setreg}({p_a2}+{p_jj}-1,{p_res}[{p_jj}]) end "
         f"{p_setreg}({p_a2}+{p_res}.n,nil) "
@@ -2302,10 +2443,10 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
         f"local {p_res}={{}} local {p_jj}=0 "
         f"while {p_rbb}+{p_jj}<{p_vtop} do {p_res}[{p_jj}+1]={p_getreg}({p_rbb}+{p_jj}) {p_jj}={p_jj}+1 end "
         f"for {p_jj}=0,#{p_vr} do {p_vr}[{p_jj}]=nil end "
-        f"return table.unpack({p_res}) "
+        f"return {unpack_v}({p_res}) "
         f"else local {p_res}={{}} for {p_jj}=0,{p_nret}-1 do {p_res}[{p_jj}+1]={p_getreg}({p_rbb}+{p_jj}) end "
         f"for {p_jj}=0,#{p_vr} do {p_vr}[{p_jj}]=nil end "
-        f"return table.unpack({p_res}) end "
+        f"return {unpack_v}({p_res}) end "
         f"elseif {p_op2}=={O('RETURN_NONE')} then for {p_jj}=0,#{p_vr} do {p_vr}[{p_jj}]=nil end return "
         f"elseif {p_op2}=={O('VARARG')} then "
         f"local {p_nret}={p_b2} "
@@ -2332,7 +2473,7 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
         f"if ({p_st}>0 and {p_iv}<={p_lim}) or ({p_st}<0 and {p_iv}>={p_lim}) then {p_setreg}({p_a2}+3,{p_iv}) {p_pc}={p_b2}+1 end "
         f"elseif {p_op2}=={O('TFOR_CALL')} then "
         f"local {p_itf}={p_getreg}({p_a2}) local {p_stt}={p_getreg}({p_a2}+1) local {p_ctl}={p_getreg}({p_a2}+2) "
-        f"local {p_res}=table.pack({p_itf}({p_stt},{p_ctl})) "
+        f"local {p_res}={pack_v}({p_itf}({p_stt},{p_ctl})) "
         f"for {p_jj}=1,{p_c2} do {p_setreg}({p_a2}+2+{p_jj},{p_res}[{p_jj}]) end "
         f"{p_setreg}({p_a2}+2,{p_res}[1]) "
         f"elseif {p_op2}=={O('TFOR_LOOP')} then "
@@ -2353,8 +2494,19 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
         f"return {fn_v}(...) "
     )
     return lua
-def bytecode_to_lua_mltn_only(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, detect_var=None):
+def bytecode_to_lua_mltn_only(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, detect_var=None, target="luau"):
     N = gen_name_fn
+    prims = _get_vm_dialect_prims(target, N)
+    prologue = prims["prologue"]
+    unpack_v = prims["unpack"]
+    pack_v = prims["pack"]
+    band_e = prims["band"]
+    bor_e = prims["bor"]
+    bxor_e = prims["bxor"]
+    bnot_e = prims["bnot"]
+    lshift_e = prims["lshift"]
+    rshift_e = prims["rshift"]
+    idiv_e = prims["idiv"]
     data_v    = N(); u16_v     = N(); u16s_v    = N(); ldc_v     = N()
     ldi_v     = N(); ldp_v     = N(); consts_v  = N()
     protos_v  = N(); env_v     = N(); mk_v      = N(); fn_v      = N()
@@ -2457,6 +2609,7 @@ def bytecode_to_lua_mltn_only(bytecode, rng, gen_name_fn, opmap=None, data_expr=
     dexpr = data_expr if data_expr is not None else "{}"
 
     lua = (
+        f"{prologue}"
         f"local {data_v}={dexpr} "
         f"local function {u16_v}({p_d},{p_i}) return {p_d}[{p_i}]+({p_d}[{p_i}+1]*256) end "
         f"local function {u16s_v}({p_d},{p_i}) local {p_v}={p_d}[{p_i}]+({p_d}[{p_i}+1]*256) if {p_v}>=32768 then {p_v}={p_v}-65536 end return {p_v} end "
@@ -2464,8 +2617,8 @@ def bytecode_to_lua_mltn_only(bytecode, rng, gen_name_fn, opmap=None, data_expr=
         f"local {p_res}=0 local {p_st}=0 "
         f"while true do "
         f"local {p_x}={p_d}[{p_i}] {p_i}={p_i}+1 "
-        f"{p_res}={p_res}+bit32.lshift(bit32.band({p_x},0x7F),{p_st}) "
-        f"if bit32.band({p_x},0x80)==0 then break end "
+        f"{p_res}={p_res}+{lshift_e(band_e(p_x, 127), p_st)} "
+        f"if {band_e(p_x, 128)}==0 then break end "
         f"{p_st}={p_st}+7 "
         f"end "
         f"return {p_res},{p_i} end "
@@ -2478,8 +2631,8 @@ def bytecode_to_lua_mltn_only(bytecode, rng, gen_name_fn, opmap=None, data_expr=
         f"local {p_pst}={p_poolseed} local {p_ppv}={p_poolseed} "
         f"for {p_j}=0,{p_poollen}-1 do "
         f"local {p_ns}=({p_pst}*1103515245+12345)%256 "
-        f"local {p_mk}=bit32.bxor({p_ns},({p_ppv}*31)%256)%256 "
-        f"{p_poolraw}[{p_j}+1]=bit32.bxor({data_v}[{p_poolst}+{p_j}],{p_mk})%256 "
+        f"local {p_mk}={bxor_e(p_ns, f'({p_ppv}*31)%256')}%256 "
+        f"{p_poolraw}[{p_j}+1]={bxor_e(f'{data_v}[{p_poolst}+{p_j}]', p_mk)}%256 "
         f"{p_pst}={p_ns} {p_ppv}={p_mk} "
         f"end "
         f"local {p_poolidx}=1 "
@@ -2502,11 +2655,11 @@ def bytecode_to_lua_mltn_only(bytecode, rng, gen_name_fn, opmap=None, data_expr=
         f"while true do "
         f"local {p_eraw}={p_d}[{p_i}] {p_i}={p_i}+1 "
         f"local {p_enewstate}=({p_estate}*1103515245+12345)%256 "
-        f"local {p_emask}=bit32.bxor({p_enewstate},({p_eprev}*31)%256)%256 "
-        f"local {p_eb}=bit32.bxor({p_eraw},{p_emask})%256 "
+        f"local {p_emask}={bxor_e(p_enewstate, f'({p_eprev}*31)%256')}%256 "
+        f"local {p_eb}={bxor_e(p_eraw, p_emask)}%256 "
         f"{p_estate}={p_enewstate} {p_eprev}={p_emask} "
-        f"{p_eres}={p_eres}+bit32.lshift(bit32.band({p_eb},0x7F),{p_esh}) "
-        f"if bit32.band({p_eb},0x80)==0 then break end "
+        f"{p_eres}={p_eres}+{lshift_e(band_e(p_eb, 127), p_esh)} "
+        f"if {band_e(p_eb, 128)}==0 then break end "
         f"{p_esh}={p_esh}+7 "
         f"end "
         f"return {p_eres},{p_i} end "
@@ -2558,8 +2711,8 @@ def bytecode_to_lua_mltn_only(bytecode, rng, gen_name_fn, opmap=None, data_expr=
         f"for {p_j}=0,{p_ln}-1 do "
         f"local {p_raw}={p_d}[{p_i}+{p_j}] "
         f"local {p_newstate}=({p_rst}*1103515245+12345)%256 "
-        f"local {p_mask}=bit32.bxor({p_newstate},({p_rpv}*31)%256)%256 "
-        f"local {p_rv}=bit32.bxor({p_raw},{p_mask})%256 "
+        f"local {p_mask}={bxor_e(p_newstate, f'({p_rpv}*31)%256')}%256 "
+        f"local {p_rv}={bxor_e(p_raw, p_mask)}%256 "
         f"{p_out}[{p_j}+1]={p_rv} "
         f"{p_rst}={p_newstate} {p_rpv}={p_rv} "
         f"end "
@@ -2592,8 +2745,8 @@ def bytecode_to_lua_mltn_only(bytecode, rng, gen_name_fn, opmap=None, data_expr=
         f"local {p_rstate}={p_pseed} local {p_rprev}={p_pseed} "
         f"for {p_ci}=1,{p_cblen} do "
         f"local {p_newstate}=({p_rstate}*1103515245+12345)%256 "
-        f"local {p_mask}=bit32.bxor({p_newstate},({p_rprev}*31)%256)%256 "
-        f"local {p_rawc}=bit32.bxor({p_d}[{p_i}+{p_ci}-1],{p_mask})%256 "
+        f"local {p_mask}={bxor_e(p_newstate, f'({p_rprev}*31)%256')}%256 "
+        f"local {p_rawc}={bxor_e(f'{p_d}[{p_i}+{p_ci}-1]', p_mask)}%256 "
         f"{p_cbb}[{p_ci}]={p_rawc} "
         f"{p_rstate}={p_newstate} {p_rprev}={p_mask} "
         f"end "
@@ -2721,13 +2874,13 @@ def bytecode_to_lua_mltn_only(bytecode, rng, gen_name_fn, opmap=None, data_expr=
         f"elseif {p_op2}=={O('MOD')} then {p_setreg}({p_a2},{p_getreg}({p_b2})%{p_getreg}({p_c2})) "
         f"elseif {p_op2}=={O('POW')} then {p_setreg}({p_a2},{p_getreg}({p_b2})^{p_getreg}({p_c2})) "
         f"elseif {p_op2}=={O('CONCAT')} then {p_setreg}({p_a2},{p_getreg}({p_b2})..{p_getreg}({p_c2})) "
-        f"elseif {p_op2}=={O('IDIV')} then {p_setreg}({p_a2},math.floor({p_getreg}({p_b2})/{p_getreg}({p_c2}))) "
-        f"elseif {p_op2}=={O('BAND')} then {p_setreg}({p_a2},bit32.band({p_getreg}({p_b2}),{p_getreg}({p_c2}))) "
-        f"elseif {p_op2}=={O('BOR')} then {p_setreg}({p_a2},bit32.bor({p_getreg}({p_b2}),{p_getreg}({p_c2}))) "
-        f"elseif {p_op2}=={O('BXOR')} then {p_setreg}({p_a2},bit32.bxor({p_getreg}({p_b2}),{p_getreg}({p_c2}))) "
-        f"elseif {p_op2}=={O('BNOT')} then {p_setreg}({p_a2},bit32.bnot({p_getreg}({p_b2}))) "
-        f"elseif {p_op2}=={O('SHL')} then {p_setreg}({p_a2},bit32.lshift({p_getreg}({p_b2}),{p_getreg}({p_c2}))) "
-        f"elseif {p_op2}=={O('SHR')} then {p_setreg}({p_a2},bit32.rshift({p_getreg}({p_b2}),{p_getreg}({p_c2}))) "
+        f"elseif {p_op2}=={O('IDIV')} then {p_setreg}({p_a2},{idiv_e(f'{p_getreg}({p_b2})', f'{p_getreg}({p_c2})')}) "
+        f"elseif {p_op2}=={O('BAND')} then {p_setreg}({p_a2},{band_e(f'{p_getreg}({p_b2})', f'{p_getreg}({p_c2})')}) "
+        f"elseif {p_op2}=={O('BOR')} then {p_setreg}({p_a2},{bor_e(f'{p_getreg}({p_b2})', f'{p_getreg}({p_c2})')}) "
+        f"elseif {p_op2}=={O('BXOR')} then {p_setreg}({p_a2},{bxor_e(f'{p_getreg}({p_b2})', f'{p_getreg}({p_c2})')}) "
+        f"elseif {p_op2}=={O('BNOT')} then {p_setreg}({p_a2},{bnot_e(f'{p_getreg}({p_b2})')}) "
+        f"elseif {p_op2}=={O('SHL')} then {p_setreg}({p_a2},{lshift_e(f'{p_getreg}({p_b2})', f'{p_getreg}({p_c2})')}) "
+        f"elseif {p_op2}=={O('SHR')} then {p_setreg}({p_a2},{rshift_e(f'{p_getreg}({p_b2})', f'{p_getreg}({p_c2})')}) "
         f"elseif {p_op2}=={O('UNM')} then {p_setreg}({p_a2},-{p_getreg}({p_b2})) "
         f"elseif {p_op2}=={O('LEN')} then {p_setreg}({p_a2},#{p_getreg}({p_b2})) "
         f"elseif {p_op2}=={O('NOT')} then {p_setreg}({p_a2},not {p_getreg}({p_b2})) "
@@ -2754,7 +2907,7 @@ def bytecode_to_lua_mltn_only(bytecode, rng, gen_name_fn, opmap=None, data_expr=
         f"{p_ncallargs}={p_kk}-1 "
         f"else for {p_jj}=1,{p_nargs2} do {p_callargs}[{p_jj}]={p_getreg}({p_a2}+{p_jj}) end {p_ncallargs}={p_nargs2} end "
         f"if type({p_fnv})=='function' then "
-        f"local {p_res}=table.pack({p_fnv}(table.unpack({p_callargs},1,{p_ncallargs}))) "
+        f"local {p_res}={pack_v}({p_fnv}({unpack_v}({p_callargs},1,{p_ncallargs}))) "
         f"if {p_nret}==255 then "
         f"for {p_jj}=1,{p_res}.n do {p_setreg}({p_a2}+{p_jj}-1,{p_res}[{p_jj}]) end "
         f"{p_setreg}({p_a2}+{p_res}.n,nil) "
@@ -2773,7 +2926,7 @@ def bytecode_to_lua_mltn_only(bytecode, rng, gen_name_fn, opmap=None, data_expr=
         f"{p_ncallargs}={p_kk}-1 "
         f"else for {p_jj}=1,{p_nargs2} do {p_callargs}[{p_jj}+1]={p_getreg}({p_a2}+{p_jj}) end {p_ncallargs}=1+{p_nargs2} end "
         f"if type({p_mfn})=='function' then "
-        f"local {p_res}=table.pack({p_mfn}(table.unpack({p_callargs},1,{p_ncallargs}))) "
+        f"local {p_res}={pack_v}({p_mfn}({unpack_v}({p_callargs},1,{p_ncallargs}))) "
         f"if {p_multi} then "
         f"for {p_jj}=1,{p_res}.n do {p_setreg}({p_a2}+{p_jj}-1,{p_res}[{p_jj}]) end "
         f"{p_setreg}({p_a2}+{p_res}.n,nil) "
@@ -2788,10 +2941,10 @@ def bytecode_to_lua_mltn_only(bytecode, rng, gen_name_fn, opmap=None, data_expr=
         f"local {p_res}={{}} local {p_jj}=0 "
         f"while {p_rbb}+{p_jj}<{p_vtop} do {p_res}[{p_jj}+1]={p_getreg}({p_rbb}+{p_jj}) {p_jj}={p_jj}+1 end "
         f"for {p_jj}=0,#{p_vr} do {p_vr}[{p_jj}]=nil end "
-        f"return table.unpack({p_res}) "
+        f"return {unpack_v}({p_res}) "
         f"else local {p_res}={{}} for {p_jj}=0,{p_nret}-1 do {p_res}[{p_jj}+1]={p_getreg}({p_rbb}+{p_jj}) end "
         f"for {p_jj}=0,#{p_vr} do {p_vr}[{p_jj}]=nil end "
-        f"return table.unpack({p_res}) end "
+        f"return {unpack_v}({p_res}) end "
         f"elseif {p_op2}=={O('RETURN_NONE')} then for {p_jj}=0,#{p_vr} do {p_vr}[{p_jj}]=nil end return "
         f"elseif {p_op2}=={O('VARARG')} then "
         f"local {p_nret}={p_b2} "
@@ -2818,7 +2971,7 @@ def bytecode_to_lua_mltn_only(bytecode, rng, gen_name_fn, opmap=None, data_expr=
         f"if ({p_st}>0 and {p_iv}<={p_lim}) or ({p_st}<0 and {p_iv}>={p_lim}) then {p_setreg}({p_a2}+3,{p_iv}) {p_pc}={p_b2}+1 end "
         f"elseif {p_op2}=={O('TFOR_CALL')} then "
         f"local {p_itf}={p_getreg}({p_a2}) local {p_stt}={p_getreg}({p_a2}+1) local {p_ctl}={p_getreg}({p_a2}+2) "
-        f"local {p_res}=table.pack({p_itf}({p_stt},{p_ctl})) "
+        f"local {p_res}={pack_v}({p_itf}({p_stt},{p_ctl})) "
         f"for {p_jj}=1,{p_c2} do {p_setreg}({p_a2}+2+{p_jj},{p_res}[{p_jj}]) end "
         f"{p_setreg}({p_a2}+2,{p_res}[1]) "
         f"elseif {p_op2}=={O('TFOR_LOOP')} then "
@@ -2839,8 +2992,19 @@ def bytecode_to_lua_mltn_only(bytecode, rng, gen_name_fn, opmap=None, data_expr=
         f"return {fn_v}(...) "
     )
     return lua
-def bytecode_to_lua_legacy(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, detect_var=None, key_expr=None):
+def bytecode_to_lua_legacy(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, detect_var=None, key_expr=None, target="luau"):
     N = gen_name_fn
+    prims = _get_vm_dialect_prims(target, N)
+    prologue = prims["prologue"]
+    unpack_v = prims["unpack"]
+    pack_v = prims["pack"]
+    band_e = prims["band"]
+    bor_e = prims["bor"]
+    bxor_e = prims["bxor"]
+    bnot_e = prims["bnot"]
+    lshift_e = prims["lshift"]
+    rshift_e = prims["rshift"]
+    idiv_e = prims["idiv"]
     data_v    = N(); u16_v     = N(); u16s_v    = N(); ldc_v     = N()
     ldi_v     = N(); ldp_v     = N(); consts_v  = N()
     protos_v  = N(); env_v     = N(); mk_v      = N(); fn_v      = N()
@@ -2943,6 +3107,7 @@ def bytecode_to_lua_legacy(bytecode, rng, gen_name_fn, opmap=None, data_expr=Non
     dexpr = data_expr if data_expr is not None else "{}"
 
     lua = (
+        f"{prologue}"
         f"local {data_v}={dexpr} "
         f"local function {u16_v}({p_d},{p_i}) return {p_d}[{p_i}]+({p_d}[{p_i}+1]*256) end "
         f"local function {u16s_v}({p_d},{p_i}) local {p_v}={p_d}[{p_i}]+({p_d}[{p_i}+1]*256) if {p_v}>=32768 then {p_v}={p_v}-65536 end return {p_v} end "
@@ -2950,8 +3115,8 @@ def bytecode_to_lua_legacy(bytecode, rng, gen_name_fn, opmap=None, data_expr=Non
         f"local {p_res}=0 local {p_st}=0 "
         f"while true do "
         f"local {p_x}={p_d}[{p_i}] {p_i}={p_i}+1 "
-        f"{p_res}={p_res}+bit32.lshift(bit32.band({p_x},0x7F),{p_st}) "
-        f"if bit32.band({p_x},0x80)==0 then break end "
+        f"{p_res}={p_res}+{lshift_e(band_e(p_x, 127), p_st)} "
+        f"if {band_e(p_x, 128)}==0 then break end "
         f"{p_st}={p_st}+7 "
         f"end "
         f"return {p_res},{p_i} end "
@@ -2962,11 +3127,11 @@ def bytecode_to_lua_legacy(bytecode, rng, gen_name_fn, opmap=None, data_expr=Non
         f"while true do "
         f"local {p_eraw}={p_d}[{p_i}] {p_i}={p_i}+1 "
         f"local {p_enewstate}=({p_estate}*1103515245+12345)%256 "
-        f"local {p_emask}=bit32.bxor({p_enewstate},({p_eprev}*31)%256)%256 "
-        f"local {p_eb}=bit32.bxor({p_eraw},{p_emask})%256 "
+        f"local {p_emask}={bxor_e(p_enewstate, f'({p_eprev}*31)%256')}%256 "
+        f"local {p_eb}={bxor_e(p_eraw, p_emask)}%256 "
         f"{p_estate}={p_enewstate} {p_eprev}={p_emask} "
-        f"{p_eres}={p_eres}+bit32.lshift(bit32.band({p_eb},0x7F),{p_esh}) "
-        f"if bit32.band({p_eb},0x80)==0 then break end "
+        f"{p_eres}={p_eres}+{lshift_e(band_e(p_eb, 127), p_esh)} "
+        f"if {band_e(p_eb, 128)}==0 then break end "
         f"{p_esh}={p_esh}+7 "
         f"end "
         f"return {p_eres},{p_i} end "
@@ -2996,8 +3161,8 @@ def bytecode_to_lua_legacy(bytecode, rng, gen_name_fn, opmap=None, data_expr=Non
         f"for {p_j}=0,{p_ln}-1 do "
         f"local {p_raw}={p_d}[{p_i}+{p_j}] "
         f"local {p_newstate}=({p_rst}*1103515245+12345)%256 "
-        f"local {p_mask}=bit32.bxor({p_newstate},({p_rpv}*31)%256)%256 "
-        f"local {p_rv}=bit32.bxor({p_raw},{p_mask})%256 "
+        f"local {p_mask}={bxor_e(p_newstate, f'({p_rpv}*31)%256')}%256 "
+        f"local {p_rv}={bxor_e(p_raw, p_mask)}%256 "
         f"{p_out}[{p_j}+1]={p_rv} "
         f"{p_rst}={p_newstate} {p_rpv}={p_rv} "
         f"end "
@@ -3034,8 +3199,8 @@ def bytecode_to_lua_legacy(bytecode, rng, gen_name_fn, opmap=None, data_expr=Non
         f"for {p_ii}=1,{p_nins} do "
         f"local {p_raw}={p_d}[{p_i}] {p_i}={p_i}+1 "
         f"local {p_newstate}=({p_rstate}*1103515245+12345)%256 "
-        f"local {p_mask}=bit32.bxor({p_newstate},({p_rprev}*31)%256)%256 "
-        f"local {p_op}=bit32.bxor({p_raw},{p_mask})%256 "
+        f"local {p_mask}={bxor_e(p_newstate, f'({p_rprev}*31)%256')}%256 "
+        f"local {p_op}={bxor_e(p_raw, p_mask)}%256 "
         f"{p_rstate}={p_newstate} {p_rprev}={p_op} "
         f"local {p_iv},{p_ni}={ldi_v}({p_d},{p_i},{p_op}) "
         f"{p_ins}[{p_ii}]={p_iv} {p_i}={p_ni} "
@@ -3108,13 +3273,13 @@ def bytecode_to_lua_legacy(bytecode, rng, gen_name_fn, opmap=None, data_expr=Non
         f"elseif {p_op2}=={O('MOD')} then {p_setreg}({p_a2},{p_getreg}({p_b2})%{p_getreg}({p_c2})) "
         f"elseif {p_op2}=={O('POW')} then {p_setreg}({p_a2},{p_getreg}({p_b2})^{p_getreg}({p_c2})) "
         f"elseif {p_op2}=={O('CONCAT')} then {p_setreg}({p_a2},{p_getreg}({p_b2})..{p_getreg}({p_c2})) "
-        f"elseif {p_op2}=={O('IDIV')} then {p_setreg}({p_a2},math.floor({p_getreg}({p_b2})/{p_getreg}({p_c2}))) "
-        f"elseif {p_op2}=={O('BAND')} then {p_setreg}({p_a2},bit32.band({p_getreg}({p_b2}),{p_getreg}({p_c2}))) "
-        f"elseif {p_op2}=={O('BOR')} then {p_setreg}({p_a2},bit32.bor({p_getreg}({p_b2}),{p_getreg}({p_c2}))) "
-        f"elseif {p_op2}=={O('BXOR')} then {p_setreg}({p_a2},bit32.bxor({p_getreg}({p_b2}),{p_getreg}({p_c2}))) "
-        f"elseif {p_op2}=={O('BNOT')} then {p_setreg}({p_a2},bit32.bnot({p_getreg}({p_b2}))) "
-        f"elseif {p_op2}=={O('SHL')} then {p_setreg}({p_a2},bit32.lshift({p_getreg}({p_b2}),{p_getreg}({p_c2}))) "
-        f"elseif {p_op2}=={O('SHR')} then {p_setreg}({p_a2},bit32.rshift({p_getreg}({p_b2}),{p_getreg}({p_c2}))) "
+        f"elseif {p_op2}=={O('IDIV')} then {p_setreg}({p_a2},{idiv_e(f'{p_getreg}({p_b2})', f'{p_getreg}({p_c2})')}) "
+        f"elseif {p_op2}=={O('BAND')} then {p_setreg}({p_a2},{band_e(f'{p_getreg}({p_b2})', f'{p_getreg}({p_c2})')}) "
+        f"elseif {p_op2}=={O('BOR')} then {p_setreg}({p_a2},{bor_e(f'{p_getreg}({p_b2})', f'{p_getreg}({p_c2})')}) "
+        f"elseif {p_op2}=={O('BXOR')} then {p_setreg}({p_a2},{bxor_e(f'{p_getreg}({p_b2})', f'{p_getreg}({p_c2})')}) "
+        f"elseif {p_op2}=={O('BNOT')} then {p_setreg}({p_a2},{bnot_e(f'{p_getreg}({p_b2})')}) "
+        f"elseif {p_op2}=={O('SHL')} then {p_setreg}({p_a2},{lshift_e(f'{p_getreg}({p_b2})', f'{p_getreg}({p_c2})')}) "
+        f"elseif {p_op2}=={O('SHR')} then {p_setreg}({p_a2},{rshift_e(f'{p_getreg}({p_b2})', f'{p_getreg}({p_c2})')}) "
         f"elseif {p_op2}=={O('UNM')} then {p_setreg}({p_a2},-{p_getreg}({p_b2})) "
         f"elseif {p_op2}=={O('LEN')} then {p_setreg}({p_a2},#{p_getreg}({p_b2})) "
         f"elseif {p_op2}=={O('NOT')} then {p_setreg}({p_a2},not {p_getreg}({p_b2})) "
@@ -3141,7 +3306,7 @@ def bytecode_to_lua_legacy(bytecode, rng, gen_name_fn, opmap=None, data_expr=Non
         f"{p_ncallargs}={p_kk}-1 "
         f"else for {p_jj}=1,{p_nargs2} do {p_callargs}[{p_jj}]={p_getreg}({p_a2}+{p_jj}) end {p_ncallargs}={p_nargs2} end "
         f"if type({p_fnv})=='function' then "
-        f"local {p_res}=table.pack({p_fnv}(table.unpack({p_callargs},1,{p_ncallargs}))) "
+        f"local {p_res}={pack_v}({p_fnv}({unpack_v}({p_callargs},1,{p_ncallargs}))) "
         f"if {p_nret}==255 then "
         f"for {p_jj}=1,{p_res}.n do {p_setreg}({p_a2}+{p_jj}-1,{p_res}[{p_jj}]) end "
         f"{p_setreg}({p_a2}+{p_res}.n,nil) "
@@ -3160,7 +3325,7 @@ def bytecode_to_lua_legacy(bytecode, rng, gen_name_fn, opmap=None, data_expr=Non
         f"{p_ncallargs}={p_kk}-1 "
         f"else for {p_jj}=1,{p_nargs2} do {p_callargs}[{p_jj}+1]={p_getreg}({p_a2}+{p_jj}) end {p_ncallargs}=1+{p_nargs2} end "
         f"if type({p_mfn})=='function' then "
-        f"local {p_res}=table.pack({p_mfn}(table.unpack({p_callargs},1,{p_ncallargs}))) "
+        f"local {p_res}={pack_v}({p_mfn}({unpack_v}({p_callargs},1,{p_ncallargs}))) "
         f"if {p_multi} then "
         f"for {p_jj}=1,{p_res}.n do {p_setreg}({p_a2}+{p_jj}-1,{p_res}[{p_jj}]) end "
         f"{p_setreg}({p_a2}+{p_res}.n,nil) "
@@ -3175,10 +3340,10 @@ def bytecode_to_lua_legacy(bytecode, rng, gen_name_fn, opmap=None, data_expr=Non
         f"local {p_res}={{}} local {p_jj}=0 "
         f"while {p_rbb}+{p_jj}<{p_vtop} do {p_res}[{p_jj}+1]={p_getreg}({p_rbb}+{p_jj}) {p_jj}={p_jj}+1 end "
         f"for {p_jj}=0,#{p_vr} do {p_vr}[{p_jj}]=nil end "
-        f"return table.unpack({p_res}) "
+        f"return {unpack_v}({p_res}) "
         f"else local {p_res}={{}} for {p_jj}=0,{p_nret}-1 do {p_res}[{p_jj}+1]={p_getreg}({p_rbb}+{p_jj}) end "
         f"for {p_jj}=0,#{p_vr} do {p_vr}[{p_jj}]=nil end "
-        f"return table.unpack({p_res}) end "
+        f"return {unpack_v}({p_res}) end "
         f"elseif {p_op2}=={O('RETURN_NONE')} then for {p_jj}=0,#{p_vr} do {p_vr}[{p_jj}]=nil end return "
         f"elseif {p_op2}=={O('VARARG')} then "
         f"local {p_nret}={p_b2} "
@@ -3205,7 +3370,7 @@ def bytecode_to_lua_legacy(bytecode, rng, gen_name_fn, opmap=None, data_expr=Non
         f"if ({p_st}>0 and {p_iv}<={p_lim}) or ({p_st}<0 and {p_iv}>={p_lim}) then {p_setreg}({p_a2}+3,{p_iv}) {p_pc}={p_b2}+1 end "
         f"elseif {p_op2}=={O('TFOR_CALL')} then "
         f"local {p_itf}={p_getreg}({p_a2}) local {p_stt}={p_getreg}({p_a2}+1) local {p_ctl}={p_getreg}({p_a2}+2) "
-        f"local {p_res}=table.pack({p_itf}({p_stt},{p_ctl})) "
+        f"local {p_res}={pack_v}({p_itf}({p_stt},{p_ctl})) "
         f"for {p_jj}=1,{p_c2} do {p_setreg}({p_a2}+2+{p_jj},{p_res}[{p_jj}]) end "
         f"{p_setreg}({p_a2}+2,{p_res}[1]) "
         f"elseif {p_op2}=={O('TFOR_LOOP')} then "

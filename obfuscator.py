@@ -6,6 +6,7 @@ from codegen import (
     build_runtime_header, build_vm_dispatch,
     build_anti_tamper, build_runtime_footer,
     deflate_tables_blob, build_luajit_polyfill, build_lua51_polyfill,
+    build_lua52_polyfill, build_lua53_polyfill, build_lua54_polyfill, build_lua55_polyfill,
 )
 from vm import try_compile_vm, bytecode_to_lua, bytecode_to_lua_legacy
 from string_fold import fold_strings
@@ -136,10 +137,11 @@ class Obfuscator:
             f"local {env_var}=setmetatable({{}},{{__index=(getfenv and getfenv(0)) or _ENV or {{}}}}) "
             f"do local {kn_var}={self.k_call(self.var_k, ret_type=1)} if type({kn_var})=='string' then {env_var}[{kn_var}]={var_k} end end "
             f"local {wrap_var}='return (function(...)' .. {buf_var} .. ' end)(...)' "
-            f"local {fn_var},{er_var}={ls_var}({wrap_var}) "
+            f"local {fn_var},{er_var} "
+            f"if setfenv then {fn_var},{er_var}={ls_var}({wrap_var}) if {fn_var} then setfenv({fn_var},{env_var}) end "
+            f"else {fn_var},{er_var}={ls_var}({wrap_var},nil,'t',{env_var}) end "
             f"{buf_var}=nil {wrap_var}=nil "
             f"if not {fn_var} then error({er_var} or '',0) end "
-            f"if setfenv then setfenv({fn_var},{env_var}) end "
             f"local {pk_var}={{pcall({fn_var})}} "
             f"local {ok_var}={pk_var}[1] "
             f"if not {ok_var} then error({pk_var}[2] or '',0) end "
@@ -168,9 +170,12 @@ class Obfuscator:
                 f"do local {kn_v}={self.k_call(real_name, ret_type=1)} "
                 f"{env_v}[{kn_v}]={real_name} end "
             )
-        lines.append(f"local {fn_v},{er_v}={ls_v}({self.k_call(lua_source, ret_type=1)}) ")
-        lines.append(f"if not {fn_v} then error({er_v} or '',0) end ")
-        lines.append(f"if setfenv then setfenv({fn_v},{env_v}) end ")
+        lines.append(
+            f"local {fn_v},{er_v} "
+            f"if setfenv then {fn_v},{er_v}={ls_v}({self.k_call(lua_source, ret_type=1)}) if {fn_v} then setfenv({fn_v},{env_v}) end "
+            f"else {fn_v},{er_v}={ls_v}({self.k_call(lua_source, ret_type=1)},nil,'t',{env_v}) end "
+            f"if not {fn_v} then error({er_v} or '',0) end "
+        )
         return "".join(lines), fn_v
 
     def build_vm_data_expr(self, bytecode, prims):
@@ -204,7 +209,7 @@ class Obfuscator:
         if force_fold:
             use_vm = False
         else:
-            bytecode_result = try_compile_vm(source, rng=rng, lua51=(at_target == "lua51"))
+            bytecode_result = try_compile_vm(source, rng=rng, target=at_target)
             if bytecode_result is not None:
                 bytecode, opmap, bc_format = bytecode_result
                 use_vm = True
@@ -218,12 +223,21 @@ class Obfuscator:
             self.var_k, self.var_Q, self.var_G,
             self.var_B, self.var_f, self.var_V,
             self.wm_var,
+            target=at_target,
         )
 
         if at_target == "luajit":
             header = build_luajit_polyfill() + header
         elif at_target == "lua51":
             header = build_lua51_polyfill() + header
+        elif at_target == "lua52":
+            header = build_lua52_polyfill() + header
+        elif at_target == "lua53":
+            header = build_lua53_polyfill() + header
+        elif at_target == "lua54":
+            header = build_lua54_polyfill() + header
+        elif at_target == "lua55":
+            header = build_lua55_polyfill() + header
 
         it = prims["inflate_tables"]
         tables_expr = self.k_call_uncompressed(deflate_tables_blob())
@@ -258,7 +272,7 @@ class Obfuscator:
                 f"if type({chk_k_v})~='number' or type({chk_fn_v})~='function' then {detect_var}=true error('',0) end "
                 f"{chk_cnt_v}={chk_cnt_v}+1 "
                 f"{chk_sum_v}=({chk_sum_v}+{chk_k_v})%4294967296 "
-                f"{chk_xor_v}=bit32.bxor({chk_xor_v},{chk_k_v}) "
+                f"{chk_xor_v}={prims['xorb']}({chk_xor_v},{chk_k_v}) "
                 f"end "
                 f"if {chk_cnt_v}~={expected_count} or {chk_sum_v}~={expected_sum} or {chk_xor_v}~={expected_xor} or {self.var_V}~={snap_v} then "
                 f"{detect_var}=true error('',0) "
@@ -306,7 +320,7 @@ class Obfuscator:
                 junk_blocks.append(
                     f"elseif {sm_var}=={sid} then "
                     f"local {v_a}={n1} "
-                    f"if (bit32.band({v_a},1)*2+bit32.band(bit32.rshift({v_a},1),1)>3) then "
+                    f"if ({v_a}%2*2+math.floor({v_a}/2)%2>3) then "
                     f"local {v_t}={{}} {v_t}[{n1}]={n2} "
                     f"{sm_var}={sid4} else {sm_var}={rng.randint(1000000, 16000000)} end"
                 )
@@ -364,7 +378,7 @@ class Obfuscator:
         if use_vm:
             data_expr = self.build_vm_data_expr(bytecode, prims)
             encode_fn = bytecode_to_lua if bc_format == "mltn" else bytecode_to_lua_legacy
-            payload = encode_fn(bytecode, rng, gen_name, opmap, data_expr=data_expr, detect_var=detect_var, key_expr=prims.get("key"))
+            payload = encode_fn(bytecode, rng, gen_name, opmap, data_expr=data_expr, detect_var=detect_var, key_expr=prims.get("key"), target=at_target)
             vmres_v = gen_name()
             if hide_vm_source:
                 chunk_src = f"return (function(...) {payload} end)(...)"
@@ -408,7 +422,7 @@ class Obfuscator:
             f"elseif {sm_var}=={sid4} then "
             f'error({k}("{err_enc}",1,{s0e},{err_cid},{err_cid},{s2e},{s3e}),2) '
             f"end end "
-            f"return table.unpack({res_var},2) "
+            f"return {self.var_G}({res_var},2) "
         )
 
         footer = build_runtime_footer(self.var_Q, self.var_G)
@@ -418,13 +432,7 @@ class Obfuscator:
             "minimal": f"Minimal ({at_version.upper()}-{at_target.capitalize()})",
             "none": "Disabled",
         }.get(anti_tamper_level, "Full")
-        banner = (
-            "--[[\n"
-            "  Protected by Weak Obfuscator v2.3\n"
-            f"  Anti-Tamper: {at_label}\n"
-            "  https://github.com/Melodieshusband/Weak-Lua-Obfuscator\n"
-            "]]\n"
-        )
+        banner = ""
 
         if use_vm:
             mode = "VM (hidden source)" if hide_vm_source else "VM (no loadstring)"

@@ -66,16 +66,16 @@ RLE_MIN_RUN = 4
 RLE_MAX_RUN = 255
 
 def pick_repeat_marker(used_values):
-    used = set(used_values)
-    for v in range(256):
+    used = set(used_values) | set(range(68))
+    for v in range(255, -1, -1):
         if v not in used:
             return v
     raise ValueError("no free byte value available for RLE marker")
 
 def pick_two_markers(used_values):
-    used = set(used_values)
+    used = set(used_values) | set(range(68))
     found = []
-    for v in range(256):
+    for v in range(255, -1, -1):
         if v not in used:
             found.append(v)
             if len(found) == 2:

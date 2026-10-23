@@ -39,12 +39,10 @@ def unparse_expr(e):
         return '(' + unparse_expr(e['expr']) + ')'
     if t == 'Binop':
         op = e['op']
-        if op in ('and', 'or'):
-            return unparse_expr(e['left']) + ' ' + op + ' ' + unparse_expr(e['right'])
-        return unparse_expr(e['left']) + op + unparse_expr(e['right'])
+        return unparse_expr(e['left']) + ' ' + op + ' ' + unparse_expr(e['right'])
     if t == 'Unop':
         op = e['op']
-        sp = ' ' if op == 'not' else ''
+        sp = ' ' if op in ('not', '-') else ''
         return op + sp + unparse_expr(e['operand'])
     if t == 'Index':
         if e['dot']:
@@ -115,6 +113,8 @@ def unparse_stmt(s):
         return 'break '
     if t == 'Continue':
         return 'continue '
+    if t == 'Goto':
+        return f"goto {s['name']} "
     if t == 'Label':
         return f"::{s['name']}:: "
     if t == 'Do':
