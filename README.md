@@ -9,7 +9,7 @@ A source-level obfuscator written in pure Python — custom bytecode VM, ChaCha2
 ![Python](https://img.shields.io/badge/Python-3.8%2B-3776AB?logo=python&logoColor=white)
 ![Dependencies](https://img.shields.io/badge/dependencies-none-success)
 ![License](https://img.shields.io/badge/license-MIT-blue)
-![Targets](https://img.shields.io/badge/targets-Lua%205.1--5.5%20%7C%20LuaJIT%20%7C%20Luau-success)
+![Targets](https://img.shields.io/badge/targets-Lua%205.1--5.5%20%7C%20LuaJIT%20%7C%20Luau%20%7C%20FiveM-success)
 
 [Quick Start](#-quick-start) •
 [Supported Dialects](#-supported-lua-dialects) •
@@ -17,6 +17,7 @@ A source-level obfuscator written in pure Python — custom bytecode VM, ChaCha2
 [Modes](#-modes) •
 [Anti-Tamper](#-anti-tamper) •
 [Compatibility](#-executor-compatibility) •
+[FiveM / RedM](#-fivem--redm-support-unverified) •
 [Structure](#-project-structure)
 
 </div>
@@ -79,7 +80,8 @@ python main.py <input.lua> [output.lua] [--vm | --fold] [anti-tamper flag]
 | `--lua53` | Target PUC-Rio Lua 5.3 |
 | `--lua54` | Target PUC-Rio Lua 5.4 |
 | `--lua55` | Target PUC-Rio Lua 5.5 |
-| `--target <name>` | Specify target directly by name (e.g. `--target lua54`) |
+| `--fivem` | Target FiveM/RedM (CfxLua, Lua 5.4 based) — **untested, see warning below** |
+| `--target <name>` | Specify target directly by name (e.g. `--target lua54`, `--target fivem`) |
 
 > [!NOTE]
 > `--vm` and `--fold` are mutually exclusive, and only one anti-tamper flag may be given at a time. Anti-tamper flags are independent of the mode flags.
@@ -98,6 +100,7 @@ Weak provides native, first-class support for every major Lua dialect. Code gene
 | **Lua 5.3** | `--lua53` | `--target lua53` | Native operators (`&`, `\|`, `~`, `<<`, `>>`, `//`) | 64-bit integer bitwise operators, `\u{...}` escapes |
 | **Lua 5.4** | `--lua54` | `--target lua54` | Native operators (`&`, `\|`, `~`, `<<`, `>>`, `//`) | `<const>` and `<close>` variable attributes, native integer division |
 | **Lua 5.5** | `--lua55` | `--target lua55` | Native operators (`&`, `\|`, `~`, `<<`, `>>`, `//`) | Modern Lua 5.5 grammar and standard library features |
+| **FiveM / RedM** ⚠️ | `--fivem` | `--target fivem` | Native operators (`&`, `\|`, `~`, `<<`, `>>`, `//`) | CfxLua compound assignment (`+=`, `-=`, `*=`, `/=`, `^=`, `&=`, `\|=`, `<<=`, `>>=`), `` `backtick` `` compile-time Jenkins/joaat hash literals, FiveM-specific anti-tamper (`IsDuplicityVersion`, `Citizen.CreateThread`, natives, `exports`) — **see [FiveM / RedM Support](#-fivem--redm-support-unverified) below before using this in production** |
 
 ### Native Architecture
 
@@ -240,6 +243,33 @@ Other executors are untested and may behave differently — some intentionally s
 4. Disable the offending check or adjust its logic for that executor
 
 Contributions and reports are welcome if you adapt the anti-tamper layer for other executors.
+
+## 🎮 FiveM / RedM Support (Unverified)
+
+> [!WARNING]
+> **`--fivem` was implemented purely against publicly available CfxLua/FiveM documentation and native references — it has never been run against a real FXServer or game client.** The author doesn't own a GTA V license and isn't willing to download 100+ GB just to test it. Treat this target as **experimental / unverified** until someone confirms it works.
+
+What `--fivem` does:
+
+- Parses and re-emits CfxLua-specific syntax: compound assignment operators (`+=`, `-=`, `*=`, `/=`, `^=`, `&=`, `\|=`, `<<=`, `>>=`) and `` `backtick` `` compile-time hash literals (joaat), matching the algorithm used by `GetHashKey`
+- Uses native Lua 5.4 operators for bitwise/integer-division code generation (no `bit32` emulation, since CfxLua doesn't need it)
+- Adds FiveM-specific anti-tamper checks: `_VERSION == 'Lua 5.4'`, presence and type of `IsDuplicityVersion`, `GetCurrentResourceName`, `GetInvokingResource`, `GetGameTimer`, `Citizen.CreateThread` / `Wait` / `Await` / `InvokeNative`, global `CreateThread` / `Wait` / `AddEventHandler` / `RegisterNetEvent` / `TriggerEvent`, and `exports`
+
+What's **not** implemented, even though CfxLua supports it — using any of these in your source will fail to parse under `--fivem`:
+
+- Safe navigation (`?.`)
+- `in`-unpacking (`local a, b, c in t`)
+- Set constructors (`{ .debug, level = 5 }`)
+- C-style comments (`//`, `/* */`)
+
+**Biggest unverified assumption:** that `_VERSION` actually evaluates to the literal string `"Lua 5.4"` inside CfxLua, and that `debug.getinfo(fn, 'S').short_src` returns `'[C]'` for native/engine functions the same way vanilla Lua does. If either assumption is wrong, the anti-tamper layer will self-kill every obfuscated FiveM script immediately on load. Both are testable on a bare FXServer (server-side only, no GTA V client needed) with something like:
+
+```lua
+print(_VERSION)
+print(debug.getinfo(print, 'S').short_src)
+```
+
+**If you run this on a real server, please open an issue (or PR) saying whether it worked or not** — false-positive anti-tamper kills, parse errors on real resource scripts, or anything else you hit. This is the one target in the project the author genuinely cannot self-verify, so real-world reports are the only way it gets fixed.
 
 ## 📁 Project Structure
 
