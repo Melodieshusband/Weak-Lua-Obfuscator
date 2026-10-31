@@ -310,6 +310,10 @@ class FuncProto:
                 return bytes([0])
             if isinstance(val, bool):
                 return bytes([1, 1 if val else 0])
+            if isinstance(val, int) and -128 <= val <= 127:
+                return bytes([5, val & 0xFF])
+            if isinstance(val, int):
+                return bytes([8]) + mltn.write_uvarint(mltn.zigzag_encode(val))
             if isinstance(val, (int, float)):
                 return bytes([2]) + struct.pack('<d', float(val))
             if isinstance(val, str):
@@ -549,6 +553,8 @@ class Compiler:
         op_map = {
             '+': OP_ADD, '-': OP_SUB, '*': OP_MUL, '/': OP_DIV,
             '//': OP_IDIV, '%': OP_MOD, '^': OP_POW, '..': OP_CONCAT,
+            '&': OP_BAND, '|': OP_BOR, '~': OP_BXOR,
+            '<<': OP_SHL, '>>': OP_SHR,
         }
         self.emit(op_map[op], dst, left_r, right_r)
 
@@ -1195,10 +1201,23 @@ KEYWORDS = {
     'until','while',
 }
 def tokenize(src):
+    from fivem_hash import joaat
     tokens = []
     i = 0
     n = len(src)
     while i < n:
+        if src[i] == '`':
+            j = i + 1
+            while j < n and src[j] != '`':
+                if src[j] in ('\n', '\r'):
+                    raise SyntaxError("unfinished hash literal")
+                j += 1
+            if j >= n:
+                raise SyntaxError("unterminated hash literal")
+            content = src[i+1:j]
+            tokens.append(('NUMBER', str(joaat(content))))
+            i = j + 1
+            continue
         if src[i] == '-' and i+1 < n and src[i+1] == '-':
             if i+3 < n and src[i+2] == '[' and src[i+3] == '[':
                 i += 4
@@ -1298,13 +1317,13 @@ def tokenize(src):
             tokens.append(('KW' if word in KEYWORDS else 'NAME', word))
             continue
         three = src[i:i+3]
-        if three in ('...', '//=', '..='):
+        if three in ('...', '//=', '..=', '<<=', '>>='):
             tokens.append(('OP', three))
             i += 3
             continue
         two = src[i:i+2]
         if two in ('==','~=','<=','>=','..','//','<<','>>',
-                    '+=','-=','*=','/=','%=','^='):
+                    '+=','-=','*=','/=','%=','^=','&=','|='):
             tokens.append(('OP', two))
             i += 2
             continue
@@ -1562,6 +1581,7 @@ class Parser:
     COMPOUND_OPS = {
         '+=': '+', '-=': '-', '*=': '*', '/=': '/',
         '//=': '//', '%=': '%', '^=': '^', '..=': '..',
+        '&=': '&', '|=': '|', '<<=': '<<', '>>=': '>>',
     }
 
     def parse_expr_stmt(self):
@@ -1851,7 +1871,7 @@ def _patch_global_ops(opmap):
 
 def _get_vm_dialect_prims(target, gen_name_fn):
     N = gen_name_fn
-    is_native_ops = target in ("lua53", "lua54", "lua55")
+    is_native_ops = target in ("lua53", "lua54", "lua55", "fivem")
     is_luajit = (target == "luajit")
     is_lua51 = (target == "lua51")
 
@@ -2008,6 +2028,7 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
     euv_v = N()
     p_eseed = N(); p_estate = N(); p_eprev = N(); p_eres = N(); p_esh = N()
     p_eraw = N(); p_enewstate = N(); p_emask = N(); p_eb = N()
+    p_zz = N(); p_zsh = N(); p_zb = N()
 
     AB2  = f"{p_a},{p_i}={uv_v}({p_d},{p_i}) {p_b},{p_i}={uv_v}({p_d},{p_i}) "
     AB2C = f"{p_a},{p_i}={uv_v}({p_d},{p_i}) {p_b},{p_i}={uv_v}({p_d},{p_i}) {p_cc},{p_i}={uv_v}({p_d},{p_i}) "
@@ -2130,6 +2151,10 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
         f"local {p_smv}={p_d}[{p_i}] {p_i}={p_i}+1 "
         f"if {p_smv}>=128 then {p_smv}={p_smv}-256 end "
         f"return {p_smv},{p_i} "
+        f"end "
+        f"if {p_t}==8 then "
+        f"local {p_zz},{p_i}={uv_v}({p_d},{p_i}) "
+        f"if {p_zz}%2==0 then return {idiv_e(p_zz, '2')},{p_i} else return -({idiv_e(f'({p_zz}+1)', '2')}),{p_i} end "
         f"end "
         f"if {p_t}==7 then "
         f"local {p_strref},{p_i}={uv_v}({p_d},{p_i}) "
@@ -2563,6 +2588,7 @@ def bytecode_to_lua_mltn_only(bytecode, rng, gen_name_fn, opmap=None, data_expr=
     euv_v = N()
     p_eseed = N(); p_estate = N(); p_eprev = N(); p_eres = N(); p_esh = N()
     p_eraw = N(); p_enewstate = N(); p_emask = N(); p_eb = N()
+    p_zz = N(); p_zsh = N(); p_zb = N()
 
     AB2  = f"{p_a},{p_i}={uv_v}({p_d},{p_i}) {p_b},{p_i}={uv_v}({p_d},{p_i}) "
     AB2C = f"{p_a},{p_i}={uv_v}({p_d},{p_i}) {p_b},{p_i}={uv_v}({p_d},{p_i}) {p_cc},{p_i}={uv_v}({p_d},{p_i}) "
@@ -2685,6 +2711,10 @@ def bytecode_to_lua_mltn_only(bytecode, rng, gen_name_fn, opmap=None, data_expr=
         f"local {p_smv}={p_d}[{p_i}] {p_i}={p_i}+1 "
         f"if {p_smv}>=128 then {p_smv}={p_smv}-256 end "
         f"return {p_smv},{p_i} "
+        f"end "
+        f"if {p_t}==8 then "
+        f"local {p_zz},{p_i}={uv_v}({p_d},{p_i}) "
+        f"if {p_zz}%2==0 then return {idiv_e(p_zz, '2')},{p_i} else return -({idiv_e(f'({p_zz}+1)', '2')}),{p_i} end "
         f"end "
         f"if {p_t}==7 then "
         f"local {p_strref},{p_i}={uv_v}({p_d},{p_i}) "
@@ -3036,6 +3066,7 @@ def bytecode_to_lua_legacy(bytecode, rng, gen_name_fn, opmap=None, data_expr=Non
     p_tj1 = N(); p_tj2 = N(); p_tj3 = N()
     p_cblen = N(); p_cbb = N(); p_cbi = N(); p_pseed2 = N(); p_rstate2 = N(); p_rprev2 = N()
     p_smv = N()
+    p_zz = N(); p_zsh = N(); p_zb = N()
     c_raw_v = N()
     p_strref = N(); p_strpool = N(); p_poolseed = N(); p_poollen = N(); p_poolraw = N()
     p_poolcount = N(); p_poolidx = N(); p_poolslen = N(); p_poolstr = N(); p_poolst = N(); p_poolpv = N()
@@ -3152,6 +3183,21 @@ def bytecode_to_lua_legacy(bytecode, rng, gen_name_fn, opmap=None, data_expr=Non
         f"if {p_exp}==0 then {p_n}={p_mant}*(2^(-1074)) "
         f"else {p_n}=(1+{p_mant}*(2^(-52)))*(2^({p_exp}-1023)) end "
         f"return ({p_sign}==1 and -{p_n} or {p_n}),{p_i} "
+        f"end "
+        f"if {p_t}==5 then "
+        f"local {p_smv}={p_d}[{p_i}] {p_i}={p_i}+1 "
+        f"if {p_smv}>=128 then {p_smv}={p_smv}-256 end "
+        f"return {p_smv},{p_i} "
+        f"end "
+        f"if {p_t}==8 then "
+        f"local {p_zz}=0 local {p_zsh}=0 "
+        f"while true do "
+        f"local {p_zb}={p_d}[{p_i}] {p_i}={p_i}+1 "
+        f"{p_zz}={bor_e(p_zz, lshift_e(f'({p_zb}%128)', p_zsh))} "
+        f"if {p_zb}<128 then break end "
+        f"{p_zsh}={p_zsh}+7 "
+        f"end "
+        f"if {p_zz}%2==0 then return {idiv_e(p_zz, '2')},{p_i} else return -({idiv_e(f'({p_zz}+1)', '2')}),{p_i} end "
         f"end "
         f"local {p_ln}={u16_v}({p_d},{p_i}) {p_i}={p_i}+2 "
         f"local {p_s}='' for {p_j}=0,{p_ln}-1 do {p_s}={p_s}..string.char({p_d}[{p_i}+{p_j}]) end "

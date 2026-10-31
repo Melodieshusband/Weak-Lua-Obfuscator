@@ -45,7 +45,7 @@ def build_inflate_runtime(target="luau"):
     lshift_fn = gen_name()
     rshift_fn = gen_name()
 
-    if target in ("lua53", "lua54", "lua55"):
+    if target in ("lua53", "lua54", "lua55", "fivem"):
         header_defs = (
             f"local function {band_fn}(a,b) return a&b end "
             f"local function {bor_fn}(a,b) return a|b end "
@@ -306,7 +306,7 @@ def build_runtime_header(seeds, var_k, var_Q, var_G, var_B, var_f, var_V, wm_var
     drv_seed = key_rng.randint(0, MASK32)
     drv_mix  = key_rng.randint(0, MASK32) | 1
 
-    is_native_ops = target in ("lua53", "lua54", "lua55")
+    is_native_ops = target in ("lua53", "lua54", "lua55", "fivem")
     is_luajit = (target == "luajit")
     is_lua51 = (target == "lua51")
 
@@ -801,6 +801,9 @@ def build_lua54_polyfill():
     return ""
 
 def build_lua55_polyfill():
+    return ""
+
+def build_fivem_polyfill():
     return ""
 
 def build_vm_dispatch(rng):
@@ -1629,7 +1632,7 @@ def build_anti_tamper_v2(seeds, rng, var_k, encode_fn, detect_var=None, target="
         f"if typeof and ((typeof(1)~='number') or (typeof('')~='string') or (typeof({{}})~='table')) then {kill_v}() end ",
         (
         f"if ((15&1)~=1) or ((2|1)~=3) or ((5~5)~=0) or ((1<<3)~=8) or ((8>>3)~=1) or ((~0&4294967295)~=4294967295) or ((17//3)~=5) then {kill_v}() end "
-        if target in ("lua53", "lua54", "lua55")
+        if target in ("lua53", "lua54", "lua55", "fivem")
         else (
             f"if (bit.band(15,1)~=1) or (bit.bor(2,1)~=3) or (bit.bxor(5,5)~=0) or (bit.lshift(1,3)~=8) or (bit.rshift(8,3)~=1) or (bit.rol(1,1)~=2) or (bit.bnot(0)~=-1) then {kill_v}() end "
             if target == "luajit"
@@ -1718,6 +1721,40 @@ def build_anti_tamper_v2(seeds, rng, var_k, encode_fn, detect_var=None, target="
             f"do local {ev_v}=(getfenv and getfenv(0)) or _G or {{}} "
             f"if rawget({ev_v},'__DEBUG__') or rawget({ev_v},'__BREAKPOINT__') or rawget({ev_v},'__ATTACHED__') or rawget({ev_v},'MobDebug') or rawget({ev_v},'remdebug') or rawget({ev_v},'ldb') or rawget({ev_v},'BreakpointHook') then {kill_v}() end "
             f"end "
+        )
+    elif target == "fivem":
+        parts.append(
+            f"if _VERSION~='Lua 5.4' then {kill_v}() end "
+        )
+        parts.append(
+            f"if debug and debug.getinfo then "
+            f"do local {cf_v}=function() return 1 end local {s_v}=debug.getinfo({cf_v},'S').short_src local {l_v}=debug.getinfo({cf_v},'S').linedefined if {s_v}=='[C]' or {l_v}<1 then {kill_v}() end end "
+            f"local {cfns_v}={{type,pcall,xpcall,error,setmetatable,getmetatable,rawget,rawset,select,tonumber,tostring,pairs,ipairs,next,string.byte,string.char,string.sub,string.len,string.find,table.insert,table.remove,table.concat,math.floor,math.ceil,math.abs,coroutine.create,coroutine.resume,coroutine.yield,coroutine.status}} "
+            f"for _,{fn_v} in ipairs({cfns_v}) do if debug.getinfo({fn_v},'S').short_src~='[C]' then {kill_v}() end end "
+            f"if debug.getinfo(pcall).what~='C' or debug.getinfo(type).what~='C' or debug.getinfo(setmetatable).what~='C' then {kill_v}() end "
+            f"end "
+        )
+        parts.append(
+            f"do local {ev_v}=(getfenv and getfenv(0)) or _ENV or _G or {{}} "
+            f"if rawget({ev_v},'__DEBUG__') or rawget({ev_v},'__BREAKPOINT__') or rawget({ev_v},'__ATTACHED__') or rawget({ev_v},'MobDebug') or rawget({ev_v},'remdebug') or rawget({ev_v},'ldb') or rawget({ev_v},'BreakpointHook') then {kill_v}() end "
+            f"end "
+        )
+        dup_v = gen_name()
+        rn_v = gen_name()
+        gt_v = gen_name()
+        parts.append(
+            f"if type(IsDuplicityVersion)~='function' then {kill_v}() end "
+            f"do local {dup_v}=IsDuplicityVersion() if type({dup_v})~='boolean' then {kill_v}() end end "
+            f"if type(GetCurrentResourceName)~='function' then {kill_v}() end "
+            f"do local {rn_v}=GetCurrentResourceName() if type({rn_v})~='string' or #{rn_v}==0 then {kill_v}() end end "
+            f"if type(GetInvokingResource)~='function' then {kill_v}() end "
+            f"do pcall(GetInvokingResource) end "
+            f"if type(GetGameTimer)~='function' then {kill_v}() end "
+            f"do local {gt_v}=GetGameTimer() if type({gt_v})~='number' then {kill_v}() end end "
+            f"if type(Citizen)~='table' then {kill_v}() end "
+            f"if type(Citizen.CreateThread)~='function' or type(Citizen.Wait)~='function' or type(Citizen.Await)~='function' or type(Citizen.InvokeNative)~='function' then {kill_v}() end "
+            f"if type(CreateThread)~='function' or type(Wait)~='function' or type(AddEventHandler)~='function' or type(RegisterNetEvent)~='function' or type(TriggerEvent)~='function' then {kill_v}() end "
+            f"if type(exports)~='table' then {kill_v}() end "
         )
     elif target in ("lua52", "lua53", "lua54", "lua55"):
         ver_map = {"lua52": "Lua 5.2", "lua53": "Lua 5.3", "lua54": "Lua 5.4", "lua55": "Lua 5.5"}

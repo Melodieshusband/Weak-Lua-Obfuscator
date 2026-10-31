@@ -13,6 +13,13 @@ TYPE_FUNC     = 4
 TYPE_SMALLINT = 5
 TYPE_FLOAT32  = 6
 TYPE_STRREF   = 7
+TYPE_INT      = 8
+
+def zigzag_encode(n):
+    return (n << 1) if n >= 0 else ((-n << 1) - 1)
+
+def zigzag_decode(z):
+    return (z >> 1) if (z & 1) == 0 else -((z + 1) >> 1)
 
 def write_uvarint(n):
     out = bytearray()
@@ -258,6 +265,8 @@ def encode_const_plain(val, string_pool_index=None):
         return bytes([TYPE_BOOL, 1 if val else 0])
     if isinstance(val, int) and -128 <= val <= 127:
         return bytes([TYPE_SMALLINT, val & 0xFF])
+    if isinstance(val, int):
+        return bytes([TYPE_INT]) + write_uvarint(zigzag_encode(val))
     if isinstance(val, (int, float)):
         fval = float(val)
         try:

@@ -457,6 +457,11 @@ def flatten_source(source, rng, gen_name_fn, detect_var=None, target='luau'):
         v_str = target[3:4] + '.' + target[4:] if len(target) == 5 else '5.1'
         parse_fn = lambda s: target_parse(s, version=v_str)
         unparse_fn = lambda b: target_unparse_block(b, version=v_str)
+    elif target == 'fivem':
+        from lua5x_ast import parse as target_parse, Lua5xSyntaxError as TargetSyntaxError
+        from lua5x_unparse import unparse_block as target_unparse_block
+        parse_fn = lambda s: target_parse(s, version='5.4', fivem=True)
+        unparse_fn = lambda b: target_unparse_block(b, version='5.4')
     else:
         target_parse = parse
         TargetSyntaxError = LuauSyntaxError

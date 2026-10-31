@@ -30,6 +30,7 @@ def main():
         '--lua5.4': 'lua54',
         '--lua55': 'lua55',
         '--lua5.5': 'lua55',
+        '--fivem': 'fivem',
     }
 
     alias_map = {
@@ -57,6 +58,10 @@ def main():
         'lua5.5': 'lua55',
         '5.5': 'lua55',
         '55': 'lua55',
+        'fivem': 'fivem',
+        'cfx': 'fivem',
+        'cfxlua': 'fivem',
+        'redm': 'fivem',
     }
 
     pos_args = []
@@ -114,6 +119,7 @@ def main():
         print("  --lua53                  Target Lua 5.3")
         print("  --lua54                  Target Lua 5.4")
         print("  --lua55                  Target Lua 5.5")
+        print("  --fivem                  Target FiveM/RedM (CfxLua, Lua 5.4 based)")
         print("  --target <name>          Specify target name directly")
         print("")
         print("Anti-Tamper flags:")

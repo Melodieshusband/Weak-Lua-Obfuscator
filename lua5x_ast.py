@@ -36,7 +36,7 @@ class Token:
     def __repr__(self):
         return f"Token({self.kind!r},{self.value!r})"
 
-def tokenize(src, version="5.1"):
+def tokenize(src, version="5.1", fivem=False):
     ver = _normalize_ver(version)
     tokens = []
     i = 0
@@ -54,6 +54,19 @@ def tokenize(src, version="5.1"):
 
         if c in ' \t\r\n':
             i += 1
+            continue
+
+        if fivem and c == '`':
+            from fivem_hash import joaat
+            j = i + 1
+            while j < n and src[j] not in ('`', '\n', '\r'):
+                j += 1
+            if j >= n or src[j] != '`':
+                raise Lua5xSyntaxError("unterminated hash literal")
+            content = src[i+1:j]
+            val = str(joaat(content))
+            emit('NUMBER', val, val)
+            i = j + 1
             continue
 
         if c == '-' and i + 1 < n and src[i+1] == '-':
@@ -197,6 +210,11 @@ def tokenize(src, version="5.1"):
                 i += 2
                 continue
 
+        if fivem and src[i:i+3] in ('<<=', '>>='):
+            emit('OP', src[i:i+3], src[i:i+3])
+            i += 3
+            continue
+
         if ver >= (5, 3):
             if src[i:i+2] in ('//', '<<', '>>'):
                 emit('OP', src[i:i+2], src[i:i+2])
@@ -209,6 +227,11 @@ def tokenize(src, version="5.1"):
             i += 3
             continue
 
+        if fivem and src[i:i+2] in ('+=', '-=', '*=', '/=', '^=', '&=', '|='):
+            emit('OP', src[i:i+2], src[i:i+2])
+            i += 2
+            continue
+
         two = src[i:i+2]
         if two in ('==', '~=', '<=', '>=', '..'):
             emit('OP', two, two)
@@ -216,7 +239,7 @@ def tokenize(src, version="5.1"):
             continue
 
         valid_single = '+-*/%^<>=.~#'
-        if ver >= (5, 3):
+        if ver >= (5, 3) or fivem:
             valid_single += '&|'
         if c in valid_single:
             emit('OP', c, c)
@@ -246,10 +269,11 @@ def N(type_, **kw):
     return Node(kw)
 
 class Parser:
-    def __init__(self, toks, version="5.1"):
+    def __init__(self, toks, version="5.1", fivem=False):
         self.toks = toks
         self.pos = 0
         self.ver = _normalize_ver(version)
+        self.fivem = fivem
 
     def peek(self, offset=0):
         p = self.pos + offset
@@ -464,8 +488,20 @@ class Parser:
             self.expect('KW', 'end')
             return N('GenericFor', names=names, iters=iters, body=body)
 
+    COMPOUND_OPS = {
+        '+=': '+', '-=': '-', '*=': '*', '/=': '/',
+        '^=': '^', '&=': '&', '|=': '|', '<<=': '<<', '>>=': '>>',
+    }
+
     def parse_expr_stmt(self):
         expr = self.parse_suffixedexp()
+        if self.fivem and self.peek().kind == 'OP' and self.peek().value in self.COMPOUND_OPS:
+            tok = self.advance()
+            base_op = self.COMPOUND_OPS[tok.value]
+            target = self.expr_to_target(expr)
+            value = self.parse_expr()
+            return N('Assign', targets=[target],
+                     values=[N('Binop', op=base_op, left=target, right=value)], op='=')
         if self.at('OP', '=') or self.at('COMMA'):
             targets = [self.expr_to_target(expr)]
             while self.opt('COMMA'):
@@ -688,7 +724,7 @@ class Parser:
         self.expect('RBRACE')
         return N('Table', fields=fields)
 
-def parse(src, version="5.1"):
-    toks = tokenize(src, version=version)
-    p = Parser(toks, version=version)
+def parse(src, version="5.1", fivem=False):
+    toks = tokenize(src, version=version, fivem=fivem)
+    p = Parser(toks, version=version, fivem=fivem)
     return p.parse_chunk()
