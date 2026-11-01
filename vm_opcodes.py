@@ -45,6 +45,7 @@ CANONICAL_OPS = {
     'JUMP_TRUE':    0x32,
     'JUMP_FALSE_NK':0x33,
     'JUMP_TRUE_NK': 0x34,
+    'JUMP_REG':     0x35,
     'CALL':         0x40,
     'CALL_METHOD':  0x41,
     'RETURN':       0x42,

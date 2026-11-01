@@ -54,6 +54,7 @@ OP_JUMP_FALSE    = _DEFAULT_OPMAP['JUMP_FALSE']
 OP_JUMP_TRUE     = _DEFAULT_OPMAP['JUMP_TRUE']
 OP_JUMP_FALSE_NK = _DEFAULT_OPMAP['JUMP_FALSE_NK']
 OP_JUMP_TRUE_NK  = _DEFAULT_OPMAP['JUMP_TRUE_NK']
+OP_JUMP_REG      = _DEFAULT_OPMAP['JUMP_REG']
 OP_CALL          = _DEFAULT_OPMAP['CALL']
 OP_CALL_METHOD   = _DEFAULT_OPMAP['CALL_METHOD']
 OP_RETURN        = _DEFAULT_OPMAP['RETURN']
@@ -1835,7 +1836,7 @@ class VMCompileError(Exception):
     pass
 
 
-def try_compile_vm(source, rng=None, debug=False, target="luau", **kwargs):
+def try_compile_vm(source, rng=None, debug=False, target="luau", cff_mode="full", **kwargs):
     try:
         opmap = make_opmap()
         _patch_global_ops(opmap)
@@ -1844,9 +1845,12 @@ def try_compile_vm(source, rng=None, debug=False, target="luau", **kwargs):
         ast = parser.parse()
         compiler = Compiler()
         compiler.compile_chunk(ast)
-        if rng is not None:
-            from bytecode_cff import flatten_bytecode
-            flatten_bytecode(compiler.proto, rng, opmap)
+        if rng is not None and cff_mode != "none":
+            from bytecode_cff import flatten_bytecode, flatten_bytecode_full
+            if cff_mode == "legacy":
+                flatten_bytecode(compiler.proto, rng, opmap)
+            else:
+                flatten_bytecode_full(compiler.proto, rng, opmap)
         bytecode_mltn = compiler.serialize(opmap=opmap)
         return bytecode_mltn, opmap, "mltn"
     except Exception as e:
@@ -2054,7 +2058,7 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
             ('CALL','CALL_METHOD'),
             ('TFOR_CALL',),
         ]
-        groups_a2 = [('NEW_TABLE',), ('RETURN_NONE',), ('POP',), ('JUMP',), ('CLOSE_UPVAL',)]
+        groups_a2 = [('NEW_TABLE',), ('RETURN_NONE',), ('POP',), ('JUMP',), ('JUMP_REG',), ('CLOSE_UPVAL',)]
 
         lines = []
         first = True
@@ -2189,9 +2193,9 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
         f"return {p_out},{p_rst},{p_rpv} end "
         f"local function {chk_v}({p_op},{p_a},{p_b},{p_cc}) "
         f"local {p_a}={p_a} or 0 local {p_b}={p_b} or 0 local {p_cc}={p_cc} or 0 "
-        f"local {p_n}={band_e(f'({p_op}*7919)+({p_a}*104729)+({p_b}*15485863)+({p_cc}*179424673)+2166136261', '0x7FFFFFFF')} "
+        f"local {p_n}=(({p_op}*7919)+({p_a}*104729)+({p_b}*15485863)+({p_cc}*179424673)+2166136261)%2147483648 "
         + (
-            f"return {bxor_e(p_n, f'{key_expr}[({band_e(p_op, 7)})+1]')} "
+            f"return {bxor_e(p_n, f'({key_expr}[({band_e(p_op, 7)})+1])%2147483648')} "
             if key_expr
             else f"return {p_n} "
         )
@@ -2422,6 +2426,7 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
         f"elseif {p_op2}=={O('GT')} then {p_setreg}({p_a2},({p_getreg}({p_b2})>{p_getreg}({p_c2}))) "
         f"elseif {p_op2}=={O('GE')} then {p_setreg}({p_a2},({p_getreg}({p_b2})>={p_getreg}({p_c2}))) "
         f"elseif {p_op2}=={O('JUMP')} then {p_pc}={p_a2}+1 "
+        f"elseif {p_op2}=={O('JUMP_REG')} then {p_pc}=({p_getreg}({p_a2}) or #{p_ins})+1 "
         f"elseif {p_op2}=={O('JUMP_FALSE')} then if not {p_getreg}({p_a2}) then {p_pc}={p_b2}+1 end "
         f"elseif {p_op2}=={O('JUMP_TRUE')} then if {p_getreg}({p_a2}) then {p_pc}={p_b2}+1 end "
         f"elseif {p_op2}=={O('JUMP_FALSE_NK')} then if not {p_getreg}({p_a2}) then {p_pc}={p_b2}+1 end "
@@ -2614,7 +2619,7 @@ def bytecode_to_lua_mltn_only(bytecode, rng, gen_name_fn, opmap=None, data_expr=
             ('CALL','CALL_METHOD'),
             ('TFOR_CALL',),
         ]
-        groups_a2 = [('NEW_TABLE',), ('RETURN_NONE',), ('POP',), ('JUMP',), ('CLOSE_UPVAL',)]
+        groups_a2 = [('NEW_TABLE',), ('RETURN_NONE',), ('POP',), ('JUMP',), ('JUMP_REG',), ('CLOSE_UPVAL',)]
 
         lines = []
         first = True
@@ -2925,6 +2930,7 @@ def bytecode_to_lua_mltn_only(bytecode, rng, gen_name_fn, opmap=None, data_expr=
         f"elseif {p_op2}=={O('GT')} then {p_setreg}({p_a2},({p_getreg}({p_b2})>{p_getreg}({p_c2}))) "
         f"elseif {p_op2}=={O('GE')} then {p_setreg}({p_a2},({p_getreg}({p_b2})>={p_getreg}({p_c2}))) "
         f"elseif {p_op2}=={O('JUMP')} then {p_pc}={p_a2}+1 "
+        f"elseif {p_op2}=={O('JUMP_REG')} then {p_pc}=({p_getreg}({p_a2}) or #{p_ins})+1 "
         f"elseif {p_op2}=={O('JUMP_FALSE')} then if not {p_getreg}({p_a2}) then {p_pc}={p_b2}+1 end "
         f"elseif {p_op2}=={O('JUMP_TRUE')} then if {p_getreg}({p_a2}) then {p_pc}={p_b2}+1 end "
         f"elseif {p_op2}=={O('JUMP_FALSE_NK')} then if not {p_getreg}({p_a2}) then {p_pc}={p_b2}+1 end "
@@ -3117,7 +3123,7 @@ def bytecode_to_lua_legacy(bytecode, rng, gen_name_fn, opmap=None, data_expr=Non
             ('CALL','CALL_METHOD'),
             ('TFOR_CALL',),
         ]
-        groups_a2 = [('NEW_TABLE',), ('RETURN_NONE',), ('POP',), ('JUMP',), ('CLOSE_UPVAL',)]
+        groups_a2 = [('NEW_TABLE',), ('RETURN_NONE',), ('POP',), ('JUMP',), ('JUMP_REG',), ('CLOSE_UPVAL',)]
 
         lines = []
         first = True
@@ -3340,6 +3346,7 @@ def bytecode_to_lua_legacy(bytecode, rng, gen_name_fn, opmap=None, data_expr=Non
         f"elseif {p_op2}=={O('GT')} then {p_setreg}({p_a2},({p_getreg}({p_b2})>{p_getreg}({p_c2}))) "
         f"elseif {p_op2}=={O('GE')} then {p_setreg}({p_a2},({p_getreg}({p_b2})>={p_getreg}({p_c2}))) "
         f"elseif {p_op2}=={O('JUMP')} then {p_pc}={p_a2}+1 "
+        f"elseif {p_op2}=={O('JUMP_REG')} then {p_pc}=({p_getreg}({p_a2}) or #{p_ins})+1 "
         f"elseif {p_op2}=={O('JUMP_FALSE')} then if not {p_getreg}({p_a2}) then {p_pc}={p_b2}+1 end "
         f"elseif {p_op2}=={O('JUMP_TRUE')} then if {p_getreg}({p_a2}) then {p_pc}={p_b2}+1 end "
         f"elseif {p_op2}=={O('JUMP_FALSE_NK')} then if not {p_getreg}({p_a2}) then {p_pc}={p_b2}+1 end "

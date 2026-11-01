@@ -203,14 +203,14 @@ class Obfuscator:
         )
         return expr
 
-    def obfuscate(self, force_vm=False, force_fold=False, anti_tamper_level="full", hide_vm_source=False, at_version="v2", at_target="luau"):
+    def obfuscate(self, force_vm=False, force_fold=False, anti_tamper_level="full", hide_vm_source=False, at_version="v2", at_target="luau", cff_mode="full"):
         source = self.source
         rng = self.rng
 
         if force_fold:
             use_vm = False
         else:
-            bytecode_result = try_compile_vm(source, rng=rng, target=at_target)
+            bytecode_result = try_compile_vm(source, rng=rng, target=at_target, cff_mode=cff_mode)
             if bytecode_result is not None:
                 bytecode, opmap, bc_format = bytecode_result
                 use_vm = True
@@ -440,7 +440,12 @@ class Obfuscator:
         if use_vm:
             mode = "VM (hidden source)" if hide_vm_source else "VM (no loadstring)"
             bc_label = "MLTN+MLD compressed" if bc_format == "mltn" else "plain (compression skipped, would have grown output)"
-            mode = f"{mode}, bytecode: {bc_label}"
+            cff_label = {
+                "full": "dispatch-table",
+                "legacy": "block-reorder",
+                "none": "disabled",
+            }.get(cff_mode, "dispatch-table")
+            mode = f"{mode}, bytecode: {bc_label}, CFF: {cff_label}"
         else:
             mode = "chunks+string-fold"
         mode = f"{mode}, Anti-Tamper: {at_label}"

@@ -50,7 +50,7 @@ The output is written to `input_obf.lua` unless you pass an explicit output path
 ### Usage
 
 ```bash
-python main.py <input.lua> [output.lua] [--vm | --fold] [anti-tamper flag]
+python main.py <input.lua> [output.lua] [--vm | --fold] [CFF flag] [anti-tamper flag]
 ```
 
 | Example | What it does |
@@ -61,6 +61,9 @@ python main.py <input.lua> [output.lua] [--vm | --fold] [anti-tamper flag]
 | `python main.py input.lua output.lua --minimal-anti-tamper` | Relaxed anti-tamper for picky executors |
 | `python main.py input.lua output.lua --vm --minimal-anti-tamper` | VM mode + relaxed anti-tamper |
 | `python main.py input.lua output.lua --no-anti-tamper` | No anti-tamper (not recommended) |
+| `python main.py input.lua output.lua --cff-full` | Full state-machine bytecode CFF **(default)** |
+| `python main.py input.lua output.lua --cff-legacy` | Legacy block reorder + junk padding |
+| `python main.py input.lua output.lua --no-cff` | Disable bytecode-level CFF |
 
 ### Flags
 
@@ -69,6 +72,9 @@ python main.py <input.lua> [output.lua] [--vm | --fold] [anti-tamper flag]
 | `--vm` | Compile the script to custom bytecode and run it on a per-build interpreter **(default)** |
 | `--fold` | Control-flow flattening + number folding + string encryption, no VM |
 | `--hide-vm-source` | Encrypt the VM dispatch loop (requires loadstring/load) |
+| `--cff-full` | Full state-machine CFF with a dispatch table and indirect jump **(default, VM mode only)** |
+| `--cff-legacy` | Legacy bytecode CFF: basic blocks are shuffled and padded with junk, direct jumps are kept |
+| `--no-cff` | Disable bytecode-level CFF entirely (VM mode only) |
 | `--full-anti-tamper` | All checks enabled **(default)** |
 | `--minimal-anti-tamper` | Drops checks known to false-positive on some executors |
 | `--no-anti-tamper` | Disables anti-tamper entirely |
@@ -114,7 +120,7 @@ Weak provides native, first-class support for every major Lua dialect. Code gene
 | | **Fold** (`--fold`) | **VM** (default / `--vm`) |
 | --- | --- | --- |
 | Approach | Rewrites the Lua source | Compiles to custom bytecode, runs on a generated interpreter |
-| Control-flow flattening | AST-based (`ast_cff.py`) | Bytecode-level (`bytecode_cff.py`) |
+| Control-flow flattening | AST-based (`ast_cff.py`) | State-machine bytecode CFF (`bytecode_cff.py`) |
 | String encryption | ✅ ChaCha20 | ✅ ChaCha20 |
 | Number folding | ✅ | — |
 | Chunked loading | ✅ | ✅ |
@@ -177,8 +183,20 @@ Runtime variable names are random 6–10 character sequences of visually identic
 Two independent passes, depending on the mode:
 
 - **Fold mode** — `ast_cff.py` works on the parsed source (via `luau_ast.py` / `luau_unparse.py`) and rewrites function and chunk bodies into a `while`-based dispatcher with randomized state IDs, shuffled block order, and junk branches
-- **VM mode** — `bytecode_cff.py` flattens the compiled bytecode itself: basic blocks are split, reordered behind a dispatcher, and padded with junk instructions — independent of, and in addition to, the VM's own opcode randomization
+- **VM mode** — `bytecode_cff.py` exposes `flatten_bytecode_full`, which performs a real state-machine transformation directly on the VM bytecode:
+  - every basic block is split at branch targets, returns, and loop edges
+  - each block receives a random 31-bit state ID
+  - blocks are laid out in shuffled order and all original block-to-block edges are removed
+  - every block ends by assigning its successor state and jumping to a single dispatcher
+  - the dispatcher indexes a per-function table that maps state IDs to PC values encrypted with a per-build XOR key, then performs an indirect jump with the `JUMP_REG` opcode (`GET_TABLE` + `BXOR` + `JUMP_REG`)
+  - the table entries are shuffled and mixed with decoy states, while unreachable junk blocks and opaque arithmetic are inserted into the layout
+  - scratch registers are allocated far outside the compiler's register range, so original locals, upvalue boxes, and multi-return spill slots are untouched
+  - the pass runs recursively on every nested function prototype
 
+- **Legacy VM mode** — the same `bytecode_cff.py` also exposes `flatten_bytecode`, which keeps the previous approach: basic blocks are shuffled and padded with junk instructions while direct jumps remain. It is still available with `--cff-legacy`.
+
+> Full state-machine CFF is the default. Use `--cff-legacy` for the old behavior or `--no-cff` to disable bytecode-level flattening entirely.
+>
 > The older statement-text flattener (`cff.py`) is legacy and no longer used by either mode.
 
 ### 🔢 More
@@ -288,7 +306,7 @@ print(debug.getinfo(print, 'S').short_src)
 ├── luau_ast.py         Dedicated Luau lexer/parser producing an AST
 ├── luau_unparse.py     AST → Luau source printer
 ├── ast_cff.py          AST-based control-flow flattening (fold mode)
-├── bytecode_cff.py     Bytecode-level control-flow flattening (VM mode)
+├── bytecode_cff.py     Full state-machine and legacy block-reorder bytecode CFF
 ├── mld.py              Field dictionary encoding and compression
 ├── mltn.py             Bytecode RLE & dictionary packing
 ├── vm.py               Lexer, parser, compiler, serializer, interpreter generator

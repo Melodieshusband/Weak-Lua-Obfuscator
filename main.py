@@ -8,6 +8,10 @@ def main():
     force_fold = '--fold' in raw_args
     hide_vm_source = '--hide-vm-source' in raw_args
 
+    cff_full = '--cff' in raw_args or '--cff-full' in raw_args or '--cff-v2' in raw_args
+    cff_legacy = '--cff-legacy' in raw_args or '--cff-v1' in raw_args
+    cff_none = '--no-cff' in raw_args
+
     at_none = '--no-anti-tamper' in raw_args
     at_minimal = '--minimal-anti-tamper' in raw_args
     at_full = '--full-anti-tamper' in raw_args
@@ -110,6 +114,11 @@ def main():
         print("  --fold                   Use string-fold (without VM)")
         print("  --hide-vm-source         Encrypt the VM dispatch loop (requires loadstring/load)")
         print("")
+        print("Control-flow flattening flags (VM mode only):")
+        print("  --cff-full               Full state-machine CFF with dispatch table (default)")
+        print("  --cff-legacy             Legacy block reorder + junk padding")
+        print("  --no-cff                 Disable bytecode-level CFF")
+        print("")
         print("Dialect / Target flags (default: --luau):")
         print("  --luau                   Target Luau")
         print("  --roblox                 Target Roblox runtime")
@@ -136,6 +145,17 @@ def main():
     if sum([at_none, at_minimal, at_full]) > 1:
         print("[!] You can only pick one of: --full-anti-tamper, --minimal-anti-tamper, --no-anti-tamper")
         sys.exit(1)
+
+    if sum([cff_full, cff_legacy, cff_none]) > 1:
+        print("[!] You can only pick one of: --cff-full, --cff-legacy, --no-cff")
+        sys.exit(1)
+
+    if cff_legacy:
+        cff_mode = "legacy"
+    elif cff_none:
+        cff_mode = "none"
+    else:
+        cff_mode = "full"
 
     if hide_vm_source:
         print("[!] WARNING: --hide-vm-source loads the VM dispatch loop via loadstring/load.")
@@ -174,6 +194,7 @@ def main():
             hide_vm_source=hide_vm_source,
             at_version=at_version,
             at_target=at_target,
+            cff_mode=cff_mode,
         )
     except RuntimeError as e:
         print(f"[!] {e}")
