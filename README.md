@@ -6,6 +6,7 @@
 
 A source-level obfuscator written in pure Python — custom bytecode VM, ChaCha20 string encryption, control-flow flattening, and native support across all major Lua runtimes.
 
+![Version](https://img.shields.io/badge/version-2.4-informational)
 ![Python](https://img.shields.io/badge/Python-3.8%2B-3776AB?logo=python&logoColor=white)
 ![Dependencies](https://img.shields.io/badge/dependencies-none-success)
 ![License](https://img.shields.io/badge/license-MIT-blue)

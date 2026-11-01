@@ -3,6 +3,9 @@ import string
 import secrets
 from crypto import CHACHA_CONST, CHACHA_ROUNDS, MASK32
 
+WEAK_VERSION = "2.4"
+WEAK_REPO_URL = "https://github.com/Melodieshusband/Weak-Lua-Obfuscator"
+
 _used_names = set()
 _name_rng = None
 
@@ -38,6 +41,151 @@ DEFLATE_CLEN_ORDER = [16,17,18,0,8,7,9,6,10,5,11,4,12,3,13,2,14,1,15]
 def deflate_tables_blob():
     segs = [DEFLATE_LEN_BASE, DEFLATE_LEN_EXTRA, DEFLATE_DIST_BASE, DEFLATE_DIST_EXTRA, DEFLATE_CLEN_ORDER]
     return ";".join(",".join(str(v) for v in seg) for seg in segs)
+
+_SHA256_K = [
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+]
+_SHA256_H = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19]
+
+
+def build_sha256_hmac_runtime(target="luau"):
+    band_fn = gen_name()
+    bor_fn = gen_name()
+    bxor_fn = gen_name()
+    lshift_fn = gen_name()
+    rshift_fn = gen_name()
+
+    if target in ("lua53", "lua54", "lua55", "fivem"):
+        header_defs = (
+            f"local function {band_fn}(a,b) return a&b end "
+            f"local function {bor_fn}(a,b) return a|b end "
+            f"local function {bxor_fn}(a,b) return a~b end "
+            f"local function {lshift_fn}(a,b) return (a<<b)&4294967295 end "
+            f"local function {rshift_fn}(a,b) return (a&4294967295)>>b end "
+        )
+    elif target == "luajit":
+        header_defs = (
+            f"local {band_fn},{bor_fn},{bxor_fn},{lshift_fn},{rshift_fn}="
+            f"bit.band,bit.bor,bit.bxor,bit.lshift,bit.rshift "
+        )
+    elif target == "lua51":
+        header_defs = (
+            f"local function {band_fn}(a,b) local r,m=0,1 a,b=a%4294967296,b%4294967296 while a>0 and b>0 do if a%2==1 and b%2==1 then r=r+m end a,b=math.floor(a/2),math.floor(b/2) m=m*2 end return r end "
+            f"local function {bor_fn}(a,b) local r,m=0,1 a,b=a%4294967296,b%4294967296 while a>0 or b>0 do if a%2==1 or b%2==1 then r=r+m end a,b=math.floor(a/2),math.floor(b/2) m=m*2 end return r end "
+            f"local function {bxor_fn}(a,b) local r,m=0,1 a,b=a%4294967296,b%4294967296 while a>0 or b>0 do local ab,bb=a%2,b%2 if ab~=bb then r=r+m end a,b=math.floor(a/2),math.floor(b/2) m=m*2 end return r end "
+            f"local function {lshift_fn}(a,b) return ((a%4294967296)*(2^b))%4294967296 end "
+            f"local function {rshift_fn}(a,b) return math.floor((a%4294967296)/(2^b)) end "
+        )
+    else:
+        header_defs = (
+            f"local {band_fn},{bor_fn},{bxor_fn},{lshift_fn},{rshift_fn}="
+            f"bit32.band,bit32.bor,bit32.bxor,bit32.lshift,bit32.rshift "
+        )
+
+    rrot_fn = gen_name()
+    header_defs += f"local function {rrot_fn}(x,n) return {bor_fn}({rshift_fn}(x,n),{lshift_fn}(x,32-n)) end "
+
+    ch_fn = gen_name()
+    maj_fn = gen_name()
+    bs0_fn = gen_name()
+    bs1_fn = gen_name()
+    ls0_fn = gen_name()
+    ls1_fn = gen_name()
+    header_defs += (
+        f"local function {ch_fn}(x,y,z) return {bxor_fn}({band_fn}(x,y),{band_fn}(4294967295-x,z)) end "
+        f"local function {maj_fn}(x,y,z) return {bxor_fn}({bxor_fn}({band_fn}(x,y),{band_fn}(x,z)),{band_fn}(y,z)) end "
+        f"local function {bs0_fn}(x) return {bxor_fn}({bxor_fn}({rrot_fn}(x,2),{rrot_fn}(x,13)),{rrot_fn}(x,22)) end "
+        f"local function {bs1_fn}(x) return {bxor_fn}({bxor_fn}({rrot_fn}(x,6),{rrot_fn}(x,11)),{rrot_fn}(x,25)) end "
+        f"local function {ls0_fn}(x) return {bxor_fn}({bxor_fn}({rrot_fn}(x,7),{rrot_fn}(x,18)),{rshift_fn}(x,3)) end "
+        f"local function {ls1_fn}(x) return {bxor_fn}({bxor_fn}({rrot_fn}(x,17),{rrot_fn}(x,19)),{rshift_fn}(x,10)) end "
+    )
+
+    kt_v = gen_name()
+    header_defs += f"local {kt_v}={{{','.join(str(v) for v in _SHA256_K)}}} "
+
+    sha_fn = gen_name()
+    msg_v = gen_name(); ml_v = gen_name(); padded_v = gen_name(); i_v = gen_name()
+    bl_v = gen_name(); hi_v = gen_name(); lo_v = gen_name(); h_v = gen_name()
+    chunk_v = gen_name(); w_v = gen_name(); j_v = gen_name()
+    a_v = gen_name(); b_v = gen_name(); c_v = gen_name(); d_v = gen_name()
+    e_v = gen_name(); f_v = gen_name(); g_v = gen_name(); hh_v = gen_name()
+    t1_v = gen_name(); t2_v = gen_name(); outb_v = gen_name(); hv_v = gen_name()
+
+    header_defs += (
+        f"local function {sha_fn}({msg_v}) "
+        f"local {ml_v}=#{msg_v} "
+        f"local {padded_v}={{}} "
+        f"for {i_v}=1,{ml_v} do {padded_v}[{i_v}]={msg_v}[{i_v}] end "
+        f"{padded_v}[#{padded_v}+1]=128 "
+        f"while (#{padded_v}%64)~=56 do {padded_v}[#{padded_v}+1]=0 end "
+        f"local {bl_v}={ml_v}*8 "
+        f"local {hi_v}=math.floor({bl_v}/4294967296) "
+        f"local {lo_v}={bl_v}%4294967296 "
+        f"for {i_v}=3,0,-1 do {padded_v}[#{padded_v}+1]={rshift_fn}({hi_v},{i_v}*8)%256 end "
+        f"for {i_v}=3,0,-1 do {padded_v}[#{padded_v}+1]={rshift_fn}({lo_v},{i_v}*8)%256 end "
+        f"local {h_v}={{{','.join(str(v) for v in _SHA256_H)}}} "
+        f"for {chunk_v}=1,#{padded_v},64 do "
+        f"local {w_v}={{}} "
+        f"for {i_v}=0,15 do "
+        f"local {j_v}={chunk_v}+{i_v}*4 "
+        f"{w_v}[{i_v}+1]={padded_v}[{j_v}]*16777216+{padded_v}[{j_v}+1]*65536+{padded_v}[{j_v}+2]*256+{padded_v}[{j_v}+3] "
+        f"end "
+        f"for {i_v}=17,64 do "
+        f"{w_v}[{i_v}]=({ls1_fn}({w_v}[{i_v}-2])+{w_v}[{i_v}-7]+{ls0_fn}({w_v}[{i_v}-15])+{w_v}[{i_v}-16])%4294967296 "
+        f"end "
+        f"local {a_v},{b_v},{c_v},{d_v},{e_v},{f_v},{g_v},{hh_v}={h_v}[1],{h_v}[2],{h_v}[3],{h_v}[4],{h_v}[5],{h_v}[6],{h_v}[7],{h_v}[8] "
+        f"for {i_v}=1,64 do "
+        f"local {t1_v}=({hh_v}+{bs1_fn}({e_v})+{ch_fn}({e_v},{f_v},{g_v})+{kt_v}[{i_v}]+{w_v}[{i_v}])%4294967296 "
+        f"local {t2_v}=({bs0_fn}({a_v})+{maj_fn}({a_v},{b_v},{c_v}))%4294967296 "
+        f"{hh_v}={g_v} {g_v}={f_v} {f_v}={e_v} {e_v}=({d_v}+{t1_v})%4294967296 "
+        f"{d_v}={c_v} {c_v}={b_v} {b_v}={a_v} {a_v}=({t1_v}+{t2_v})%4294967296 "
+        f"end "
+        f"{h_v}[1]=({h_v}[1]+{a_v})%4294967296 {h_v}[2]=({h_v}[2]+{b_v})%4294967296 "
+        f"{h_v}[3]=({h_v}[3]+{c_v})%4294967296 {h_v}[4]=({h_v}[4]+{d_v})%4294967296 "
+        f"{h_v}[5]=({h_v}[5]+{e_v})%4294967296 {h_v}[6]=({h_v}[6]+{f_v})%4294967296 "
+        f"{h_v}[7]=({h_v}[7]+{g_v})%4294967296 {h_v}[8]=({h_v}[8]+{hh_v})%4294967296 "
+        f"end "
+        f"local {outb_v}={{}} "
+        f"for {i_v}=1,8 do "
+        f"local {hv_v}={h_v}[{i_v}] "
+        f"{outb_v}[#{outb_v}+1]={rshift_fn}({hv_v},24)%256 "
+        f"{outb_v}[#{outb_v}+1]={rshift_fn}({hv_v},16)%256 "
+        f"{outb_v}[#{outb_v}+1]={rshift_fn}({hv_v},8)%256 "
+        f"{outb_v}[#{outb_v}+1]={hv_v}%256 "
+        f"end "
+        f"return {outb_v} "
+        f"end "
+    )
+
+    hmac_fn = gen_name()
+    key_v = gen_name(); hmsg_v = gen_name(); kb_v = gen_name(); hi2_v = gen_name()
+    ip_v = gen_name(); op_v = gen_name(); inner_v = gen_name(); outer_v = gen_name(); cat_v = gen_name()
+    header_defs += (
+        f"local function {hmac_fn}({key_v},{hmsg_v}) "
+        f"local {kb_v}={{}} "
+        f"for {hi2_v}=1,64 do {kb_v}[{hi2_v}]={key_v}[{hi2_v}] or 0 end "
+        f"local {ip_v}={{}} local {op_v}={{}} "
+        f"for {hi2_v}=1,64 do {ip_v}[{hi2_v}]={bxor_fn}({kb_v}[{hi2_v}],54) {op_v}[{hi2_v}]={bxor_fn}({kb_v}[{hi2_v}],92) end "
+        f"local {cat_v}={{}} "
+        f"for {hi2_v}=1,64 do {cat_v}[{hi2_v}]={ip_v}[{hi2_v}] end "
+        f"for {hi2_v}=1,#{hmsg_v} do {cat_v}[64+{hi2_v}]={hmsg_v}[{hi2_v}] end "
+        f"local {inner_v}={sha_fn}({cat_v}) "
+        f"local {outer_v}={{}} "
+        f"for {hi2_v}=1,64 do {outer_v}[{hi2_v}]={op_v}[{hi2_v}] end "
+        f"for {hi2_v}=1,32 do {outer_v}[64+{hi2_v}]={inner_v}[{hi2_v}] end "
+        f"return {sha_fn}({outer_v}) "
+        f"end "
+    )
+
+    return header_defs, hmac_fn
+
 
 def build_inflate_runtime(target="luau"):
     band_fn = gen_name()
@@ -218,6 +366,7 @@ def build_inflate_runtime(target="luau"):
 
 def build_runtime_header(seeds, var_k, var_Q, var_G, var_B, var_f, var_V, wm_var, target="luau"):
     inflate_src, inflate_fn_v, inflate_tables = build_inflate_runtime(target=target)
+    hmac_src, hmac_fn_v = build_sha256_hmac_runtime(target=target)
     flag_v  = gen_name()
     body_v  = gen_name()
     bi_v    = gen_name()
@@ -714,6 +863,11 @@ def build_runtime_header(seeds, var_k, var_Q, var_G, var_B, var_f, var_V, wm_var
         )
 
     return (
+        f"--[[\n"
+        f"  Protected by Weak Obfuscator v{WEAK_VERSION}\n"
+        f"\n"
+        f"{WEAK_REPO_URL}\n"
+        f"]]\n"
         f'do ("Protected by Melotens Weak Obfuscator."):gsub(".+",function({wm_q_v}){wm_var}={wm_q_v} end) end '
         f"return (function(...) return(function({var_Q},{var_G},{var_B},{var_f},{var_k},{var_V}) "
         f"{header_prims}"
@@ -771,6 +925,7 @@ def build_runtime_header(seeds, var_k, var_Q, var_G, var_B, var_f, var_V, wm_var
         f"for {ri_v}=1,{N_v},1 do {RA_v}[{sb}({alpha_v},{ri_v})]={ri_v} end "
         f"{g3_code}"
         f"{inflate_src}"
+        f"{hmac_src}"
         f"local {CC_v}={{}} "
         f"{var_k}=function({par_ka_a},{par_ka_b1},{par_ka_b2},{par_ka_b3},{par_ka_b4},{par_ka_d1},{par_ka_d2}) local {ck_v}={par_ka_b3}*{seeds['MK']}+{par_ka_b1} if {CC_v}[{ck_v}]~=nil then return {CC_v}[{ck_v}] end "
         f"local {dd_v}={g3}({par_ka_a}) if not {dd_v} then return nil end "
@@ -783,7 +938,7 @@ def build_runtime_header(seeds, var_k, var_Q, var_G, var_B, var_f, var_V, wm_var
         f"local {decv_v} if {flag_v}==1 then {decv_v}={inflate_fn_v}({body_v}) else {decv_v}={body_v} end "
         f"local {chars_v}={{}} for {ci2_v}=1,#{decv_v},1 do {chars_v}[{ci2_v}]={sc}({decv_v}[{ci2_v}]) end "
         f"local {valv_v}=table.concat({chars_v}) local {result_v} if {par_ka_b1}==1 then {result_v}={valv_v} elseif {par_ka_b1}==2 then local {nv_v}=tonumber({valv_v}) {result_v}={nv_v}==nil and 0 or {nv_v} elseif {par_ka_b1}==3 then {result_v}={valv_v}=='1' end {CC_v}[{ck_v}]={result_v} return {result_v} end "
-    ), {"ks": ks_v, "xorb": xorb_v, "nb": nb_v, "sc": sc, "blk": blk_v, "inflate_tables": inflate_tables, "g3": g3, "key": key_v}
+    ), {"ks": ks_v, "xorb": xorb_v, "nb": nb_v, "sc": sc, "blk": blk_v, "inflate_tables": inflate_tables, "g3": g3, "key": key_v, "hmac256": hmac_fn_v}
 
 def build_luajit_polyfill():
     return ""

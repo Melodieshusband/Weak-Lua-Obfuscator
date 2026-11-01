@@ -1,5 +1,7 @@
 import secrets
 import zlib
+import hmac
+import hashlib
 
 MASK32 = 0xFFFFFFFF
 CHACHA_ROUNDS = 20
@@ -66,7 +68,12 @@ def make_seeds():
         "MK": secrets.randbits(32),
         "CC": tuple(secrets.randbits(32) for _ in range(4)),
         "ROT": random_rot(rng),
+        "MACKEY": secrets.token_bytes(32),
     }
+
+
+def hmac_sha256(key, data):
+    return hmac.new(key, data, hashlib.sha256).digest()
 
 def build_alphabet(key, nonce_base, const=CHACHA_CONST, rot=DEFAULT_ROT):
     chars = [chr(i) for i in range(33, 127) if i not in (34, 39, 92)]

@@ -1,6 +1,7 @@
 import sys
 import re
 from obfuscator import Obfuscator
+from codegen import WEAK_VERSION
 
 def main():
     raw_args = sys.argv[1:]
@@ -203,6 +204,7 @@ def main():
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(result)
 
+    print(f"[+] Weak:    v{WEAK_VERSION}")
     print(f"[+] Input:   {input_path}")
     print(f"[+] Output:  {output_path}")
     print(f"[+] Target:  {at_target}")
