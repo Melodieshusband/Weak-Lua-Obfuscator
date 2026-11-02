@@ -10,6 +10,15 @@ def _get_op(name, opmap=None):
     m = opmap if opmap is not None else _DEFAULT_OPMAP
     return m[name]
 
+def _hidden_str_lit(text, rng):
+    shift = rng.randint(1, 250)
+    codes = ",".join(str((b + shift) % 256) for b in text.encode("utf-8"))
+    return (
+        f"(function() local s={shift} local c={{{codes}}} local t={{}} "
+        f"for i=1,#c do t[i]=string.char((c[i]-s)%256) end "
+        f"return table.concat(t) end)()"
+    )
+
 OP_LOAD_CONST    = _DEFAULT_OPMAP['LOAD_CONST']
 OP_LOAD_VAR      = _DEFAULT_OPMAP['LOAD_VAR']
 OP_SET_VAR       = _DEFAULT_OPMAP['SET_VAR']
@@ -2237,7 +2246,7 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
         f"local {p_cbi}=1 "
         f"local {c_raw_v}={{}} "
         f"for {p_ci}=1,{p_nconsts} do local {p_cv},{p_ni}={ldc_v}({p_cbb},{p_cbi}) {c_raw_v}[{p_ci}]={p_cv} {p_cbi}={p_ni} end "
-        f"local {p_consts}=setmetatable({{}},{{__index={c_raw_v},__newindex=function() error('Melodie: constant pool is protected and read-only',0) end,__tostring=function() return 'Melodie: encrypted constant container' end,__metatable=false}}) "
+        f"local {p_consts}=setmetatable({{}},{{__index={c_raw_v},__newindex=function() error({_hidden_str_lit('Melodie: constant pool is protected and read-only', rng)},0) end,__tostring=function() return {_hidden_str_lit('Melodie: encrypted constant container', rng)} end,__metatable=false}}) "
         f"local {p_nins} {p_nins},{p_i}={euv_v}({p_d},{p_i}) "
         f"local {p_trapidx} {p_trapidx},{p_i}={uv_v}({p_d},{p_i}) "
         f"local {p_pseed2}={p_d}[{p_i}] {p_i}={p_i}+1 "
@@ -2512,7 +2521,7 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
         f"local {p_x}={p_rb}[{p_a2}] if {p_x}~=nil then {p_vr}[{p_a2}]={p_x}.v {p_rb}[{p_a2}]=nil end "
         f"elseif {p_op2}=={O('MOVE')} then {p_setreg}({p_a2},{p_getreg}({p_b2})) "
         f"else "
-        f"print('Melodie caught an illegal opcode modification :3') "
+        f"print({_hidden_str_lit('Melodie caught an illegal opcode modification :3', rng)}) "
         f"error('',0) "
         f"end "
         f"end "
@@ -2789,7 +2798,7 @@ def bytecode_to_lua_mltn_only(bytecode, rng, gen_name_fn, opmap=None, data_expr=
         f"local {p_cbi}=1 "
         f"local {c_raw_v}={{}} "
         f"for {p_ci}=1,{p_nconsts} do local {p_cv},{p_ni}={ldc_v}({p_cbb},{p_cbi}) {c_raw_v}[{p_ci}]={p_cv} {p_cbi}={p_ni} end "
-        f"local {p_consts}=setmetatable({{}},{{__index={c_raw_v},__newindex=function() error('Melodie: constant pool is protected and read-only',0) end,__tostring=function() return 'Melodie: encrypted constant container' end,__metatable=false}}) "
+        f"local {p_consts}=setmetatable({{}},{{__index={c_raw_v},__newindex=function() error({_hidden_str_lit('Melodie: constant pool is protected and read-only', rng)},0) end,__tostring=function() return {_hidden_str_lit('Melodie: encrypted constant container', rng)} end,__metatable=false}}) "
         f"local {p_nins} {p_nins},{p_i}={euv_v}({p_d},{p_i}) "
         f"local {p_pseed2}={p_d}[{p_i}] {p_i}={p_i}+1 "
         f"local {p_marker}={p_d}[{p_i}] {p_i}={p_i}+1 "
@@ -3016,7 +3025,7 @@ def bytecode_to_lua_mltn_only(bytecode, rng, gen_name_fn, opmap=None, data_expr=
         f"local {p_x}={p_rb}[{p_a2}] if {p_x}~=nil then {p_vr}[{p_a2}]={p_x}.v {p_rb}[{p_a2}]=nil end "
         f"elseif {p_op2}=={O('MOVE')} then {p_setreg}({p_a2},{p_getreg}({p_b2})) "
         f"else "
-        f"print('Melodie caught an illegal opcode modification :3') "
+        f"print({_hidden_str_lit('Melodie caught an illegal opcode modification :3', rng)}) "
         f"error('',0) "
         f"end "
         f"end "
@@ -3243,7 +3252,7 @@ def bytecode_to_lua_legacy(bytecode, rng, gen_name_fn, opmap=None, data_expr=Non
         f"local {p_nconsts}={u16_v}({p_d},{p_i}) {p_i}={p_i}+2 "
         f"local {c_raw_v}={{}} "
         f"for {p_ci}=1,{p_nconsts} do local {p_cv},{p_ni}={ldc_v}({p_d},{p_i}) {c_raw_v}[{p_ci}]={p_cv} {p_i}={p_ni} end "
-        f"local {p_consts}=setmetatable({{}},{{__index={c_raw_v},__newindex=function() error('Melodie: constant pool is protected and read-only',0) end,__tostring=function() return 'Melodie: encrypted constant container' end,__metatable=false}}) "
+        f"local {p_consts}=setmetatable({{}},{{__index={c_raw_v},__newindex=function() error({_hidden_str_lit('Melodie: constant pool is protected and read-only', rng)},0) end,__tostring=function() return {_hidden_str_lit('Melodie: encrypted constant container', rng)} end,__metatable=false}}) "
         f"local {p_nins}={u16_v}({p_d},{p_i}) {p_i}={p_i}+2 "
         f"local {p_pseed}={p_d}[{p_i}] {p_i}={p_i}+1 "
         f"local {p_ins}={{}} "
@@ -3432,7 +3441,7 @@ def bytecode_to_lua_legacy(bytecode, rng, gen_name_fn, opmap=None, data_expr=Non
         f"local {p_x}={p_rb}[{p_a2}] if {p_x}~=nil then {p_vr}[{p_a2}]={p_x}.v {p_rb}[{p_a2}]=nil end "
         f"elseif {p_op2}=={O('MOVE')} then {p_setreg}({p_a2},{p_getreg}({p_b2})) "
         f"else "
-        f"print('Melodie caught an illegal opcode modification :3') "
+        f"print({_hidden_str_lit('Melodie caught an illegal opcode modification :3', rng)}) "
         f"error('',0) "
         f"end "
         f"end "

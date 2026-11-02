@@ -194,29 +194,18 @@ class Obfuscator:
         blk_v = prims["blk"]
         nb_v = prims["nb"]
         g3_v = prims["g3"]
-        hmac_v = prims["hmac256"]
+        verify_v = prims["mac_verify"]
 
         mac_key = self.seeds["MACKEY"]
         tag = hmac_sha256(mac_key, enc)
-        key_lit = "{" + ",".join(str(b) for b in mac_key) + "}"
         tag_lit = "{" + ",".join(str(b) for b in tag) + "}"
 
-        mk_v = gen_name()
         exp_v = gen_name()
-        got_v = gen_name()
-        ok_v = gen_name()
-        j_v = gen_name()
 
         expr = (
             f"(function() local {arr_v}={g3_v}(\"{b91}\") "
-            f"local {mk_v}={key_lit} "
             f"local {exp_v}={tag_lit} "
-            f"local {got_v}={hmac_v}({mk_v},{arr_v}) "
-            f"local {ok_v}=true "
-            f"for {j_v}=1,32 do if {got_v}[{j_v}]~={exp_v}[{j_v}] then {ok_v}=false end end "
-            f"if not {ok_v} then "
-            f"while true do print('Melodie noticed the bytecode payload was tampered with') end "
-            f"end "
+            f"{arr_v}={verify_v}({exp_v},{arr_v}) "
             f"local {nw_v}={blk_v}({cid}%4294967296,{nb_v},3266489909,2654435769) "
             f"local {out_v}={ks_v}({nw_v}[1],{nw_v}[2],#{arr_v}) "
             f"for {i_v}=1,#{arr_v} do {arr_v}[{i_v}]={xorb_v}({arr_v}[{i_v}],{out_v}[{i_v}]) end "
@@ -406,7 +395,7 @@ class Obfuscator:
             vmres_v = gen_name()
             if hide_vm_source:
                 chunk_src = f"return (function(...) {payload} end)(...)"
-                env_names = [detect_var, prims["ks"], prims["xorb"], prims["blk"], prims["nb"], prims["g3"], prims["key"]]
+                env_names = [detect_var, prims["ks"], prims["xorb"], prims["blk"], prims["nb"], prims["g3"], prims["key"], prims["mac_verify"]]
                 vm_loader, vm_fn_v = self.build_hidden_chunk(chunk_src, env_names=env_names)
                 payload_stage = (
                     f"{vm_loader}"
