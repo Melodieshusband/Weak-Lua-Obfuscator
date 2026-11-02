@@ -702,6 +702,9 @@ def build_runtime_header(seeds, var_k, var_Q, var_G, var_B, var_f, var_V, wm_var
 
     key_table_decl = f"local {key_v}={{{','.join(key_field_exprs)}}} "
 
+    nb_decl_body, nb_expr = scatter_value(nonce_base, rot_pool)
+    nb_decl = f"{nb_decl_body}local {nb_v}={nb_expr} "
+
     mac_key_bytes = seeds["MACKEY"]
     mac_words = [
         int.from_bytes(mac_key_bytes[i:i + 4], "big")
@@ -797,9 +800,6 @@ def build_runtime_header(seeds, var_k, var_Q, var_G, var_B, var_f, var_V, wm_var
         f"end "
         f"return {mac_arr_param_v} end "
     )
-
-    nb_decl_body, nb_expr = scatter_value(nonce_base, rot_pool)
-    nb_decl = f"{nb_decl_body}local {nb_v}={nb_expr} "
 
     if is_native_ops:
         xorb_code = f"local function {xorb_v}({par_a},{par_b}) return (({par_a})~({par_b})) end "
