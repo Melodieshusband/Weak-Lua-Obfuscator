@@ -11,7 +11,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - On an HMAC mismatch, the VM payload check no longer drops into a `while true do print(...) end` loop at the check site. That shape is compact and trivially greppable for the exact line that does the real tamper check. `mac_verify` now responds by flipping a pseudo-random byte of the ciphertext buffer (position and value derived from the existing `drv_v` stream) and letting execution fall through into the normal decrypt/run path, so a tampered build fails later, elsewhere in the VM, instead of at an obviously-shaped trap immediately after the comparison.
 
 
-## [2.3]
+### [2.3]
 
 ### Added
 - Multi-dialect support: Lua 5.1 through 5.5, LuaJIT, and FiveM/CfxLua, unified behind a single version-parameterized AST engine (`lua5x_ast.py`, `lua5x_unparse.py`) plus a dedicated LuaJIT engine (`luajit_ast.py`, `luajit_unparse.py`). Previously the obfuscator only targeted Luau.
