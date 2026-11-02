@@ -2059,15 +2059,9 @@ def build_anti_tamper_v2(seeds, rng, var_k, encode_fn, detect_var=None, target="
 
         rbx_extra_c = ""
         if level == "full":
-            fp1_ok = gen_name()
-            fp1_er = gen_name()
-            fp2_ok = gen_name()
-            fp2_er = gen_name()
             rbx_extra_c = (
                 f"if debug.info(Instance.new,'s')~='[C]' or debug.info(Instance.new,'l')~=-1 or "
                 f"debug.info(game.GetService,'s')~='[C]' or debug.info(game.GetService,'l')~=-1 then {kill_v}() end "
-                f"do local {fp1_ok},{fp1_er}=pcall(Instance.new) if {fp1_ok} or type({fp1_er})~='string' or string.find({fp1_er},'Argument 1')==nil then {kill_v}() end "
-                f"local {fp2_ok},{fp2_er}=pcall(game.GetService,game) if {fp2_ok} or type({fp2_er})~='string' or string.find({fp2_er},'Argument 1')==nil then {kill_v}() end end "
             )
 
         parts.append(
@@ -2102,7 +2096,7 @@ def build_anti_tamper_v2(seeds, rng, var_k, encode_fn, detect_var=None, target="
             f"{p_v}:Destroy() end "
         )
         parts.append(
-            f"if type(Vector3.new())~='userdata' or typeof(Vector3.new())~='Vector3' then {kill_v}() end "
+            f"if (type(Vector3.new())~='userdata' and type(Vector3.new())~='vector') or typeof(Vector3.new())~='Vector3' then {kill_v}() end "
             f"if type(CFrame.new())~='userdata' or typeof(CFrame.new())~='CFrame' then {kill_v}() end "
             f"if type(Color3.new())~='userdata' or typeof(Color3.new())~='Color3' then {kill_v}() end "
             f"if type(UDim2.new())~='userdata' or typeof(UDim2.new())~='UDim2' then {kill_v}() end "
