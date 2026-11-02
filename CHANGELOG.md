@@ -9,7 +9,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Security
 - `MACKEY` is no longer embedded as a flat 32-byte Lua table literal next to the HMAC call it protects (`obfuscator.py`, `build_vm_data_expr`). It is now split into 8 words and reconstructed with the same `scatter_value`/`scatter_value_standalone` machinery already used for `KEY` (`codegen.py`, `build_runtime_header`): the first 7 words are interleaved with decoy variables and fake integrity sinks, the last word is routed through a Caesar-ciphered, `loadstring`-booted mini-chunk with the usual hook checks. The reconstructed key only ever exists inside a new header-local `mac_verify` primitive; call sites receive just the public tag and the ciphertext, never the key itself.
 - On an HMAC mismatch, the VM payload check no longer drops into a `while true do print(...) end` loop at the check site. That shape is compact and trivially greppable for the exact line that does the real tamper check. `mac_verify` now responds by flipping a pseudo-random byte of the ciphertext buffer (position and value derived from the existing `drv_v` stream) and letting execution fall through into the normal decrypt/run path, so a tampered build fails later, elsewhere in the VM, instead of at an obviously-shaped trap immediately after the comparison.
-  
+
+
 ## [2.3]
 
 ### Added
