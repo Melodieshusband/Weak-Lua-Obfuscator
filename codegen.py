@@ -682,8 +682,6 @@ def build_runtime_header(seeds, var_k, var_Q, var_G, var_B, var_f, var_V, wm_var
     boot_loader = (
         f"local {boot_ls_v}=loadstring or load "
         f"if type({boot_ls_v})~='function' then error('',0) end "
-        f"if debug and debug.info and(debug.info({boot_ls_v},'s')~='[C]' or debug.info({boot_ls_v},'l')~=-1) then error('',0) end "
-        f"if debug and debug.getinfo and debug.getinfo({boot_ls_v}).what~='C' then error('',0) end "
         f"if (islclosure and islclosure({boot_ls_v})) or (is_synapse_function and is_synapse_function({boot_ls_v})) then error('',0) end "
         f"local {boot_bytes_v}={{{boot_cipher_literal}}} "
         f"local {boot_buf_v}={{}} "
@@ -759,8 +757,6 @@ def build_runtime_header(seeds, var_k, var_Q, var_G, var_B, var_f, var_V, wm_var
         mac_boot_loader = (
             f"local {mac_boot_ls_v}=loadstring or load "
             f"if type({mac_boot_ls_v})~='function' then error('',0) end "
-            f"if debug and debug.info and(debug.info({mac_boot_ls_v},'s')~='[C]' or debug.info({mac_boot_ls_v},'l')~=-1) then error('',0) end "
-            f"if debug and debug.getinfo and debug.getinfo({mac_boot_ls_v}).what~='C' then error('',0) end "
             f"if (islclosure and islclosure({mac_boot_ls_v})) or (is_synapse_function and is_synapse_function({mac_boot_ls_v})) then error('',0) end "
             f"local {mac_boot_bytes_v}={{{mac_boot_cipher_literal}}} "
             f"local {mac_boot_buf_v}={{}} "

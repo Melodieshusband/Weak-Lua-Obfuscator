@@ -109,8 +109,6 @@ class Obfuscator:
         c_bad = gen_name()
         lines.append(f"local {ls_var}=loadstring or load ")
         lines.append(f"if type({ls_var})~='function' then error('',0) end ")
-        lines.append(f"if debug and debug.info and(debug.info({ls_var},'s')~='[C]' or debug.info({ls_var},'l')~=-1) then error('',0) end ")
-        lines.append(f"if debug and debug.getinfo and debug.getinfo({ls_var}).what~='C' then error('',0) end ")
         lines.append(f"if (islclosure and islclosure({ls_var})) or (is_synapse_function and is_synapse_function({ls_var})) then error('',0) end ")
         lines.append(f"local {c_ok},{c_fn}=pcall({ls_var},'return {canary}') ")
         lines.append(f"if not {c_ok} or type({c_fn})~='function' or {c_fn}()~={canary} then error('',0) end ")
@@ -159,8 +157,6 @@ class Obfuscator:
         lines = []
         lines.append(f"local {ls_v}=loadstring or load ")
         lines.append(f"if type({ls_v})~='function' then error('',0) end ")
-        lines.append(f"if debug and debug.info and(debug.info({ls_v},'s')~='[C]' or debug.info({ls_v},'l')~=-1) then error('',0) end ")
-        lines.append(f"if debug and debug.getinfo and debug.getinfo({ls_v}).what~='C' then error('',0) end ")
         lines.append(f"if (islclosure and islclosure({ls_v})) or (is_synapse_function and is_synapse_function({ls_v})) then error('',0) end ")
         lines.append(
             f"local {env_v}=setmetatable({{}},{{__index=(getfenv and getfenv(0)) or _ENV or {{}}}}) "
