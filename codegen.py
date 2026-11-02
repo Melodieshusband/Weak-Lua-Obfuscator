@@ -364,9 +364,12 @@ def build_inflate_runtime(target="luau"):
     }
     return header_defs + src, n['inflatemain'], table_info
 
-def build_runtime_header(seeds, var_k, var_Q, var_G, var_B, var_f, var_V, wm_var, target="luau"):
+def build_runtime_header(seeds, var_k, var_Q, var_G, var_B, var_f, var_V, wm_var, target="luau", no_hmac=False):
     inflate_src, inflate_fn_v, inflate_tables = build_inflate_runtime(target=target)
-    hmac_src, hmac_fn_v = build_sha256_hmac_runtime(target=target)
+    if no_hmac:
+        hmac_src, hmac_fn_v = "", None
+    else:
+        hmac_src, hmac_fn_v = build_sha256_hmac_runtime(target=target)
     flag_v  = gen_name()
     body_v  = gen_name()
     bi_v    = gen_name()
@@ -705,101 +708,116 @@ def build_runtime_header(seeds, var_k, var_Q, var_G, var_B, var_f, var_V, wm_var
     nb_decl_body, nb_expr = scatter_value(nonce_base, rot_pool)
     nb_decl = f"{nb_decl_body}local {nb_v}={nb_expr} "
 
-    mac_key_bytes = seeds["MACKEY"]
-    mac_words = [
-        int.from_bytes(mac_key_bytes[i:i + 4], "big")
-        for i in range(0, 32, 4)
-    ]
+    if no_hmac:
+        mac_field_decls = ""
+        mac_boot_loader = ""
+        mac_boot_call = ""
+        mac_words_table_decl = ""
+        mac_bytes_build = ""
 
-    mac_interleaved = []
-    mac_field_exprs = []
-    for val in mac_words[:-1]:
-        n_here = key_rng.randint(0, 2)
-        for _ in range(n_here):
+        mac_tag_param_v = gen_name()
+        mac_arr_param_v = gen_name()
+        mac_verify_v = gen_name()
+        mac_verify_code = (
+            f"local function {mac_verify_v}({mac_tag_param_v},{mac_arr_param_v}) "
+            f"return {mac_arr_param_v} end "
+        )
+    else:
+        mac_key_bytes = seeds["MACKEY"]
+        mac_words = [
+            int.from_bytes(mac_key_bytes[i:i + 4], "big")
+            for i in range(0, 32, 4)
+        ]
+
+        mac_interleaved = []
+        mac_field_exprs = []
+        for val in mac_words[:-1]:
+            n_here = key_rng.randint(0, 2)
+            for _ in range(n_here):
+                mac_interleaved.append(make_decoy())
+                if key_rng.random() < 0.6:
+                    mac_interleaved.append(make_decoy_sink())
+            decl, expr = scatter_value(val, rot_pool)
+            mac_interleaved.append(decl)
+            mac_field_exprs.append(expr)
+
+        mac_boot_last_val = mac_words[-1]
+        mac_boot_decl, mac_boot_expr = scatter_value_standalone(mac_boot_last_val)
+        mac_boot_src = f"{mac_boot_decl}return {mac_boot_expr}"
+
+        mac_boot_cipher_shift = key_rng.randint(1, 250)
+        mac_boot_cipher_bytes = bytes((b + mac_boot_cipher_shift) % 256 for b in mac_boot_src.encode("utf-8"))
+        mac_boot_cipher_literal = ",".join(str(b) for b in mac_boot_cipher_bytes)
+
+        mac_boot_ls_v = gen_name()
+        mac_boot_buf_v = gen_name()
+        mac_boot_i_v = gen_name()
+        mac_boot_fn_v = gen_name()
+        mac_boot_err_v = gen_name()
+        mac_boot_bytes_v = gen_name()
+
+        mac_boot_loader = (
+            f"local {mac_boot_ls_v}=loadstring or load "
+            f"if type({mac_boot_ls_v})~='function' then error('',0) end "
+            f"if debug and debug.info and(debug.info({mac_boot_ls_v},'s')~='[C]' or debug.info({mac_boot_ls_v},'l')~=-1) then error('',0) end "
+            f"if debug and debug.getinfo and debug.getinfo({mac_boot_ls_v}).what~='C' then error('',0) end "
+            f"if (islclosure and islclosure({mac_boot_ls_v})) or (is_synapse_function and is_synapse_function({mac_boot_ls_v})) then error('',0) end "
+            f"local {mac_boot_bytes_v}={{{mac_boot_cipher_literal}}} "
+            f"local {mac_boot_buf_v}={{}} "
+            f"for {mac_boot_i_v}=1,#{mac_boot_bytes_v},1 do {mac_boot_buf_v}[{mac_boot_i_v}]={sc}(({mac_boot_bytes_v}[{mac_boot_i_v}]-{mac_boot_cipher_shift})%256) end "
+            f"local {mac_boot_fn_v},{mac_boot_err_v}={mac_boot_ls_v}(table.concat({mac_boot_buf_v})) "
+            f"{mac_boot_bytes_v}=nil {mac_boot_buf_v}=nil "
+            f"if not {mac_boot_fn_v} then error({mac_boot_err_v} or '',0) end "
+        )
+
+        mac_boot_result_v = gen_name()
+        mac_boot_call = f"local {mac_boot_result_v}={mac_boot_fn_v}() "
+
+        mac_field_exprs.append(mac_boot_result_v)
+        n_trailing_mac = key_rng.randint(2, 6)
+        for _ in range(n_trailing_mac):
             mac_interleaved.append(make_decoy())
-            if key_rng.random() < 0.6:
-                mac_interleaved.append(make_decoy_sink())
-        decl, expr = scatter_value(val, rot_pool)
-        mac_interleaved.append(decl)
-        mac_field_exprs.append(expr)
 
-    mac_boot_last_val = mac_words[-1]
-    mac_boot_decl, mac_boot_expr = scatter_value_standalone(mac_boot_last_val)
-    mac_boot_src = f"{mac_boot_decl}return {mac_boot_expr}"
+        mac_field_decls = "".join(mac_interleaved)
 
-    mac_boot_cipher_shift = key_rng.randint(1, 250)
-    mac_boot_cipher_bytes = bytes((b + mac_boot_cipher_shift) % 256 for b in mac_boot_src.encode("utf-8"))
-    mac_boot_cipher_literal = ",".join(str(b) for b in mac_boot_cipher_bytes)
+        mac_words_v = gen_name()
+        mac_words_table_decl = f"local {mac_words_v}={{{','.join(mac_field_exprs)}}} "
 
-    mac_boot_ls_v = gen_name()
-    mac_boot_buf_v = gen_name()
-    mac_boot_i_v = gen_name()
-    mac_boot_fn_v = gen_name()
-    mac_boot_err_v = gen_name()
-    mac_boot_bytes_v = gen_name()
+        mac_bytes_v = gen_name()
+        mac_bi_v = gen_name()
+        mac_bw_v = gen_name()
+        mac_bytes_build = (
+            f"local {mac_bytes_v}={{}} "
+            f"for {mac_bi_v}=1,8,1 do "
+            f"local {mac_bw_v}={mac_words_v}[{mac_bi_v}] "
+            f"{mac_bytes_v}[({mac_bi_v}-1)*4+1]=math.floor({mac_bw_v}/16777216)%256 "
+            f"{mac_bytes_v}[({mac_bi_v}-1)*4+2]=math.floor({mac_bw_v}/65536)%256 "
+            f"{mac_bytes_v}[({mac_bi_v}-1)*4+3]=math.floor({mac_bw_v}/256)%256 "
+            f"{mac_bytes_v}[({mac_bi_v}-1)*4+4]={mac_bw_v}%256 "
+            f"end "
+            f"{mac_words_v}=nil "
+        )
 
-    mac_boot_loader = (
-        f"local {mac_boot_ls_v}=loadstring or load "
-        f"if type({mac_boot_ls_v})~='function' then error('',0) end "
-        f"if debug and debug.info and(debug.info({mac_boot_ls_v},'s')~='[C]' or debug.info({mac_boot_ls_v},'l')~=-1) then error('',0) end "
-        f"if debug and debug.getinfo and debug.getinfo({mac_boot_ls_v}).what~='C' then error('',0) end "
-        f"if (islclosure and islclosure({mac_boot_ls_v})) or (is_synapse_function and is_synapse_function({mac_boot_ls_v})) then error('',0) end "
-        f"local {mac_boot_bytes_v}={{{mac_boot_cipher_literal}}} "
-        f"local {mac_boot_buf_v}={{}} "
-        f"for {mac_boot_i_v}=1,#{mac_boot_bytes_v},1 do {mac_boot_buf_v}[{mac_boot_i_v}]={sc}(({mac_boot_bytes_v}[{mac_boot_i_v}]-{mac_boot_cipher_shift})%256) end "
-        f"local {mac_boot_fn_v},{mac_boot_err_v}={mac_boot_ls_v}(table.concat({mac_boot_buf_v})) "
-        f"{mac_boot_bytes_v}=nil {mac_boot_buf_v}=nil "
-        f"if not {mac_boot_fn_v} then error({mac_boot_err_v} or '',0) end "
-    )
-
-    mac_boot_result_v = gen_name()
-    mac_boot_call = f"local {mac_boot_result_v}={mac_boot_fn_v}() "
-
-    mac_field_exprs.append(mac_boot_result_v)
-    n_trailing_mac = key_rng.randint(2, 6)
-    for _ in range(n_trailing_mac):
-        mac_interleaved.append(make_decoy())
-
-    mac_field_decls = "".join(mac_interleaved)
-
-    mac_words_v = gen_name()
-    mac_words_table_decl = f"local {mac_words_v}={{{','.join(mac_field_exprs)}}} "
-
-    mac_bytes_v = gen_name()
-    mac_bi_v = gen_name()
-    mac_bw_v = gen_name()
-    mac_bytes_build = (
-        f"local {mac_bytes_v}={{}} "
-        f"for {mac_bi_v}=1,8,1 do "
-        f"local {mac_bw_v}={mac_words_v}[{mac_bi_v}] "
-        f"{mac_bytes_v}[({mac_bi_v}-1)*4+1]=math.floor({mac_bw_v}/16777216)%256 "
-        f"{mac_bytes_v}[({mac_bi_v}-1)*4+2]=math.floor({mac_bw_v}/65536)%256 "
-        f"{mac_bytes_v}[({mac_bi_v}-1)*4+3]=math.floor({mac_bw_v}/256)%256 "
-        f"{mac_bytes_v}[({mac_bi_v}-1)*4+4]={mac_bw_v}%256 "
-        f"end "
-        f"{mac_words_v}=nil "
-    )
-
-    mac_tag_param_v = gen_name()
-    mac_arr_param_v = gen_name()
-    mac_got_v = gen_name()
-    mac_ok_v = gen_name()
-    mac_j_v = gen_name()
-    mac_pos_v = gen_name()
-    mac_salt1 = key_rng.randint(0, MASK32)
-    mac_salt2 = key_rng.randint(0, MASK32)
-    mac_verify_v = gen_name()
-    mac_verify_code = (
-        f"local function {mac_verify_v}({mac_tag_param_v},{mac_arr_param_v}) "
-        f"local {mac_got_v}={hmac_fn_v}({mac_bytes_v},{mac_arr_param_v}) "
-        f"local {mac_ok_v}=true "
-        f"for {mac_j_v}=1,32 do if {mac_got_v}[{mac_j_v}]~={mac_tag_param_v}[{mac_j_v}] then {mac_ok_v}=false end end "
-        f"if not {mac_ok_v} then "
-        f"local {mac_pos_v}=({drv_v}({mac_salt1})%#{mac_arr_param_v})+1 "
-        f"{mac_arr_param_v}[{mac_pos_v}]=({mac_arr_param_v}[{mac_pos_v}]+{drv_v}({mac_salt2}))%256 "
-        f"end "
-        f"return {mac_arr_param_v} end "
-    )
+        mac_tag_param_v = gen_name()
+        mac_arr_param_v = gen_name()
+        mac_got_v = gen_name()
+        mac_ok_v = gen_name()
+        mac_j_v = gen_name()
+        mac_pos_v = gen_name()
+        mac_salt1 = key_rng.randint(0, MASK32)
+        mac_salt2 = key_rng.randint(0, MASK32)
+        mac_verify_v = gen_name()
+        mac_verify_code = (
+            f"local function {mac_verify_v}({mac_tag_param_v},{mac_arr_param_v}) "
+            f"local {mac_got_v}={hmac_fn_v}({mac_bytes_v},{mac_arr_param_v}) "
+            f"local {mac_ok_v}=true "
+            f"for {mac_j_v}=1,32 do if {mac_got_v}[{mac_j_v}]~={mac_tag_param_v}[{mac_j_v}] then {mac_ok_v}=false end end "
+            f"if not {mac_ok_v} then "
+            f"local {mac_pos_v}=({drv_v}({mac_salt1})%#{mac_arr_param_v})+1 "
+            f"{mac_arr_param_v}[{mac_pos_v}]=({mac_arr_param_v}[{mac_pos_v}]+{drv_v}({mac_salt2}))%256 "
+            f"end "
+            f"return {mac_arr_param_v} end "
+        )
 
     if is_native_ops:
         xorb_code = f"local function {xorb_v}({par_a},{par_b}) return (({par_a})~({par_b})) end "

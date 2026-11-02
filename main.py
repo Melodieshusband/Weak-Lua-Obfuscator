@@ -8,6 +8,7 @@ def main():
     force_vm = '--vm' in raw_args
     force_fold = '--fold' in raw_args
     hide_vm_source = '--hide-vm-source' in raw_args
+    no_hmac = '--no-hmac' in raw_args
 
     cff_full = '--cff' in raw_args or '--cff-full' in raw_args or '--cff-v2' in raw_args
     cff_legacy = '--cff-legacy' in raw_args or '--cff-v1' in raw_args
@@ -114,6 +115,7 @@ def main():
         print("  --vm                     Use VM bytecode (default)")
         print("  --fold                   Use string-fold (without VM)")
         print("  --hide-vm-source         Encrypt the VM dispatch loop (requires loadstring/load)")
+        print("  --no-hmac                Disable the HMAC-SHA256 payload integrity check")
         print("")
         print("Control-flow flattening flags (VM mode only):")
         print("  --cff-full               Full state-machine CFF with dispatch table (default)")
@@ -196,6 +198,7 @@ def main():
             at_version=at_version,
             at_target=at_target,
             cff_mode=cff_mode,
+            no_hmac=no_hmac,
         )
     except RuntimeError as e:
         print(f"[!] {e}")

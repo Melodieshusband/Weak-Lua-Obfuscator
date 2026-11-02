@@ -213,7 +213,7 @@ class Obfuscator:
         )
         return expr
 
-    def obfuscate(self, force_vm=False, force_fold=False, anti_tamper_level="full", hide_vm_source=False, at_version="v2", at_target="luau", cff_mode="full"):
+    def obfuscate(self, force_vm=False, force_fold=False, anti_tamper_level="full", hide_vm_source=False, at_version="v2", at_target="luau", cff_mode="full", no_hmac=False):
         source = self.source
         rng = self.rng
 
@@ -235,6 +235,7 @@ class Obfuscator:
             self.var_B, self.var_f, self.var_V,
             self.wm_var,
             target=at_target,
+            no_hmac=no_hmac,
         )
 
         if at_target == "luajit":
@@ -458,5 +459,5 @@ class Obfuscator:
             mode = f"{mode}, bytecode: {bc_label}, CFF: {cff_label}"
         else:
             mode = "chunks+string-fold"
-        mode = f"{mode}, Anti-Tamper: {at_label}"
+        mode = f"{mode}, Anti-Tamper: {at_label}, HMAC: {'disabled' if no_hmac else 'enabled'}"
         return banner + header + body + footer, mode
