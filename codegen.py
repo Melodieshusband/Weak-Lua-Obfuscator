@@ -70,7 +70,7 @@ def build_sha256_hmac_runtime(target="luau"):
             f"local function {lshift_fn}(a,b) return (a<<b)&4294967295 end "
             f"local function {rshift_fn}(a,b) return (a&4294967295)>>b end "
         )
-    elif target == "luajit":
+    elif target in ("luajit", "glua"):
         header_defs = (
             f"local {band_fn},{bor_fn},{bxor_fn},{lshift_fn},{rshift_fn}="
             f"bit.band,bit.bor,bit.bxor,bit.lshift,bit.rshift "
@@ -200,7 +200,7 @@ def build_inflate_runtime(target="luau"):
             f"local function {lshift_fn}(a,b) return (a<<b)&4294967295 end "
             f"local function {rshift_fn}(a,b) return ((a&4294967295)>>b)&4294967295 end "
         )
-    elif target == "luajit":
+    elif target in ("luajit", "glua"):
         header_defs = (
             f"local {band_fn},{bor_fn},{lshift_fn},{rshift_fn}=bit.band,bit.bor,bit.lshift,bit.rshift "
         )
@@ -459,7 +459,7 @@ def build_runtime_header(seeds, var_k, var_Q, var_G, var_B, var_f, var_V, wm_var
     drv_mix  = key_rng.randint(0, MASK32) | 1
 
     is_native_ops = target in ("lua53", "lua54", "lua55", "fivem")
-    is_luajit = (target == "luajit")
+    is_luajit = target in ("luajit", "glua")
     is_lua51 = (target == "lua51")
 
     if is_native_ops:
@@ -1075,6 +1075,9 @@ def build_lua55_polyfill():
     return ""
 
 def build_fivem_polyfill():
+    return ""
+
+def build_glua_polyfill():
     return ""
 
 def build_vm_dispatch(rng):
@@ -1906,7 +1909,7 @@ def build_anti_tamper_v2(seeds, rng, var_k, encode_fn, detect_var=None, target="
         if target in ("lua53", "lua54", "lua55", "fivem")
         else (
             f"if (bit.band(15,1)~=1) or (bit.bor(2,1)~=3) or (bit.bxor(5,5)~=0) or (bit.lshift(1,3)~=8) or (bit.rshift(8,3)~=1) or (bit.rol(1,1)~=2) or (bit.bnot(0)~=-1) then {kill_v}() end "
-            if target == "luajit"
+            if target in ("luajit", "glua")
             else (
                 f"if (bit32.band(15,1)~=1) or (bit32.bor(2,1)~=3) or (bit32.bxor(5,5)~=0) or (bit32.lshift(1,3)~=8) or (bit32.rshift(8,3)~=1) or (bit32.lrotate(1,1)~=2) or (bit32.bnot(0)~=0xFFFFFFFF) or (bit32.arshift(-16,2)~=0xFFFFFFFC) or (bit32.extract(0xABCD,4,8)~=0xBC) then {kill_v}() end "
                 if target in ("lua52", "luau", "roblox")
@@ -1975,6 +1978,43 @@ def build_anti_tamper_v2(seeds, rng, var_k, encode_fn, detect_var=None, target="
             f"do local {ev_v}=(getfenv and getfenv(0)) or _ENV or _G or {{}} "
             f"if rawget({ev_v},'__DEBUG__') or rawget({ev_v},'__BREAKPOINT__') or rawget({ev_v},'__ATTACHED__') or rawget({ev_v},'MobDebug') or rawget({ev_v},'remdebug') or rawget({ev_v},'ldb') or rawget({ev_v},'BreakpointHook') then {kill_v}() end "
             f"end "
+        )
+    elif target == "glua":
+        ssv_v = gen_name()
+        jver_v = gen_name()
+        parts.append(
+            f"if _VERSION~='Lua 5.1' then {kill_v}() end "
+        )
+        parts.append(
+            f"if type(jit)~='table' or type(jit.version)~='string' or type(jit.os)~='string' or type(jit.arch)~='string' then {kill_v}() end "
+            f"do local {jver_v}=jit.version if {jver_v}:sub(1,6)~='LuaJIT' then {kill_v}() end end "
+        )
+        parts.append(
+            f"if debug and debug.getinfo then "
+            f"do local {cf_v}=function() return 1 end local {s_v}=debug.getinfo({cf_v},'S').short_src local {l_v}=debug.getinfo({cf_v},'S').linedefined if {s_v}=='[C]' or {l_v}<1 then {kill_v}() end end "
+            f"local {cfns_v}={{type,pcall,xpcall,error,setmetatable,getmetatable,rawget,rawset,select,tonumber,tostring,pairs,ipairs,next,string.byte,string.char,string.sub,string.len,string.find,table.insert,table.remove,table.concat,math.floor,math.ceil,math.abs,coroutine.create,coroutine.resume,coroutine.yield,coroutine.status}} "
+            f"for _,{fn_v} in ipairs({cfns_v}) do local {ssv_v}=debug.getinfo({fn_v},'S').short_src if {ssv_v}~='[C]' then {kill_v}() end end "
+            f"if debug.getinfo(pcall).what~='C' or debug.getinfo(type).what~='C' or debug.getinfo(setmetatable).what~='C' then {kill_v}() end "
+            f"end "
+        )
+        parts.append(
+            f"do local {ev_v}=(getfenv and getfenv(0)) or _ENV or _G or {{}} "
+            f"if rawget({ev_v},'__DEBUG__') or rawget({ev_v},'__BREAKPOINT__') or rawget({ev_v},'__ATTACHED__') or rawget({ev_v},'MobDebug') or rawget({ev_v},'remdebug') or rawget({ev_v},'ldb') or rawget({ev_v},'BreakpointHook') then {kill_v}() end "
+            f"if rawget({ev_v},'_R')~=nil then {kill_v}() end "
+            f"end "
+        )
+        parts.append(
+            f"if type(SERVER)~='boolean' or type(CLIENT)~='boolean' or type(MENU_DLL)~='boolean' then {kill_v}() end "
+            f"if SERVER and CLIENT then {kill_v}() end "
+            f"if type(hook)~='table' or type(hook.Add)~='function' or type(hook.Call)~='function' or type(hook.Remove)~='function' then {kill_v}() end "
+            f"if type(timer)~='table' or type(timer.Create)~='function' or type(timer.Simple)~='function' or type(timer.Exists)~='function' then {kill_v}() end "
+            f"if type(net)~='table' or type(net.Start)~='function' or type(net.Receive)~='function' then {kill_v}() end "
+            f"if type(concommand)~='table' or type(concommand.Add)~='function' then {kill_v}() end "
+            f"if type(cvars)~='table' or type(cvars.AddChangeCallback)~='function' then {kill_v}() end "
+            f"if type(game)~='table' or type(game.SinglePlayer)~='function' or type(game.GetMap)~='function' then {kill_v}() end "
+            f"if type(util)~='table' or type(util.TraceLine)~='function' then {kill_v}() end "
+            f"if type(ents)~='table' or type(ents.GetAll)~='function' or type(ents.FindByClass)~='function' then {kill_v}() end "
+            f"if type(debug.getregistry)~='function' then {kill_v}() end "
         )
     elif target == "lua51":
         parts.append(

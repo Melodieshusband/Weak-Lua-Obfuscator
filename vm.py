@@ -1210,12 +1210,22 @@ KEYWORDS = {
     'goto','if','in','local','nil','not','or','repeat','return','then','true',
     'until','while',
 }
-def tokenize(src):
+def tokenize(src, target="luau"):
     from fivem_hash import joaat
+    is_glua = (target == "glua")
     tokens = []
     i = 0
     n = len(src)
     while i < n:
+        if is_glua and src[i] == '/' and i + 1 < n and src[i+1] == '/':
+            i += 2
+            while i < n and src[i] != '\n':
+                i += 1
+            continue
+        if is_glua and src[i] == '/' and i + 1 < n and src[i+1] == '*':
+            end = src.find('*/', i + 2)
+            i = (end + 2) if end != -1 else n
+            continue
         if src[i] == '`':
             j = i + 1
             while j < n and src[j] != '`':
@@ -1332,10 +1342,26 @@ def tokenize(src):
             i += 3
             continue
         two = src[i:i+2]
+        if is_glua and two == '!=':
+            tokens.append(('OP', '~='))
+            i += 2
+            continue
+        if is_glua and two == '&&':
+            tokens.append(('KW', 'and'))
+            i += 2
+            continue
+        if is_glua and two == '||':
+            tokens.append(('KW', 'or'))
+            i += 2
+            continue
         if two in ('==','~=','<=','>=','..','//','<<','>>',
                     '+=','-=','*=','/=','%=','^=','&=','|='):
             tokens.append(('OP', two))
             i += 2
+            continue
+        if is_glua and src[i] == '!':
+            tokens.append(('KW', 'not'))
+            i += 1
             continue
         if src[i] in '+-*/%^<>=.&|~':
             tokens.append(('OP', src[i]))
@@ -1849,7 +1875,7 @@ def try_compile_vm(source, rng=None, debug=False, target="luau", cff_mode="full"
     try:
         opmap = make_opmap()
         _patch_global_ops(opmap)
-        tokens = tokenize(source)
+        tokens = tokenize(source, target=target)
         parser = Parser(tokens)
         ast = parser.parse()
         compiler = Compiler()
@@ -1885,7 +1911,7 @@ def _patch_global_ops(opmap):
 def _get_vm_dialect_prims(target, gen_name_fn):
     N = gen_name_fn
     is_native_ops = target in ("lua53", "lua54", "lua55", "fivem")
-    is_luajit = (target == "luajit")
+    is_luajit = target in ("luajit", "glua")
     is_lua51 = (target == "lua51")
 
     bitlib_v = N()

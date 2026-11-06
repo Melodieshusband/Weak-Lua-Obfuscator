@@ -37,6 +37,8 @@ def main():
         '--lua55': 'lua55',
         '--lua5.5': 'lua55',
         '--fivem': 'fivem',
+        '--glua': 'glua',
+        '--gmod': 'glua',
     }
 
     alias_map = {
@@ -68,6 +70,9 @@ def main():
         'cfx': 'fivem',
         'cfxlua': 'fivem',
         'redm': 'fivem',
+        'glua': 'glua',
+        'gmod': 'glua',
+        'garrysmod': 'glua',
     }
 
     pos_args = []
@@ -132,6 +137,7 @@ def main():
         print("  --lua54                  Target Lua 5.4")
         print("  --lua55                  Target Lua 5.5")
         print("  --fivem                  Target FiveM/RedM (CfxLua, Lua 5.4 based)")
+        print("  --gmod                   Target Garry's Mod (GLua, LuaJIT 2.0.4 based)")
         print("  --target <name>          Specify target name directly")
         print("")
         print("Anti-Tamper flags:")

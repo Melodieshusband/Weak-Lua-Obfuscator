@@ -451,6 +451,11 @@ def flatten_source(source, rng, gen_name_fn, detect_var=None, target='luau'):
         from luajit_unparse import unparse_block as target_unparse_block
         parse_fn = target_parse
         unparse_fn = target_unparse_block
+    elif target == 'glua':
+        from luajit_ast import parse as target_parse, LuauSyntaxError as TargetSyntaxError
+        from luajit_unparse import unparse_block as target_unparse_block
+        parse_fn = lambda s: target_parse(s, glua=True)
+        unparse_fn = target_unparse_block
     elif target in ('lua51', 'lua52', 'lua53', 'lua54', 'lua55'):
         from lua5x_ast import parse as target_parse, Lua5xSyntaxError as TargetSyntaxError
         from lua5x_unparse import unparse_block as target_unparse_block

@@ -10,7 +10,7 @@ A source-level obfuscator written in pure Python — custom bytecode VM, ChaCha2
 ![Python](https://img.shields.io/badge/Python-3.8%2B-3776AB?logo=python&logoColor=white)
 ![Dependencies](https://img.shields.io/badge/dependencies-none-success)
 ![License](https://img.shields.io/badge/license-MIT-blue)
-![Targets](https://img.shields.io/badge/targets-Lua%205.1--5.5%20%7C%20LuaJIT%20%7C%20Luau%20%7C%20FiveM-success)
+![Targets](https://img.shields.io/badge/targets-Lua%205.1--5.5%20%7C%20LuaJIT%20%7C%20Luau%20%7C%20FiveM%20%7C%20GLua-success)
 
 [Quick Start](#-quick-start) •
 [Supported Dialects](#-supported-lua-dialects) •
@@ -88,7 +88,8 @@ python main.py <input.lua> [output.lua] [--vm | --fold] [CFF flag] [anti-tamper 
 | `--lua54` | Target PUC-Rio Lua 5.4 |
 | `--lua55` | Target PUC-Rio Lua 5.5 |
 | `--fivem` | Target FiveM/RedM (CfxLua, Lua 5.4 based) — **untested, see warning below** |
-| `--target <name>` | Specify target directly by name (e.g. `--target lua54`, `--target fivem`) |
+| `--gmod` / `--glua` | Target Garry's Mod (GLua, LuaJIT 2.0.4 based) |
+| `--target <name>` | Specify target directly by name (e.g. `--target lua54`, `--target fivem`, `--target gmod`) |
 
 > [!NOTE]
 > `--vm` and `--fold` are mutually exclusive, and only one anti-tamper flag may be given at a time. Anti-tamper flags are independent of the mode flags.
@@ -96,6 +97,9 @@ python main.py <input.lua> [output.lua] [--vm | --fold] [CFF flag] [anti-tamper 
 ## 🌐 Supported Lua Dialects
 
 Weak provides native, first-class support for every major Lua dialect. Code generation, VM instruction dispatch, and runtime primitives are tailored to each runtime without polyfills or runtime shims.
+
+> [!NOTE]
+> Like `--fivem`, the `--gmod`/`--glua` target was built against public GLua/GMod documentation (Facepunch wiki, `garry.net`), not a real Garry's Mod client. The syntax layer (C-style comments, `!`/`!=`/`&&`/`\|\|`) and `bit`-library codegen reuse the already-tested LuaJIT engine, but the GMod-specific anti-tamper checks (`SERVER`/`CLIENT`/`MENU_DLL`, `hook`, `timer`, `net`, `concommand`, `cvars`, `game`, `util`, `ents`) are unverified against a live game instance. Reports welcome.
 
 | Dialect | Flag | Target Argument | Bitwise & Arithmetic Strategy | Special Syntax & Features |
 | --- | --- | --- | --- | --- |
@@ -108,12 +112,13 @@ Weak provides native, first-class support for every major Lua dialect. Code gene
 | **Lua 5.4** | `--lua54` | `--target lua54` | Native operators (`&`, `\|`, `~`, `<<`, `>>`, `//`) | `<const>` and `<close>` variable attributes, native integer division |
 | **Lua 5.5** | `--lua55` | `--target lua55` | Native operators (`&`, `\|`, `~`, `<<`, `>>`, `//`) | Modern Lua 5.5 grammar and standard library features |
 | **FiveM / RedM** ⚠️ | `--fivem` | `--target fivem` | Native operators (`&`, `\|`, `~`, `<<`, `>>`, `//`) | CfxLua compound assignment (`+=`, `-=`, `*=`, `/=`, `^=`, `&=`, `\|=`, `<<=`, `>>=`), `` `backtick` `` compile-time Jenkins/joaat hash literals, FiveM-specific anti-tamper (`IsDuplicityVersion`, `Citizen.CreateThread`, natives, `exports`) — **see [FiveM / RedM Support](#-fivem--redm-support-unverified) below before using this in production** |
+| **Garry's Mod (GLua)** | `--gmod` / `--glua` | `--target gmod` | `bit` library (LuaJIT-native, same as `--luajit`) | C-style comments (`//`, `/* */`), `!`, `!=`, `&&`, `\|\|` operator aliases, `continue`, GMod-specific anti-tamper (`SERVER`/`CLIENT`/`MENU_DLL` realm checks, `jit.version`, `hook`/`timer`/`net`/`concommand`/`cvars`/`game`/`util`/`ents` presence, `_R` removal check) |
 
 ### Native Architecture
 
 - **Lua 5.x Unification (`lua5x_ast.py` & `lua5x_unparse.py`)**: All PUC-Rio Lua versions (5.1 through 5.5) are unified in a single version-parameterized AST engine. The parser automatically respects version-specific syntax rules (labels in 5.2+, bitwise operators and integer division in 5.3+, variable attributes in 5.4+).
 - **Dedicated Luau Engine (`luau_ast.py` & `luau_unparse.py`)**: Standalone parser and unparser for Luau, supporting compound assignments, continue statements, and Luau grammar extensions.
-- **Dedicated LuaJIT Engine (`luajit_ast.py` & `luajit_unparse.py`)**: Isolated engine handling LuaJIT 2.0 / 2.1 syntax, labels, and built-in `bit` library calls.
+- **Dedicated LuaJIT Engine (`luajit_ast.py` & `luajit_unparse.py`)**: Isolated engine handling LuaJIT 2.0 / 2.1 syntax, labels, and built-in `bit` library calls. The same engine powers `--gmod`/`--glua`, with GLua's C-style comments and `!`/`!=`/`&&`/`\|\|` operator aliases accepted on top.
 - **Dialect-Native VM (`vm.py`)**: The bytecode virtual machine emits authentic native operators under Lua 5.3–5.5 (`&`, `\|`, `~`, `<<`, `>>`, `//`), standard `bit` calls on LuaJIT, `bit32` on Lua 5.2 and Luau, and arithmetic primitives on Lua 5.1.
 
 ## 🧩 Modes

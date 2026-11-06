@@ -7,7 +7,7 @@ from codegen import (
     build_anti_tamper, build_runtime_footer,
     deflate_tables_blob, build_luajit_polyfill, build_lua51_polyfill,
     build_lua52_polyfill, build_lua53_polyfill, build_lua54_polyfill, build_lua55_polyfill,
-    build_fivem_polyfill,
+    build_fivem_polyfill, build_glua_polyfill,
 )
 from vm import try_compile_vm, bytecode_to_lua, bytecode_to_lua_legacy
 from string_fold import fold_strings
@@ -248,6 +248,8 @@ class Obfuscator:
             header = build_lua55_polyfill() + header
         elif at_target == "fivem":
             header = build_fivem_polyfill() + header
+        elif at_target == "glua":
+            header = build_glua_polyfill() + header
 
         it = prims["inflate_tables"]
         tables_expr = self.k_call_uncompressed(deflate_tables_blob())

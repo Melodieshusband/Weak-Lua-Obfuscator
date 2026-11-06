@@ -23,7 +23,7 @@ class Token:
         return f"Token({self.kind!r},{self.value!r})"
 
 
-def tokenize(src):
+def tokenize(src, glua=False):
     tokens = []
     i = 0
     n = len(src)
@@ -36,6 +36,17 @@ def tokenize(src):
 
         if c in ' \t\r\n':
             i += 1
+            continue
+
+        if glua and c == '/' and i + 1 < n and src[i+1] == '/':
+            i += 2
+            while i < n and src[i] != '\n':
+                i += 1
+            continue
+
+        if glua and c == '/' and i + 1 < n and src[i+1] == '*':
+            end = src.find('*/', i + 2)
+            i = (end + 2) if end != -1 else n
             continue
 
         if c == '-' and i + 1 < n and src[i+1] == '-':
@@ -174,10 +185,30 @@ def tokenize(src):
             continue
 
         two = src[i:i+2]
+        if glua and two == '!=':
+            emit('OP', '~=', two)
+            i += 2
+            continue
+
+        if glua and two == '&&':
+            emit('KW', 'and', two)
+            i += 2
+            continue
+
+        if glua and two == '||':
+            emit('KW', 'or', two)
+            i += 2
+            continue
+
         if two in ('==', '~=', '<=', '>=', '..', '//', '::', '<<', '>>', '+=', '-=',
                    '*=', '/=', '%=', '^='):
             emit('OP', two, two)
             i += 2
+            continue
+
+        if glua and c == '!':
+            emit('KW', 'not', c)
+            i += 1
             continue
 
         if c in '+-*/%^<>=.~#&|':
@@ -682,7 +713,7 @@ class Parser:
         return N('Table', fields=fields)
 
 
-def parse(src):
-    toks = tokenize(src)
+def parse(src, glua=False):
+    toks = tokenize(src, glua=glua)
     p = Parser(toks)
     return p.parse_chunk()
