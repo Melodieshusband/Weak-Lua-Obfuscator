@@ -137,8 +137,6 @@ Unlike the FiveM target, the GLua target has been exercised in a real game, not 
 - the global `type` is a Lua function (`garrysmod/lua/includes/util.lua`), not a C function, so it is not required to report `[C]`;
 - LuaJIT reports fast functions with `[builtin...]` `short_src` values, so the C-function check accepts `[C]` and `[builtin...]`.
 
-Demo scripts and generated samples are in `FIXES/demo/` of the fixed archive: `weak_demo.lua` (source), `weak_demo_obf.lua` (minimal), `weak_demo_obf_full.lua` (full), `weak_demo_obf_noat.lua` (no anti-tamper), and `weak_debug.lua` (in-game diagnostic).
-
 ### Native Architecture
 
 - **Lua 5.x Unification (`lua5x_ast.py` & `lua5x_unparse.py`)**: All PUC-Rio Lua versions (5.1 through 5.5) are unified in a single version-parameterized AST engine. The parser automatically respects version-specific syntax rules (labels in 5.2+, bitwise operators and integer division in 5.3+, variable attributes in 5.4+).
