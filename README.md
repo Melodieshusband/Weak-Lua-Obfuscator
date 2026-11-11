@@ -14,6 +14,7 @@ A source-level obfuscator written in pure Python — custom bytecode VM, ChaCha2
 
 [Quick Start](#-quick-start) •
 [Supported Dialects](#-supported-lua-dialects) •
+[Garry's Mod](#garrys-mod-glua-verified-in-game) •
 [Features](#-features) •
 [Modes](#-modes) •
 [Anti-Tamper](#-anti-tamper) •
@@ -99,7 +100,7 @@ python main.py <input.lua> [output.lua] [--vm | --fold] [CFF flag] [anti-tamper 
 Weak provides native, first-class support for every major Lua dialect. Code generation, VM instruction dispatch, and runtime primitives are tailored to each runtime without polyfills or runtime shims.
 
 > [!NOTE]
-> Like `--fivem`, the `--gmod`/`--glua` target was built against public GLua/GMod documentation (Facepunch wiki, `garry.net`), not a real Garry's Mod client. The syntax layer (C-style comments, `!`/`!=`/`&&`/`\|\|`) and `bit`-library codegen reuse the already-tested LuaJIT engine, but the GMod-specific anti-tamper checks (`SERVER`/`CLIENT`/`MENU_DLL`, `hook`, `timer`, `net`, `concommand`, `cvars`, `game`, `util`, `ents`) are unverified against a live game instance. Reports welcome.
+> The `--gmod`/`--glua` target was **verified in a real, licensed Garry's Mod client** (client Lua state, LuaJIT 2.0.4 on Windows): the obfuscated chunk was loaded with `lua_openscript_cl`, the demo HUD rendered, `concommand.Add` and `timer.Create` worked, and both the minimal and full anti-tamper builds passed GMod's realm checks without false positives. See [Garry's Mod (GLua) — Verified In-Game](#garrys-mod-glua-verified-in-game). The syntax layer (C-style comments, `!`/`!=`/`&&`/`\|\|`) and `bit`-library codegen reuse the already-tested LuaJIT engine.
 
 | Dialect | Flag | Target Argument | Bitwise & Arithmetic Strategy | Special Syntax & Features |
 | --- | --- | --- | --- | --- |
@@ -113,6 +114,30 @@ Weak provides native, first-class support for every major Lua dialect. Code gene
 | **Lua 5.5** | `--lua55` | `--target lua55` | Native operators (`&`, `\|`, `~`, `<<`, `>>`, `//`) | Modern Lua 5.5 grammar and standard library features |
 | **FiveM / RedM** ⚠️ | `--fivem` | `--target fivem` | Native operators (`&`, `\|`, `~`, `<<`, `>>`, `//`) | CfxLua compound assignment (`+=`, `-=`, `*=`, `/=`, `^=`, `&=`, `\|=`, `<<=`, `>>=`), `` `backtick` `` compile-time Jenkins/joaat hash literals, FiveM-specific anti-tamper (`IsDuplicityVersion`, `Citizen.CreateThread`, natives, `exports`) — **see [FiveM / RedM Support](#-fivem--redm-support-unverified) below before using this in production** |
 | **Garry's Mod (GLua)** | `--gmod` / `--glua` | `--target gmod` | `bit` library (LuaJIT-native, same as `--luajit`) | C-style comments (`//`, `/* */`), `!`, `!=`, `&&`, `\|\|` operator aliases, `continue`, GMod-specific anti-tamper (`SERVER`/`CLIENT`/`MENU_DLL` realm checks, `jit.version`, `hook`/`timer`/`net`/`concommand`/`cvars`/`game`/`util`/`ents` presence, `_R` removal check) |
+
+### Garry's Mod (GLua): Verified In-Game
+
+Unlike the FiveM target, the GLua target has been exercised in a real game, not just in an emulator.
+
+**Test environment:** retail (licensed) Garry's Mod on Windows, client Lua state, LuaJIT 2.0.4 (`_VERSION == "Lua 5.1"`), script loaded with `lua_openscript_cl`.
+
+**Verified in game:**
+
+- the obfuscated chunk compiles and executes;
+- the clientside `HUDPaint` hook renders the demo panel (HP/AP/FPS/ping/time);
+- `concommand.Add("weak_demo_toggle")` toggles the panel;
+- `timer.Create` fires;
+- both `--minimal-anti-tamper` and `--full-anti-tamper` builds pass the GMod environment checks with no false-positive kills;
+- deliberately tampered builds are still detected (decoy message followed by the kill).
+
+**GMod-specific behaviour accounted for:**
+
+- GMod does not expose `loadstring`/`load` — the generated loaders use `CompileString(code, identifier, handleError)` instead;
+- `MENU_DLL` is `nil` in the client state (it only exists in the menu state), so the realm check accepts `nil` or a boolean;
+- the global `type` is a Lua function (`garrysmod/lua/includes/util.lua`), not a C function, so it is not required to report `[C]`;
+- LuaJIT reports fast functions with `[builtin...]` `short_src` values, so the C-function check accepts `[C]` and `[builtin...]`.
+
+Demo scripts and generated samples are in `FIXES/demo/` of the fixed archive: `weak_demo.lua` (source), `weak_demo_obf.lua` (minimal), `weak_demo_obf_full.lua` (full), `weak_demo_obf_noat.lua` (no anti-tamper), and `weak_debug.lua` (in-game diagnostic).
 
 ### Native Architecture
 
@@ -255,7 +280,7 @@ Full is the default — only step down if you're actually seeing false-positive 
 
 ## 🎮 Executor Compatibility
 
-All anti-tamper checks in this build were tested and validated on **Delta**, where the default check set produces no false-positive kills.
+All anti-tamper checks in this build were tested and validated on **Delta**, where the default check set produces no false-positive kills. For the `--gmod`/`--glua` target the checks were additionally validated in a real, licensed Garry's Mod client (see [Garry's Mod (GLua) — Verified In-Game](#garrys-mod-glua-verified-in-game)).
 
 Other executors are untested and may behave differently — some intentionally spoof or sandbox APIs like `getrawmetatable`, `getfenv`, or `_G` contents, which the anti-tamper layer can read as tampering.
 

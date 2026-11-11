@@ -2,7 +2,7 @@ import random
 import secrets
 from crypto import make_seeds, encode_string, encrypt_bytes, hmac_sha256
 from codegen import (
-    reset_names, gen_name,
+    reset_names, gen_name, loader_expr,
     build_runtime_header, build_vm_dispatch,
     build_anti_tamper, build_runtime_footer,
     deflate_tables_blob, build_luajit_polyfill, build_lua51_polyfill,
@@ -107,7 +107,7 @@ class Obfuscator:
         c_fn = gen_name()
         c_ok = gen_name()
         c_bad = gen_name()
-        lines.append(f"local {ls_var}=loadstring or load ")
+        lines.append(f"local {ls_var}={loader_expr()} ")
         lines.append(f"if type({ls_var})~='function' then error('',0) end ")
         lines.append(f"if (islclosure and islclosure({ls_var})) or (is_synapse_function and is_synapse_function({ls_var})) then error('',0) end ")
         lines.append(f"local {c_ok},{c_fn}=pcall({ls_var},'return {canary}') ")
@@ -155,7 +155,7 @@ class Obfuscator:
         fn_v = gen_name()
         er_v = gen_name()
         lines = []
-        lines.append(f"local {ls_v}=loadstring or load ")
+        lines.append(f"local {ls_v}={loader_expr()} ")
         lines.append(f"if type({ls_v})~='function' then error('',0) end ")
         lines.append(f"if (islclosure and islclosure({ls_v})) or (is_synapse_function and is_synapse_function({ls_v})) then error('',0) end ")
         lines.append(

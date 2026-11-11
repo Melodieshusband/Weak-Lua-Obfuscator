@@ -32,6 +32,22 @@ def gen_name(rng=None):
             _used_names.add(name)
             return name
 
+def loader_expr():
+    """Lua expression that evaluates to a string->function loader.
+
+    Garry's Mod does not expose loadstring/load to Lua; it provides
+    CompileString(code, identifier, handleError) instead. Prefer that when it
+    exists, fall back to loadstring/load everywhere else. The CompileString
+    wrapper raises on syntax errors so callers that test for a failed compile
+    keep working.
+    """
+    return (
+        "((type(CompileString)=='function') and function(s,n) "
+        "local f,e=CompileString(s,n or '=(obf)',false) "
+        "if type(f)~='function' then error(e or '',0) end "
+        "return f end) or loadstring or load"
+    )
+
 DEFLATE_LEN_BASE = [3,4,5,6,7,8,9,10,11,13,15,17,19,23,27,31,35,43,51,59,67,83,99,115,131,163,195,227,258]
 DEFLATE_LEN_EXTRA = [0,0,0,0,0,0,0,0,1,1,1,1,2,2,2,2,3,3,3,3,4,4,4,4,5,5,5,5,0]
 DEFLATE_DIST_BASE = [1,2,3,4,5,7,9,13,17,25,33,49,65,97,129,193,257,385,513,769,1025,1537,2049,3073,4097,6145,8193,12289,16385,24577]
@@ -541,41 +557,42 @@ def build_runtime_header(seeds, var_k, var_Q, var_G, var_B, var_f, var_V, wm_var
         shares.append(last)
         key_rng.shuffle(shares)
 
-        names = [gen_name() for _ in shares]
+        terms = []
         decls = []
+        local_pool = {}
         drv_idx = key_rng.randrange(len(shares))
-        for i, (nm, sv) in enumerate(zip(names, shares)):
+        for i, sv in enumerate(shares):
             if i == drv_idx and i != 0:
                 salt = key_rng.randint(0, MASK32)
                 output = drv_predict(salt)
+                dn = gen_name()
+                decls.append(f"local {dn}={drv_v}({salt}) ")
                 if use_xor_terms:
                     fixup = output ^ sv
-                    decls.append(f"local {nm}={emit_xor(f'{drv_v}({salt})', fixup)} ")
+                    terms.append(emit_xor(dn, fixup))
                 else:
                     fixup = (sv - output) & MASK32
-                    decls.append(f"local {nm}=({drv_v}({salt})+{fixup})%4294967296 ")
+                    terms.append(f"({dn}+{fixup})%4294967296")
                 continue
             mode = key_rng.randint(0, 2)
             if mode == 0 or i == 0:
-                decls.append(f"local {nm}={sv} ")
+                terms.append(str(sv))
             elif mode == 1:
                 pre = (sv ^ key_rng.randint(0, MASK32)) & MASK32
                 mask = pre ^ sv
-                decls.append(f"local {nm}={emit_xor(pre, mask)} ")
+                terms.append(emit_xor(pre, mask))
             else:
-                prev = names[i - 1]
-                delta = (sv - rot_pool.get(prev, 0)) & MASK32
-                rot_pool[nm] = sv
-                decls.append(f"local {nm}=({delta}+{rot_pool.get(prev, 0)})%4294967296 ")
-                rot_pool[prev] = rot_pool.get(prev, 0)
+                prev_sv = local_pool.get(i - 1, 0)
+                delta = (sv - prev_sv) & MASK32
+                local_pool[i] = sv
+                terms.append(f"({delta}+{prev_sv})%4294967296")
 
         if use_xor_terms:
-            combine = names[0]
-            for nm in names[1:]:
-                combine = f"{emit_xor(combine, nm)}"
+            combine = terms[0]
+            for tm in terms[1:]:
+                combine = f"{emit_xor(combine, tm)}"
         else:
-            combine_terms = "+".join(names)
-            combine = f"({combine_terms})%4294967296"
+            combine = "(" + "+".join(terms) + ")%4294967296"
         return "".join(decls), combine
 
     rot_pool = {}
@@ -584,26 +601,25 @@ def build_runtime_header(seeds, var_k, var_Q, var_G, var_B, var_f, var_V, wm_var
     decoy_pool = []
 
     def make_decoy():
-        dn = gen_name()
+        never = key_rng.randint(1, MASK32 - 1)
+        guard = (never + 1) & MASK32
         if key_rng.random() < 0.35:
             salt = key_rng.randint(0, MASK32)
             target = key_rng.randint(0, MASK32)
             output = drv_predict(salt)
             fixup = (target - output) & MASK32
-            line = f"local {dn}=({drv_v}({salt})+{fixup})%4294967296 "
+            first = f"({drv_v}({salt})+{fixup})%4294967296"
         else:
-            line = f"local {dn}={key_rng.randint(0, MASK32)} "
-        decoy_pool.append(dn)
-        return line
+            first = str(key_rng.randint(0, MASK32))
+        second = str(key_rng.randint(0, MASK32))
+        return (
+            f"do local a={first} local b={second} "
+            f"local sv=({emit_xor('a', 'b')}+{never})%4294967296 "
+            f"if sv=={guard} then error(\"integrity\") end end "
+        )
 
     def make_decoy_sink():
-        if len(decoy_pool) < 2:
-            return ""
-        a, b = key_rng.sample(decoy_pool, 2)
-        sv = gen_name()
-        never = key_rng.randint(1, MASK32 - 1)
-        guard = (never + 1) & MASK32
-        return f"local {sv}=({emit_xor(a, b)}+{never})%4294967296 if {sv}=={guard} then error(\"integrity\") end "
+        return ""
 
     interleaved = []
     for val in key[:-1]:
@@ -680,7 +696,7 @@ def build_runtime_header(seeds, var_k, var_Q, var_G, var_B, var_f, var_V, wm_var
     boot_bytes_v = gen_name()
 
     boot_loader = (
-        f"local {boot_ls_v}=loadstring or load "
+        f"local {boot_ls_v}={loader_expr()} "
         f"if type({boot_ls_v})~='function' then error('',0) end "
         f"if (islclosure and islclosure({boot_ls_v})) or (is_synapse_function and is_synapse_function({boot_ls_v})) then error('',0) end "
         f"local {boot_bytes_v}={{{boot_cipher_literal}}} "
@@ -755,7 +771,7 @@ def build_runtime_header(seeds, var_k, var_Q, var_G, var_B, var_f, var_V, wm_var
         mac_boot_bytes_v = gen_name()
 
         mac_boot_loader = (
-            f"local {mac_boot_ls_v}=loadstring or load "
+            f"local {mac_boot_ls_v}={loader_expr()} "
             f"if type({mac_boot_ls_v})~='function' then error('',0) end "
             f"if (islclosure and islclosure({mac_boot_ls_v})) or (is_synapse_function and is_synapse_function({mac_boot_ls_v})) then error('',0) end "
             f"local {mac_boot_bytes_v}={{{mac_boot_cipher_literal}}} "
@@ -1989,12 +2005,17 @@ def build_anti_tamper_v2(seeds, rng, var_k, encode_fn, detect_var=None, target="
             f"if type(jit)~='table' or type(jit.version)~='string' or type(jit.os)~='string' or type(jit.arch)~='string' then {kill_v}() end "
             f"do local {jver_v}=jit.version if {jver_v}:sub(1,6)~='LuaJIT' then {kill_v}() end end "
         )
+        # GMod replaces the global `type` with a plain Lua function
+        # (garrysmod/lua/includes/util.lua), so it must not be required to be a
+        # C function here. Its behaviour is already covered by the type()
+        # checks above. MENU_DLL only exists in the menu state; in the client
+        # state it is nil, so only reject a non-boolean non-nil value.
         parts.append(
             f"if debug and debug.getinfo then "
             f"do local {cf_v}=function() return 1 end local {s_v}=debug.getinfo({cf_v},'S').short_src local {l_v}=debug.getinfo({cf_v},'S').linedefined if {s_v}=='[C]' or {l_v}<1 then {kill_v}() end end "
-            f"local {cfns_v}={{type,pcall,xpcall,error,setmetatable,getmetatable,rawget,rawset,select,tonumber,tostring,pairs,ipairs,next,string.byte,string.char,string.sub,string.len,string.find,table.insert,table.remove,table.concat,math.floor,math.ceil,math.abs,coroutine.create,coroutine.resume,coroutine.yield,coroutine.status}} "
-            f"for _,{fn_v} in ipairs({cfns_v}) do local {ssv_v}=debug.getinfo({fn_v},'S').short_src if {ssv_v}~='[C]' then {kill_v}() end end "
-            f"if debug.getinfo(pcall).what~='C' or debug.getinfo(type).what~='C' or debug.getinfo(setmetatable).what~='C' then {kill_v}() end "
+            f"local {cfns_v}={{pcall,xpcall,error,setmetatable,getmetatable,rawget,rawset,select,tonumber,tostring,pairs,ipairs,next,string.byte,string.char,string.sub,string.len,string.find,table.insert,table.remove,table.concat,math.floor,math.ceil,math.abs,coroutine.create,coroutine.resume,coroutine.yield,coroutine.status}} "
+            f"for _,{fn_v} in ipairs({cfns_v}) do local {ssv_v}=debug.getinfo({fn_v},'S').short_src if {ssv_v}~='[C]' and {ssv_v}:sub(1,8)~='[builtin' then {kill_v}() end end "
+            f"if debug.getinfo(pcall).what~='C' or debug.getinfo(setmetatable).what~='C' then {kill_v}() end "
             f"end "
         )
         parts.append(
@@ -2004,7 +2025,7 @@ def build_anti_tamper_v2(seeds, rng, var_k, encode_fn, detect_var=None, target="
             f"end "
         )
         parts.append(
-            f"if type(SERVER)~='boolean' or type(CLIENT)~='boolean' or type(MENU_DLL)~='boolean' then {kill_v}() end "
+            f"if type(SERVER)~='boolean' or type(CLIENT)~='boolean' or (MENU_DLL~=nil and type(MENU_DLL)~='boolean') then {kill_v}() end "
             f"if SERVER and CLIENT then {kill_v}() end "
             f"if type(hook)~='table' or type(hook.Add)~='function' or type(hook.Call)~='function' or type(hook.Remove)~='function' then {kill_v}() end "
             f"if type(timer)~='table' or type(timer.Create)~='function' or type(timer.Simple)~='function' or type(timer.Exists)~='function' then {kill_v}() end "
