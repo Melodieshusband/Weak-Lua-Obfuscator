@@ -484,17 +484,32 @@ def _flatten_proto_full(proto, rng, rev_opmap, opmap):
         to_dispatch()
 
     mark('anti_tamper_check')
+    ref_fn = rng.choice(['print', 'type', 'tostring', 'pairs', 'ipairs', 'select'])
+    cmp_style = rng.choice(['eq_false', 'ne_true'])
+    const_early = rng.choice([True, False])
+
     emit('LOAD_GLOBAL', check_r0, k('debug'))
     branch_to('JUMP_FALSE', check_r0, 'check_pass')
     emit('GET_FIELD', check_r1, check_r0, k('getinfo'))
     branch_to('JUMP_FALSE', check_r1, 'check_pass')
-    emit('LOAD_GLOBAL', check_r1 + 1, k('print'))
+
+    if const_early:
+        emit('LOAD_CONST', check_r4, k('C'))
+
+    emit('LOAD_GLOBAL', check_r1 + 1, k(ref_fn))
     emit('CALL', check_r1, 1, 1)
     branch_to('JUMP_FALSE', check_r1, 'check_pass')
     emit('GET_FIELD', check_r3, check_r1, k('what'))
-    emit('LOAD_CONST', check_r4, k('C'))
-    emit('EQ', check_r3, check_r3, check_r4)
-    branch_to('JUMP_FALSE', check_r3, 'melodie')
+
+    if not const_early:
+        emit('LOAD_CONST', check_r4, k('C'))
+
+    if cmp_style == 'eq_false':
+        emit('EQ', check_r3, check_r3, check_r4)
+        branch_to('JUMP_FALSE', check_r3, 'melodie')
+    else:
+        emit('NE', check_r3, check_r3, check_r4)
+        branch_to('JUMP_TRUE', check_r3, 'melodie')
 
     mark('check_pass')
     set_state(entry_sid)

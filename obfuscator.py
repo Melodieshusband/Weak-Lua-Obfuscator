@@ -266,7 +266,8 @@ class Obfuscator:
         dispatch_expr, hashes = build_vm_dispatch(rng)
         expected_count, expected_sum, expected_xor = hashes.get("__meta__", (0, 0, 0))
         dispatch_loader, dispatch_fn_v = self.build_hidden_chunk(f"return {dispatch_expr}")
-        dispatch_table = f"{dispatch_loader}local {self.var_V}={dispatch_fn_v}() "
+        verify_fn_v = gen_name()
+        dispatch_table = f"{dispatch_loader}local {self.var_V},{verify_fn_v}={dispatch_fn_v}() "
 
         detect_var = gen_name()
 
@@ -274,19 +275,12 @@ class Obfuscator:
             chk_cnt_v = gen_name()
             chk_sum_v = gen_name()
             chk_xor_v = gen_name()
-            chk_k_v   = gen_name()
-            chk_fn_v  = gen_name()
+            chk_ok_v  = gen_name()
             snap_v    = gen_name()
             dispatch_verify = (
                 f"local {snap_v}={self.var_V} "
-                f"do local {chk_cnt_v}=0 local {chk_sum_v}=0 local {chk_xor_v}=0 "
-                f"for {chk_k_v},{chk_fn_v} in pairs({self.var_V}) do "
-                f"if type({chk_k_v})~='number' or type({chk_fn_v})~='function' then {detect_var}=true error('',0) end "
-                f"{chk_cnt_v}={chk_cnt_v}+1 "
-                f"{chk_sum_v}=({chk_sum_v}+{chk_k_v})%4294967296 "
-                f"{chk_xor_v}={prims['xorb']}({chk_xor_v},{chk_k_v}) "
-                f"end "
-                f"if {chk_cnt_v}~={expected_count} or {chk_sum_v}~={expected_sum} or {chk_xor_v}~={expected_xor} or {self.var_V}~={snap_v} then "
+                f"do local {chk_cnt_v},{chk_sum_v},{chk_xor_v},{chk_ok_v}={verify_fn_v}() "
+                f"if {chk_cnt_v}~={expected_count} or {chk_sum_v}~={expected_sum} or {chk_xor_v}~={expected_xor} or not {chk_ok_v} or {self.var_V}~={snap_v} then "
                 f"{detect_var}=true error('',0) "
                 f"end end "
             )

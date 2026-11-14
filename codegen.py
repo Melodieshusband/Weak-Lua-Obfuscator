@@ -1122,10 +1122,19 @@ def build_vm_dispatch(rng):
         "ternary":("s,m", "s~=nil and s or m"),
     }
 
+    # The handler table used to be a flat `{[hash]=function(...) ... end, ...}`
+    # literal: a single pairs()/next() pass over it dumps every entry in one
+    # shot. Instead, the exposed table is now an empty proxy whose __index
+    # metamethod builds the matching closure on demand from a private
+    # hash->opname map that is never itself exposed (only reachable as an
+    # upvalue of the proxy/verify closures, same as any other local in this
+    # chunk). pairs()/next() on the proxy now returns nothing.
     seen_hashes = set()
     all_keys = []
     hashes = {}
-    dispatch_lines = []
+    op_of_entries = []
+    canary_add_hash = None
+    canary_concat_hash = None
     for op_name, (params, expr) in ops.items():
         count = rng.randint(3, 8)
         for _ in range(count):
@@ -1135,13 +1144,11 @@ def build_vm_dispatch(rng):
             seen_hashes.add(h)
             all_keys.append(h)
             hashes[op_name] = h
-            ps = gen_name()
-            pm = gen_name()
-            real_params = ps if params == "s" else f"{ps},{pm}"
-            real_expr = re.sub(r'\bs\b', ps, expr)
-            if params != "s":
-                real_expr = re.sub(r'\bm\b', pm, real_expr)
-            dispatch_lines.append(f"[{h}]=function({real_params}) return {real_expr} end")
+            op_of_entries.append(f"[{h}]='{op_name}'")
+            if op_name == "add":
+                canary_add_hash = h
+            elif op_name == "concat":
+                canary_concat_hash = h
 
     expected_count = len(all_keys)
     expected_sum = sum(all_keys) % 0x100000000
@@ -1149,7 +1156,78 @@ def build_vm_dispatch(rng):
     for k in all_keys:
         expected_xor ^= k
     hashes["__meta__"] = (expected_count, expected_sum, expected_xor)
-    dispatch_expr = f"{{{';'.join(dispatch_lines)}}}"
+
+    rng.shuffle(op_of_entries)
+
+    op_of_v   = gen_name()
+    xorb_v    = gen_name()
+    mk_v      = gen_name()
+    proxy_v   = gen_name()
+    verify_v  = gen_name()
+    op_v      = gen_name()
+    cnt_v     = gen_name()
+    sum_v     = gen_name()
+    xorv_v    = gen_name()
+    kk_v      = gen_name()
+    fok_v     = gen_name()
+    h1ok_v    = gen_name()
+    h1r_v     = gen_name()
+    h2ok_v    = gen_name()
+    h2r_v     = gen_name()
+    xa_v      = gen_name()
+    xb_v      = gen_name()
+    xr_v      = gen_name()
+    xbit_v    = gen_name()
+    xda_v     = gen_name()
+    xdb_v     = gen_name()
+
+    mk_cases = []
+    for op_name, (params, expr) in ops.items():
+        ps = gen_name()
+        pm = gen_name()
+        real_params = ps if params == "s" else f"{ps},{pm}"
+        real_expr = re.sub(r'\bs\b', ps, expr)
+        if params != "s":
+            real_expr = re.sub(r'\bm\b', pm, real_expr)
+        mk_cases.append(
+            f"if {op_v}=='{op_name}' then return function({real_params}) return {real_expr} end "
+        )
+    mk_body = "end ".join(mk_cases) + "end "
+
+    dispatch_expr = (
+        f"(function() "
+        f"local {op_of_v}={{{';'.join(op_of_entries)}}} "
+        f"local function {xorb_v}({xa_v},{xb_v}) "
+        f"local {xr_v},{xbit_v}=0,1 "
+        f"while {xa_v}>0 or {xb_v}>0 do "
+        f"local {xda_v},{xdb_v}={xa_v}%2,{xb_v}%2 "
+        f"if {xda_v}~={xdb_v} then {xr_v}={xr_v}+{xbit_v} end "
+        f"{xa_v}=({xa_v}-{xda_v})/2 {xb_v}=({xb_v}-{xdb_v})/2 {xbit_v}={xbit_v}*2 "
+        f"end "
+        f"return {xr_v} end "
+        f"local function {mk_v}({op_v}) "
+        f"{mk_body}"
+        f"end "
+        f"local {proxy_v}=setmetatable({{}},{{__index=function(_,{kk_v}) "
+        f"local {op_v}={op_of_v}[{kk_v}] "
+        f"if {op_v}==nil then return nil end "
+        f"return {mk_v}({op_v}) end}}) "
+        f"local function {verify_v}() "
+        f"local {cnt_v},{sum_v},{xorv_v}=0,0,0 "
+        f"for {kk_v} in pairs({op_of_v}) do "
+        f"{cnt_v}={cnt_v}+1 "
+        f"{sum_v}=({sum_v}+{kk_v})%4294967296 "
+        f"{xorv_v}={xorb_v}({xorv_v},{kk_v}) "
+        f"end "
+        f"local {fok_v}=true "
+        f"local {h1ok_v},{h1r_v}=pcall(function() return {proxy_v}[{canary_add_hash}](7,5) end) "
+        f"if not {h1ok_v} or {h1r_v}~=12 then {fok_v}=false end "
+        f"local {h2ok_v},{h2r_v}=pcall(function() return {proxy_v}[{canary_concat_hash}]('ab','cd') end) "
+        f"if not {h2ok_v} or {h2r_v}~='abcd' then {fok_v}=false end "
+        f"return {cnt_v},{sum_v},{xorv_v},{fok_v} end "
+        f"return {proxy_v},{verify_v} "
+        f"end)()"
+    )
     return dispatch_expr, hashes
 
 def build_anti_tamper_v1(seeds, rng, var_k, encode_fn, detect_var=None, level="full"):
@@ -2216,7 +2294,9 @@ def build_anti_tamper_v2(seeds, rng, var_k, encode_fn, detect_var=None, target="
             f"if {sus_v}>0 then {kill_v}() end "
         )
 
-    return "".join(parts)
+    head, tail = parts[:3], parts[3:]
+    rng.shuffle(tail)
+    return "".join(head + tail)
 
 
 def build_anti_tamper(seeds, rng, var_k, encode_fn, detect_var=None, level="full", version="v2", target="luau"):
