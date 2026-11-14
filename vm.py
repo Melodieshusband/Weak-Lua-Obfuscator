@@ -2041,12 +2041,15 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
     p_cblen = N(); p_cbb = N(); p_cbi = N(); p_pseed2 = N(); p_rstate2 = N(); p_rprev2 = N()
     p_smv = N()
     p_chk = N(); chk_v = N(); p_pc2 = N(); p_exec_canary = N(); p_canary_ok = N()
+    p_ti = N(); p_cnow = N()
     chk_mod = 2147483648
     chk_c_op = rng.randint(1000, 9999)
     chk_c_a = rng.randint(10000, 999999)
     chk_c_b = rng.randint(1000000, 99999999)
     chk_c_cc = rng.randint(100000000, 999999999)
     chk_c_add = rng.randint(1000000000, 4294967295)
+    canary_window = rng.randint(768, 2048)
+    canary_budget = round(canary_window * rng.uniform(0.0008, 0.0016) + rng.uniform(0.25, 0.55), 4)
     p_trapidx = N()
     p_strref = N(); p_strpool = N(); p_poolseed = N(); p_poollen = N(); p_poolraw = N()
     p_poolcount = N(); p_poolidx = N(); p_poolslen = N(); p_poolstr = N(); p_poolst = N(); p_poolpv = N()
@@ -2396,6 +2399,9 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
         f"if {p_x}==nil then {p_x}={{v={p_vr}[{p_regparam}]}} {p_rb}[{p_regparam}]={p_x} end "
         f"return {p_x} end "
         f"local {p_pc}=1 "
+        f"local {p_ti}=os and type(os.clock)=='function' and os.clock or (type(tick)=='function' and tick) or nil "
+        f"local {p_canary_ok}={p_ti} and {p_ti}() or 0 "
+        f"local {p_exec_canary}=0 "
         f"while {p_pc}<=#{p_ins} do "
         + (
             f"if {detect_var} then "
@@ -2415,6 +2421,22 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
         f"else "
         f"{p_op2}={O('RETURN_NONE')} {p_a2}=0 {p_b2}=nil {p_c2}=nil "
         f"end "
+        f"end "
+        f"{p_exec_canary}={p_exec_canary}+1 "
+        f"if {p_op2}=={O('CALL')} or {p_op2}=={O('CALL_METHOD')} or {p_op2}=={O('TFOR_CALL')} then "
+        f"{p_canary_ok}={p_ti} and {p_ti}() or {p_canary_ok} "
+        f"{p_exec_canary}=0 "
+        f"elseif {p_exec_canary}>={canary_window} then "
+        f"local {p_cnow}={p_ti} and {p_ti}() or {p_canary_ok} "
+        f"if {p_ti} and ({p_cnow}-{p_canary_ok})>{canary_budget} then "
+        f"if {p_proto}.trapidx~=nil then "
+        f"{p_op2}={O('JUMP')} {p_a2}={p_proto}.trapidx {p_b2}=nil {p_c2}=nil "
+        f"else "
+        f"{p_op2}={O('RETURN_NONE')} {p_a2}=0 {p_b2}=nil {p_c2}=nil "
+        f"end "
+        f"end "
+        f"{p_canary_ok}={p_cnow} "
+        f"{p_exec_canary}=0 "
         f"end "
         f"{p_pc}={p_pc}+1 "
         f"if {p_op2}=={O('LOAD_CONST')} then {p_setreg}({p_a2},{consts_v}[{p_b2}+1]) "
