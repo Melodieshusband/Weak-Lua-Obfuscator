@@ -2041,6 +2041,12 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
     p_cblen = N(); p_cbb = N(); p_cbi = N(); p_pseed2 = N(); p_rstate2 = N(); p_rprev2 = N()
     p_smv = N()
     p_chk = N(); chk_v = N(); p_pc2 = N(); p_exec_canary = N(); p_canary_ok = N()
+    chk_mod = 2147483648
+    chk_c_op = rng.randint(1000, 9999)
+    chk_c_a = rng.randint(10000, 999999)
+    chk_c_b = rng.randint(1000000, 99999999)
+    chk_c_cc = rng.randint(100000000, 999999999)
+    chk_c_add = rng.randint(1000000000, 4294967295)
     p_trapidx = N()
     p_strref = N(); p_strpool = N(); p_poolseed = N(); p_poollen = N(); p_poolraw = N()
     p_poolcount = N(); p_poolidx = N(); p_poolslen = N(); p_poolstr = N(); p_poolst = N(); p_poolpv = N()
@@ -2228,7 +2234,7 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
         f"return {p_out},{p_rst},{p_rpv} end "
         f"local function {chk_v}({p_op},{p_a},{p_b},{p_cc}) "
         f"local {p_a}={p_a} or 0 local {p_b}={p_b} or 0 local {p_cc}={p_cc} or 0 "
-        f"local {p_n}=(({p_op}*7919)+({p_a}*104729)+({p_b}*15485863)+({p_cc}*179424673)+2166136261)%2147483648 "
+        f"local {p_n}=(({p_op}*{chk_c_op})+({p_a}*{chk_c_a})+({p_b}*{chk_c_b})+({p_cc}*{chk_c_cc})+{chk_c_add})%{chk_mod} "
         + (
             f"return {bxor_e(p_n, f'({key_expr}[({band_e(p_op, 7)})+1])%2147483648')} "
             if key_expr

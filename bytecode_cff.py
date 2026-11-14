@@ -312,7 +312,33 @@ def _flatten_proto_full(proto, rng, rev_opmap, opmap):
     check_r2 = slot_base + 12
     check_r3 = slot_base + 13
     check_r4 = slot_base + 14
-    xor_key = rng.randint(0x100000, 0x3FFFFFFF)
+    a_reg = slot_base + 15
+    b_reg = slot_base + 16
+    m_reg = slot_base + 17
+    sh1_reg = slot_base + 18
+    sh2_reg = slot_base + 19
+    mask_reg = slot_base + 20
+
+    # The dispatch PC table is no longer encoded with a single global key
+    # (that key would be one LOAD_CONST away from an attacker who could
+    # then XOR the whole table at once). Instead the effective per-entry
+    # mask is derived from the state id itself at runtime: mask(sid) =
+    # (sid*key_a + key_b) % key_m. Recovering it needs at least two
+    # distinct (sid, real_pc) pairs solved as a linear system, not one
+    # constant read out of the pool. key_a/key_b are themselves never a
+    # single bare constant in the bytecode either - each is reassembled
+    # at runtime from two shares via ADD/BXOR, same scattering idea the
+    # project already uses for the ChaCha key (drv_v).
+    key_m = 0x40000000
+    key_a = rng.randint(0x1000, 0x1FFFFF)
+    key_b = rng.randint(0, 0x3FFFFFFF)
+    a_sh1 = rng.randint(0, key_a)
+    a_sh2 = key_a - a_sh1
+    b_sh1 = rng.randint(0, 0x3FFFFFFF)
+    b_sh2 = b_sh1 ^ key_b
+
+    def mask_for_sid(sid):
+        return (sid * key_a + key_b) % key_m
 
     def k(value):
         return proto.add_const(value)
@@ -381,19 +407,28 @@ def _flatten_proto_full(proto, rng, rev_opmap, opmap):
             sid = check_sid
             label = 'anti_tamper_check'
         pc_idx = emit('LOAD_CONST', tmp_reg, 0)
-        pc_patches.append((pc_idx, label))
+        pc_patches.append((pc_idx, label, sid))
         emit('SET_FIELD', table_reg, k(sid), tmp_reg)
     exit_pc_idx = emit('LOAD_CONST', tmp_reg, 0)
-    pc_patches.append((exit_pc_idx, 'exit'))
+    pc_patches.append((exit_pc_idx, 'exit', exit_sid))
     emit('SET_FIELD', table_reg, k(exit_sid), tmp_reg)
 
     emit('LOAD_CONST', state_reg, k(check_sid))
-    emit('LOAD_CONST', tmp_reg, k(xor_key))
     to_dispatch()
 
     mark('dispatch')
-    emit('GET_TABLE', state_reg, table_reg, state_reg)
-    emit('BXOR', state_reg, state_reg, tmp_reg)
+    emit('GET_TABLE', tmp_reg, table_reg, state_reg)
+    emit('LOAD_CONST', sh1_reg, k(a_sh1))
+    emit('LOAD_CONST', sh2_reg, k(a_sh2))
+    emit('ADD', a_reg, sh1_reg, sh2_reg)
+    emit('LOAD_CONST', sh1_reg, k(b_sh1))
+    emit('LOAD_CONST', sh2_reg, k(b_sh2))
+    emit('BXOR', b_reg, sh1_reg, sh2_reg)
+    emit('MUL', mask_reg, state_reg, a_reg)
+    emit('ADD', mask_reg, mask_reg, b_reg)
+    emit('LOAD_CONST', m_reg, k(key_m))
+    emit('MOD', mask_reg, mask_reg, m_reg)
+    emit('BXOR', state_reg, tmp_reg, mask_reg)
     emit('JUMP_REG', state_reg)
 
     layout = [('B', bi) for bi in range(n_real)] + [('J', ji) for ji in range(n_junk)]
@@ -476,7 +511,7 @@ def _flatten_proto_full(proto, rng, rev_opmap, opmap):
 
     for idx, field, label in patches:
         setattr(out[idx], field, labels[label])
-    for idx, label in pc_patches:
-        out[idx].b = k(labels[label] ^ xor_key)
+    for idx, label, sid in pc_patches:
+        out[idx].b = k(labels[label] ^ mask_for_sid(sid))
 
     proto.instructions = out
