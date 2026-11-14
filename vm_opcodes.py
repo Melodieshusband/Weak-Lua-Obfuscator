@@ -62,15 +62,38 @@ CANONICAL_OPS = {
     'MOVE':         0x72,
 }
 
+OPCODE_BYTE_RANGE = 240
+ALIAS_VALUE_BUDGET = 170
+MIN_ALIASES = 2
+MAX_ALIASES = 4
+
 def make_opmap():
+    names = list(CANONICAL_OPS.keys())
     used = set()
     opmap = {}
-    for name in CANONICAL_OPS:
-        while True:
-            v = secrets.randbelow(240) + 1
+    remaining_names = len(names)
+    for name in names:
+        remaining_names -= 1
+        remaining_budget = ALIAS_VALUE_BUDGET - len(used)
+        max_for_this = max(1, min(MAX_ALIASES, remaining_budget - remaining_names))
+        if max_for_this >= MIN_ALIASES:
+            count = secrets.randbelow(max_for_this - MIN_ALIASES + 1) + MIN_ALIASES
+        else:
+            count = 1
+        values = []
+        while len(values) < count:
+            v = secrets.randbelow(OPCODE_BYTE_RANGE) + 1
             if v not in used:
                 used.add(v)
-                opmap[name] = v
-                break
+                values.append(v)
+        opmap[name] = values
     return opmap
-    
+
+def pick_op(opmap, name):
+    return secrets.choice(opmap[name])
+
+def flatten_op_values(opmap):
+    return [v for values in opmap.values() for v in values]
+
+def build_rev_opmap(opmap):
+    return {v: name for name, values in opmap.items() for v in values}

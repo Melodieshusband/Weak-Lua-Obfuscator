@@ -1,6 +1,6 @@
 import struct
 import secrets
-from vm_opcodes import make_opmap, CANONICAL_OPS
+from vm_opcodes import make_opmap, CANONICAL_OPS, pick_op, flatten_op_values, build_rev_opmap
 import mltn
 import mld
 
@@ -8,7 +8,7 @@ _DEFAULT_OPMAP = make_opmap()
 
 def _get_op(name, opmap=None):
     m = opmap if opmap is not None else _DEFAULT_OPMAP
-    return m[name]
+    return pick_op(m, name)
 
 def _hidden_str_lit(text, rng):
     shift = rng.randint(1, 250)
@@ -92,6 +92,8 @@ class Instruction:
     __slots__ = ('op', 'a', 'b', 'c')
 
     def __init__(self, op, a=None, b=None, c=None):
+        if isinstance(op, (list, tuple)):
+            op = secrets.choice(op)
         self.op = op
         self.a = a
         self.b = b
@@ -694,7 +696,7 @@ class Compiler:
             child.scope.alloc(p)
         child._stmts(node['body'])
         child._resolve_gotos()
-        if not child.proto.instructions or child.proto.instructions[-1].op not in (OP_RETURN, OP_RETURN_NONE):
+        if not child.proto.instructions or (child.proto.instructions[-1].op not in OP_RETURN and child.proto.instructions[-1].op not in OP_RETURN_NONE):
             child.emit(OP_RETURN_NONE, 0)
         idx = len(self.proto.protos)
         self.proto.protos.append(child.proto)
@@ -1160,7 +1162,7 @@ class Compiler:
         self.proto.is_vararg = is_vararg
         self._stmts(stmts)
         self._resolve_gotos()
-        if not self.proto.instructions or self.proto.instructions[-1].op not in (OP_RETURN, OP_RETURN_NONE):
+        if not self.proto.instructions or (self.proto.instructions[-1].op not in OP_RETURN and self.proto.instructions[-1].op not in OP_RETURN_NONE):
             self.emit(OP_RETURN_NONE, 0)
 
     def serialize(self, opmap=None):
@@ -1897,13 +1899,14 @@ def try_compile_vm(source, rng=None, debug=False, target="luau", cff_mode="full"
 
 def _patch_global_ops(opmap):
     g = globals()
-    for name, val in opmap.items():
-        g['OP_' + name] = val
-    marker, dict_marker = mltn.pick_two_markers(opmap.values())
+    for name, values in opmap.items():
+        g['OP_' + name] = values
+    all_values = flatten_op_values(opmap)
+    marker, dict_marker = mltn.pick_two_markers(all_values)
     g['REPEAT_MARKER'] = marker
     g['DICT_MARKER'] = dict_marker
     field_dict_marker = mld.pick_field_dict_marker(
-        list(opmap.values()) + [marker, dict_marker]
+        all_values + [marker, dict_marker]
     )
     g['FIELD_DICT_MARKER'] = field_dict_marker
 
@@ -2070,7 +2073,102 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
     c_raw_v = N()
 
     om = opmap if opmap is not None else _DEFAULT_OPMAP
-    def O(name): return om[name]
+    def O(name):
+        return " or ".join(f"{p_op2}=={v}" for v in om[name])
+    def OV(name):
+        return om[name][0]
+    def _bin_op_variants(symbol, commutative):
+        variants = [
+            f"{p_setreg}({p_a2},{p_getreg}({p_b2}){symbol}{p_getreg}({p_c2})) ",
+            f"local {p_x}={p_getreg}({p_c2}) {p_setreg}({p_a2},{p_getreg}({p_b2}){symbol}{p_x}) ",
+            f"local {p_x}={p_getreg}({p_b2}) {p_setreg}({p_a2},{p_x}{symbol}{p_getreg}({p_c2})) ",
+        ]
+        if commutative:
+            variants.append(f"{p_setreg}({p_a2},{p_getreg}({p_c2}){symbol}{p_getreg}({p_b2})) ")
+        return variants
+
+    def _call_op_variants(fn, commutative):
+        gb = f"{p_getreg}({p_b2})"
+        gc = f"{p_getreg}({p_c2})"
+        variants = [
+            f"{p_setreg}({p_a2},{fn(gb, gc)}) ",
+            f"local {p_x}={gc} {p_setreg}({p_a2},{fn(gb, p_x)}) ",
+            f"local {p_x}={gb} {p_setreg}({p_a2},{fn(p_x, gc)}) ",
+        ]
+        if commutative:
+            variants.append(f"{p_setreg}({p_a2},{fn(gc, gb)}) ")
+        return variants
+
+    def _unary_op_variants(expr_fn):
+        gb = f"{p_getreg}({p_b2})"
+        return [
+            f"{p_setreg}({p_a2},{expr_fn(gb)}) ",
+            f"local {p_x}={gb} {p_setreg}({p_a2},{expr_fn(p_x)}) ",
+        ]
+
+    def _logic_and_variants():
+        gb = f"{p_getreg}({p_b2})"
+        gc = f"{p_getreg}({p_c2})"
+        return [
+            f"if not {gb} then {p_setreg}({p_a2},{gb}) else {p_setreg}({p_a2},{gc}) end ",
+            f"local {p_x}={gb} if {p_x} then {p_setreg}({p_a2},{gc}) else {p_setreg}({p_a2},{p_x}) end ",
+        ]
+
+    def _logic_or_variants():
+        gb = f"{p_getreg}({p_b2})"
+        gc = f"{p_getreg}({p_c2})"
+        return [
+            f"if {gb} then {p_setreg}({p_a2},{gb}) else {p_setreg}({p_a2},{gc}) end ",
+            f"local {p_x}={gb} if {p_x} then {p_setreg}({p_a2},{p_x}) else {p_setreg}({p_a2},{gc}) end ",
+        ]
+
+    def _eqne_variants(symbol):
+        gb = f"{p_getreg}({p_b2})"
+        gc = f"{p_getreg}({p_c2})"
+        return [
+            f"{p_setreg}({p_a2},({gb}{symbol}{gc})) ",
+            f"local {p_x}={gc} {p_setreg}({p_a2},({gb}{symbol}{p_x})) ",
+            f"local {p_x}={gb} {p_setreg}({p_a2},({p_x}{symbol}{gc})) ",
+            f"{p_setreg}({p_a2},({gc}{symbol}{gb})) ",
+        ]
+
+    def _ordered_variants(symbol, mirror_symbol):
+        gb = f"{p_getreg}({p_b2})"
+        gc = f"{p_getreg}({p_c2})"
+        return [
+            f"{p_setreg}({p_a2},({gb}{symbol}{gc})) ",
+            f"local {p_x}={gc} {p_setreg}({p_a2},({gb}{symbol}{p_x})) ",
+            f"local {p_x}={gb} {p_setreg}({p_a2},({p_x}{symbol}{gc})) ",
+            f"{p_setreg}({p_a2},({gc}{mirror_symbol}{gb})) ",
+        ]
+
+    _op_body = {
+        'ADD': rng.choice(_bin_op_variants('+', True)),
+        'SUB': rng.choice(_bin_op_variants('-', False)),
+        'MUL': rng.choice(_bin_op_variants('*', True)),
+        'DIV': rng.choice(_bin_op_variants('/', False)),
+        'MOD': rng.choice(_bin_op_variants('%', False)),
+        'POW': rng.choice(_bin_op_variants('^', False)),
+        'CONCAT': rng.choice(_bin_op_variants('..', False)),
+        'IDIV': rng.choice(_call_op_variants(idiv_e, False)),
+        'BAND': rng.choice(_call_op_variants(band_e, True)),
+        'BOR': rng.choice(_call_op_variants(bor_e, True)),
+        'BXOR': rng.choice(_call_op_variants(bxor_e, True)),
+        'SHL': rng.choice(_call_op_variants(lshift_e, False)),
+        'SHR': rng.choice(_call_op_variants(rshift_e, False)),
+        'UNM': rng.choice(_unary_op_variants(lambda v: f"-{v}")),
+        'LEN': rng.choice(_unary_op_variants(lambda v: f"#{v}")),
+        'NOT': rng.choice(_unary_op_variants(lambda v: f"not {v}")),
+        'BNOT': rng.choice(_unary_op_variants(bnot_e)),
+        'AND': rng.choice(_logic_and_variants()),
+        'OR': rng.choice(_logic_or_variants()),
+        'EQ': rng.choice(_eqne_variants('==')),
+        'NE': rng.choice(_eqne_variants('~=')),
+        'LT': rng.choice(_ordered_variants('<', '>')),
+        'LE': rng.choice(_ordered_variants('<=', '>=')),
+        'GT': rng.choice(_ordered_variants('>', '<')),
+        'GE': rng.choice(_ordered_variants('>=', '<=')),
+    }
 
     uv_v = N()
     euv_v = N()
@@ -2107,15 +2205,15 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
         lines = []
         first = True
         for grp in groups_ab2:
-            cond = " or ".join(f"{p_o}=={O(n)}" for n in grp)
+            cond = " or ".join(f"{p_o}=={v}" for n in grp for v in om[n])
             kw = "if" if first else "elseif"
             lines.append(f"{kw} {cond} then {AB2}")
             first = False
         for grp in groups_ab2c:
-            cond = " or ".join(f"{p_o}=={O(n)}" for n in grp)
+            cond = " or ".join(f"{p_o}=={v}" for n in grp for v in om[n])
             lines.append(f"elseif {cond} then {AB2C}")
         for grp in groups_a2:
-            cond = " or ".join(f"{p_o}=={O(n)}" for n in grp)
+            cond = " or ".join(f"{p_o}=={v}" for n in grp for v in om[n])
             lines.append(f"elseif {cond} then {A2}")
         lines.append("end")
         return " ".join(lines)
@@ -2417,83 +2515,81 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
         f"local {p_chk}={p_rd}[5] "
         f"if {p_chk}~=nil and {p_chk}~={chk_v}({p_op2},{p_a2},{p_b2},{p_c2}) then "
         f"if {p_proto}.trapidx~=nil then "
-        f"{p_op2}={O('JUMP')} {p_a2}={p_proto}.trapidx {p_b2}=nil {p_c2}=nil "
+        f"{p_op2}={OV('JUMP')} {p_a2}={p_proto}.trapidx {p_b2}=nil {p_c2}=nil "
         f"else "
-        f"{p_op2}={O('RETURN_NONE')} {p_a2}=0 {p_b2}=nil {p_c2}=nil "
+        f"{p_op2}={OV('RETURN_NONE')} {p_a2}=0 {p_b2}=nil {p_c2}=nil "
         f"end "
         f"end "
         f"{p_exec_canary}={p_exec_canary}+1 "
-        f"if {p_op2}=={O('CALL')} or {p_op2}=={O('CALL_METHOD')} or {p_op2}=={O('TFOR_CALL')} then "
+        f"if {O('CALL')} or {O('CALL_METHOD')} or {O('TFOR_CALL')} then "
         f"{p_canary_ok}={p_ti} and {p_ti}() or {p_canary_ok} "
         f"{p_exec_canary}=0 "
         f"elseif {p_exec_canary}>={canary_window} then "
         f"local {p_cnow}={p_ti} and {p_ti}() or {p_canary_ok} "
         f"if {p_ti} and ({p_cnow}-{p_canary_ok})>{canary_budget} then "
         f"if {p_proto}.trapidx~=nil then "
-        f"{p_op2}={O('JUMP')} {p_a2}={p_proto}.trapidx {p_b2}=nil {p_c2}=nil "
+        f"{p_op2}={OV('JUMP')} {p_a2}={p_proto}.trapidx {p_b2}=nil {p_c2}=nil "
         f"else "
-        f"{p_op2}={O('RETURN_NONE')} {p_a2}=0 {p_b2}=nil {p_c2}=nil "
+        f"{p_op2}={OV('RETURN_NONE')} {p_a2}=0 {p_b2}=nil {p_c2}=nil "
         f"end "
         f"end "
         f"{p_canary_ok}={p_cnow} "
         f"{p_exec_canary}=0 "
         f"end "
         f"{p_pc}={p_pc}+1 "
-        f"if {p_op2}=={O('LOAD_CONST')} then {p_setreg}({p_a2},{consts_v}[{p_b2}+1]) "
-        f"elseif {p_op2}=={O('LOAD_VAR')} then {p_setreg}({p_a2},{p_getreg}({p_b2})) "
-        f"elseif {p_op2}=={O('SET_VAR')} then {p_setreg}({p_b2},{p_getreg}({p_a2})) "
-        f"elseif {p_op2}=={O('LOAD_GLOBAL')} then {p_setreg}({p_a2},{env_v}[{consts_v}[{p_b2}+1]]) "
-        f"elseif {p_op2}=={O('SET_GLOBAL')} then {env_v}[{consts_v}[{p_a2}+1]]={p_getreg}({p_b2}) "
-        f"elseif {p_op2}=={O('LOAD_UPVAL')} then "
+        f"if {O('LOAD_CONST')} then {p_setreg}({p_a2},{consts_v}[{p_b2}+1]) "
+        f"elseif {O('LOAD_VAR')} then {p_setreg}({p_a2},{p_getreg}({p_b2})) "
+        f"elseif {O('SET_VAR')} then {p_setreg}({p_b2},{p_getreg}({p_a2})) "
+        f"elseif {O('LOAD_GLOBAL')} then {p_setreg}({p_a2},{env_v}[{consts_v}[{p_b2}+1]]) "
+        f"elseif {O('SET_GLOBAL')} then {env_v}[{consts_v}[{p_a2}+1]]={p_getreg}({p_b2}) "
+        f"elseif {O('LOAD_UPVAL')} then "
         f"local {p_x}={ubox_v}[{p_b2}] "
         f"if {p_x} then {p_setreg}({p_a2},{p_x}.v) else {p_setreg}({p_a2},nil) end "
-        f"elseif {p_op2}=={O('SET_UPVAL')} then "
+        f"elseif {O('SET_UPVAL')} then "
         f"local {p_x}={ubox_v}[{p_a2}] "
         f"if {p_x} then {p_x}.v={p_getreg}({p_b2}) end "
-        f"elseif {p_op2}=={O('GET_TABLE')} then {p_setreg}({p_a2},{p_getreg}({p_b2})[{p_getreg}({p_c2})]) "
-        f"elseif {p_op2}=={O('SET_TABLE')} then {p_getreg}({p_a2})[{p_getreg}({p_b2})]={p_getreg}({p_c2}) "
-        f"elseif {p_op2}=={O('NEW_TABLE')} then {p_setreg}({p_a2},{{}}) "
-        f"elseif {p_op2}=={O('SET_LIST')} then {p_getreg}({p_a2})[{consts_v}[{p_b2}+1]]={p_getreg}({p_c2}) "
-        f"elseif {p_op2}=={O('SET_LIST_MULTI')} then "
+        f"elseif {O('GET_TABLE')} then {p_setreg}({p_a2},{p_getreg}({p_b2})[{p_getreg}({p_c2})]) "
+        f"elseif {O('SET_TABLE')} then {p_getreg}({p_a2})[{p_getreg}({p_b2})]={p_getreg}({p_c2}) "
+        f"elseif {O('NEW_TABLE')} then {p_setreg}({p_a2},{{}}) "
+        f"elseif {O('SET_LIST')} then {p_getreg}({p_a2})[{consts_v}[{p_b2}+1]]={p_getreg}({p_c2}) "
+        f"elseif {O('SET_LIST_MULTI')} then "
         f"local {p_jj}={p_b2} local {p_kk}={consts_v}[{p_c2}+1] "
         f"local {p_t}={p_getreg}({p_a2}) "
         f"while {p_jj}<{p_vtop} do {p_t}[{p_kk}]={p_getreg}({p_jj}) {p_kk}={p_kk}+1 {p_jj}={p_jj}+1 end "
-        f"elseif {p_op2}=={O('GET_FIELD')} then {p_setreg}({p_a2},{p_getreg}({p_b2})[{consts_v}[{p_c2}+1]]) "
-        f"elseif {p_op2}=={O('SET_FIELD')} then {p_getreg}({p_a2})[{consts_v}[{p_b2}+1]]={p_getreg}({p_c2}) "
-        f"elseif {p_op2}=={O('ADD')} then {p_setreg}({p_a2},{p_getreg}({p_b2})+{p_getreg}({p_c2})) "
-        f"elseif {p_op2}=={O('SUB')} then {p_setreg}({p_a2},{p_getreg}({p_b2})-{p_getreg}({p_c2})) "
-        f"elseif {p_op2}=={O('MUL')} then {p_setreg}({p_a2},{p_getreg}({p_b2})*{p_getreg}({p_c2})) "
-        f"elseif {p_op2}=={O('DIV')} then {p_setreg}({p_a2},{p_getreg}({p_b2})/{p_getreg}({p_c2})) "
-        f"elseif {p_op2}=={O('MOD')} then {p_setreg}({p_a2},{p_getreg}({p_b2})%{p_getreg}({p_c2})) "
-        f"elseif {p_op2}=={O('POW')} then {p_setreg}({p_a2},{p_getreg}({p_b2})^{p_getreg}({p_c2})) "
-        f"elseif {p_op2}=={O('CONCAT')} then {p_setreg}({p_a2},{p_getreg}({p_b2})..{p_getreg}({p_c2})) "
-        f"elseif {p_op2}=={O('IDIV')} then {p_setreg}({p_a2},{idiv_e(f'{p_getreg}({p_b2})', f'{p_getreg}({p_c2})')}) "
-        f"elseif {p_op2}=={O('BAND')} then {p_setreg}({p_a2},{band_e(f'{p_getreg}({p_b2})', f'{p_getreg}({p_c2})')}) "
-        f"elseif {p_op2}=={O('BOR')} then {p_setreg}({p_a2},{bor_e(f'{p_getreg}({p_b2})', f'{p_getreg}({p_c2})')}) "
-        f"elseif {p_op2}=={O('BXOR')} then {p_setreg}({p_a2},{bxor_e(f'{p_getreg}({p_b2})', f'{p_getreg}({p_c2})')}) "
-        f"elseif {p_op2}=={O('BNOT')} then {p_setreg}({p_a2},{bnot_e(f'{p_getreg}({p_b2})')}) "
-        f"elseif {p_op2}=={O('SHL')} then {p_setreg}({p_a2},{lshift_e(f'{p_getreg}({p_b2})', f'{p_getreg}({p_c2})')}) "
-        f"elseif {p_op2}=={O('SHR')} then {p_setreg}({p_a2},{rshift_e(f'{p_getreg}({p_b2})', f'{p_getreg}({p_c2})')}) "
-        f"elseif {p_op2}=={O('UNM')} then {p_setreg}({p_a2},-{p_getreg}({p_b2})) "
-        f"elseif {p_op2}=={O('LEN')} then {p_setreg}({p_a2},#{p_getreg}({p_b2})) "
-        f"elseif {p_op2}=={O('NOT')} then {p_setreg}({p_a2},not {p_getreg}({p_b2})) "
-        f"elseif {p_op2}=={O('AND')} then "
-        f"if not {p_getreg}({p_b2}) then {p_setreg}({p_a2},{p_getreg}({p_b2})) else {p_setreg}({p_a2},{p_getreg}({p_c2})) end "
-        f"elseif {p_op2}=={O('OR')} then "
-        f"if {p_getreg}({p_b2}) then {p_setreg}({p_a2},{p_getreg}({p_b2})) else {p_setreg}({p_a2},{p_getreg}({p_c2})) end "
-        f"elseif {p_op2}=={O('EQ')} then {p_setreg}({p_a2},({p_getreg}({p_b2})=={p_getreg}({p_c2}))) "
-        f"elseif {p_op2}=={O('NE')} then {p_setreg}({p_a2},({p_getreg}({p_b2})~={p_getreg}({p_c2}))) "
-        f"elseif {p_op2}=={O('LT')} then {p_setreg}({p_a2},({p_getreg}({p_b2})<{p_getreg}({p_c2}))) "
-        f"elseif {p_op2}=={O('LE')} then {p_setreg}({p_a2},({p_getreg}({p_b2})<={p_getreg}({p_c2}))) "
-        f"elseif {p_op2}=={O('GT')} then {p_setreg}({p_a2},({p_getreg}({p_b2})>{p_getreg}({p_c2}))) "
-        f"elseif {p_op2}=={O('GE')} then {p_setreg}({p_a2},({p_getreg}({p_b2})>={p_getreg}({p_c2}))) "
-        f"elseif {p_op2}=={O('JUMP')} then {p_pc}={p_a2}+1 "
-        f"elseif {p_op2}=={O('JUMP_REG')} then {p_pc}=({p_getreg}({p_a2}) or #{p_ins})+1 "
-        f"elseif {p_op2}=={O('JUMP_FALSE')} then if not {p_getreg}({p_a2}) then {p_pc}={p_b2}+1 end "
-        f"elseif {p_op2}=={O('JUMP_TRUE')} then if {p_getreg}({p_a2}) then {p_pc}={p_b2}+1 end "
-        f"elseif {p_op2}=={O('JUMP_FALSE_NK')} then if not {p_getreg}({p_a2}) then {p_pc}={p_b2}+1 end "
-        f"elseif {p_op2}=={O('JUMP_TRUE_NK')} then if {p_getreg}({p_a2}) then {p_pc}={p_b2}+1 end "
-        f"elseif {p_op2}=={O('CALL')} then "
+        f"elseif {O('GET_FIELD')} then {p_setreg}({p_a2},{p_getreg}({p_b2})[{consts_v}[{p_c2}+1]]) "
+        f"elseif {O('SET_FIELD')} then {p_getreg}({p_a2})[{consts_v}[{p_b2}+1]]={p_getreg}({p_c2}) "
+        f"elseif {O('ADD')} then {_op_body['ADD']}"
+        f"elseif {O('SUB')} then {_op_body['SUB']}"
+        f"elseif {O('MUL')} then {_op_body['MUL']}"
+        f"elseif {O('DIV')} then {_op_body['DIV']}"
+        f"elseif {O('MOD')} then {_op_body['MOD']}"
+        f"elseif {O('POW')} then {_op_body['POW']}"
+        f"elseif {O('CONCAT')} then {_op_body['CONCAT']}"
+        f"elseif {O('IDIV')} then {_op_body['IDIV']}"
+        f"elseif {O('BAND')} then {_op_body['BAND']}"
+        f"elseif {O('BOR')} then {_op_body['BOR']}"
+        f"elseif {O('BXOR')} then {_op_body['BXOR']}"
+        f"elseif {O('BNOT')} then {_op_body['BNOT']}"
+        f"elseif {O('SHL')} then {_op_body['SHL']}"
+        f"elseif {O('SHR')} then {_op_body['SHR']}"
+        f"elseif {O('UNM')} then {_op_body['UNM']}"
+        f"elseif {O('LEN')} then {_op_body['LEN']}"
+        f"elseif {O('NOT')} then {_op_body['NOT']}"
+        f"elseif {O('AND')} then {_op_body['AND']}"
+        f"elseif {O('OR')} then {_op_body['OR']}"
+        f"elseif {O('EQ')} then {_op_body['EQ']}"
+        f"elseif {O('NE')} then {_op_body['NE']}"
+        f"elseif {O('LT')} then {_op_body['LT']}"
+        f"elseif {O('LE')} then {_op_body['LE']}"
+        f"elseif {O('GT')} then {_op_body['GT']}"
+        f"elseif {O('GE')} then {_op_body['GE']}"
+        f"elseif {O('JUMP')} then {p_pc}={p_a2}+1 "
+        f"elseif {O('JUMP_REG')} then {p_pc}=({p_getreg}({p_a2}) or #{p_ins})+1 "
+        f"elseif {O('JUMP_FALSE')} then if not {p_getreg}({p_a2}) then {p_pc}={p_b2}+1 end "
+        f"elseif {O('JUMP_TRUE')} then if {p_getreg}({p_a2}) then {p_pc}={p_b2}+1 end "
+        f"elseif {O('JUMP_FALSE_NK')} then if not {p_getreg}({p_a2}) then {p_pc}={p_b2}+1 end "
+        f"elseif {O('JUMP_TRUE_NK')} then if {p_getreg}({p_a2}) then {p_pc}={p_b2}+1 end "
+        f"elseif {O('CALL')} then "
         f"local {p_fnv}={p_getreg}({p_a2}) local {p_nargs2}={p_b2} local {p_nret}={p_c2} "
         f"local {p_callargs}={{}} local {p_ncallargs}=0 "
         f"if {p_nargs2}==255 then "
@@ -2508,7 +2604,7 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
         f"{p_vtop}={p_a2}+{p_res}.n "
         f"elseif {p_nret}>0 then {p_setreg}({p_a2},{p_res}[1]) end "
         f"else error('attempt to call a '..type({p_fnv})..' value',0) end "
-        f"elseif {p_op2}=={O('CALL_METHOD')} then "
+        f"elseif {O('CALL_METHOD')} then "
         f"local {p_objv}={p_getreg}({p_a2}) local {p_mkey}={consts_v}[{p_b2}+1] "
         f"local {p_rawc}={p_c2} local {p_multi}=false "
         f"if {p_rawc}>=256 then {p_multi}=true {p_rawc}={p_rawc}-256 end "
@@ -2527,7 +2623,7 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
         f"{p_vtop}={p_a2}+{p_res}.n "
         f"elseif {p_res}.n>=1 then {p_setreg}({p_a2},{p_res}[1]) end "
         f"else error('attempt to call a '..type({p_mfn})..' value',0) end "
-        f"elseif {p_op2}=={O('RETURN')} then "
+        f"elseif {O('RETURN')} then "
         f"local {p_rbb}={p_a2} local {p_nret}={p_b2} "
         f"if {p_nret}==1 then local {p_res}={p_getreg}({p_rbb}) for {p_jj}=0,#{p_vr} do {p_vr}[{p_jj}]=nil end return {p_res} "
         f"elseif {p_nret}==0 then for {p_jj}=0,#{p_vr} do {p_vr}[{p_jj}]=nil end return "
@@ -2539,14 +2635,14 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
         f"else local {p_res}={{}} for {p_jj}=0,{p_nret}-1 do {p_res}[{p_jj}+1]={p_getreg}({p_rbb}+{p_jj}) end "
         f"for {p_jj}=0,#{p_vr} do {p_vr}[{p_jj}]=nil end "
         f"return {unpack_v}({p_res}) end "
-        f"elseif {p_op2}=={O('RETURN_NONE')} then for {p_jj}=0,#{p_vr} do {p_vr}[{p_jj}]=nil end return "
-        f"elseif {p_op2}=={O('VARARG')} then "
+        f"elseif {O('RETURN_NONE')} then for {p_jj}=0,#{p_vr} do {p_vr}[{p_jj}]=nil end return "
+        f"elseif {O('VARARG')} then "
         f"local {p_nret}={p_b2} "
         f"if {p_nret}==255 then for {p_jj}=1,{p_van} do {p_setreg}({p_a2}+{p_jj}-1,{p_va}[{p_jj}]) end "
         f"{p_setreg}({p_a2}+{p_van},nil) "
         f"{p_vtop}={p_a2}+{p_van} "
         f"elseif {p_nret}==1 then {p_setreg}({p_a2},{p_va}[1]) end "
-        f"elseif {p_op2}=={O('CLOSURE')} then "
+        f"elseif {O('CLOSURE')} then "
         f"local {p_cp}={protos_v}[{p_b2}+1] "
         f"local {p_childubox}={{}} "
         f"for {p_ii}=1,#{p_cp}.updescs do "
@@ -2555,24 +2651,24 @@ def bytecode_to_lua(bytecode, rng, gen_name_fn, opmap=None, data_expr=None, dete
         f"else {p_childubox}[{p_ii}-1]={ubox_v}[{p_ud}.idx] end "
         f"end "
         f"{p_setreg}({p_a2},function(...) return {exec_v}({p_cp},{p_childubox},...) end) "
-        f"elseif {p_op2}=={O('FOR_PREP')} then "
+        f"elseif {O('FOR_PREP')} then "
         f"local {p_iv}={p_getreg}({p_a2}) local {p_lim}={p_getreg}({p_a2}+1) local {p_st}={p_getreg}({p_a2}+2) "
         f"if not(({p_st}>0 and {p_iv}<={p_lim}) or ({p_st}<0 and {p_iv}>={p_lim})) then {p_pc}={p_b2}+1 "
         f"else {p_setreg}({p_a2}+3,{p_iv}) end "
-        f"elseif {p_op2}=={O('FOR_LOOP')} then "
+        f"elseif {O('FOR_LOOP')} then "
         f"local {p_iv}={p_getreg}({p_a2}+3)+{p_getreg}({p_a2}+2) "
         f"local {p_lim}={p_getreg}({p_a2}+1) local {p_st}={p_getreg}({p_a2}+2) "
         f"if ({p_st}>0 and {p_iv}<={p_lim}) or ({p_st}<0 and {p_iv}>={p_lim}) then {p_setreg}({p_a2}+3,{p_iv}) {p_pc}={p_b2}+1 end "
-        f"elseif {p_op2}=={O('TFOR_CALL')} then "
+        f"elseif {O('TFOR_CALL')} then "
         f"local {p_itf}={p_getreg}({p_a2}) local {p_stt}={p_getreg}({p_a2}+1) local {p_ctl}={p_getreg}({p_a2}+2) "
         f"local {p_res}={pack_v}({p_itf}({p_stt},{p_ctl})) "
         f"for {p_jj}=1,{p_c2} do {p_setreg}({p_a2}+2+{p_jj},{p_res}[{p_jj}]) end "
         f"{p_setreg}({p_a2}+2,{p_res}[1]) "
-        f"elseif {p_op2}=={O('TFOR_LOOP')} then "
+        f"elseif {O('TFOR_LOOP')} then "
         f"if {p_getreg}({p_a2})==nil then {p_pc}={p_b2}+1 end "
-        f"elseif {p_op2}=={O('CLOSE_UPVAL')} then "
+        f"elseif {O('CLOSE_UPVAL')} then "
         f"local {p_x}={p_rb}[{p_a2}] if {p_x}~=nil then {p_vr}[{p_a2}]={p_x}.v {p_rb}[{p_a2}]=nil end "
-        f"elseif {p_op2}=={O('MOVE')} then {p_setreg}({p_a2},{p_getreg}({p_b2})) "
+        f"elseif {O('MOVE')} then {p_setreg}({p_a2},{p_getreg}({p_b2})) "
         f"else "
         f"print({_hidden_str_lit('Melodie caught an illegal opcode modification :3', rng)}) "
         f"error('',0) "
@@ -2649,7 +2745,10 @@ def bytecode_to_lua_mltn_only(bytecode, rng, gen_name_fn, opmap=None, data_expr=
     c_raw_v = N()
 
     om = opmap if opmap is not None else _DEFAULT_OPMAP
-    def O(name): return om[name]
+    def O(name):
+        return " or ".join(f"{p_op2}=={v}" for v in om[name])
+    def OV(name):
+        return om[name][0]
 
     uv_v = N()
     euv_v = N()
@@ -2686,15 +2785,15 @@ def bytecode_to_lua_mltn_only(bytecode, rng, gen_name_fn, opmap=None, data_expr=
         lines = []
         first = True
         for grp in groups_ab2:
-            cond = " or ".join(f"{p_o}=={O(n)}" for n in grp)
+            cond = " or ".join(f"{p_o}=={v}" for n in grp for v in om[n])
             kw = "if" if first else "elseif"
             lines.append(f"{kw} {cond} then {AB2}")
             first = False
         for grp in groups_ab2c:
-            cond = " or ".join(f"{p_o}=={O(n)}" for n in grp)
+            cond = " or ".join(f"{p_o}=={v}" for n in grp for v in om[n])
             lines.append(f"elseif {cond} then {AB2C}")
         for grp in groups_a2:
-            cond = " or ".join(f"{p_o}=={O(n)}" for n in grp)
+            cond = " or ".join(f"{p_o}=={v}" for n in grp for v in om[n])
             lines.append(f"elseif {cond} then {A2}")
         lines.append("end")
         return " ".join(lines)
@@ -2942,61 +3041,61 @@ def bytecode_to_lua_mltn_only(bytecode, rng, gen_name_fn, opmap=None, data_expr=
         f"local {p_rd}={p_ins}[{p_pc}] "
         f"local {p_op2}={p_rd}[1] local {p_a2}={p_rd}[2] local {p_b2}={p_rd}[3] local {p_c2}={p_rd}[4] "
         f"{p_pc}={p_pc}+1 "
-        f"if {p_op2}=={O('LOAD_CONST')} then {p_setreg}({p_a2},{consts_v}[{p_b2}+1]) "
-        f"elseif {p_op2}=={O('LOAD_VAR')} then {p_setreg}({p_a2},{p_getreg}({p_b2})) "
-        f"elseif {p_op2}=={O('SET_VAR')} then {p_setreg}({p_b2},{p_getreg}({p_a2})) "
-        f"elseif {p_op2}=={O('LOAD_GLOBAL')} then {p_setreg}({p_a2},{env_v}[{consts_v}[{p_b2}+1]]) "
-        f"elseif {p_op2}=={O('SET_GLOBAL')} then {env_v}[{consts_v}[{p_a2}+1]]={p_getreg}({p_b2}) "
-        f"elseif {p_op2}=={O('LOAD_UPVAL')} then "
+        f"if {O('LOAD_CONST')} then {p_setreg}({p_a2},{consts_v}[{p_b2}+1]) "
+        f"elseif {O('LOAD_VAR')} then {p_setreg}({p_a2},{p_getreg}({p_b2})) "
+        f"elseif {O('SET_VAR')} then {p_setreg}({p_b2},{p_getreg}({p_a2})) "
+        f"elseif {O('LOAD_GLOBAL')} then {p_setreg}({p_a2},{env_v}[{consts_v}[{p_b2}+1]]) "
+        f"elseif {O('SET_GLOBAL')} then {env_v}[{consts_v}[{p_a2}+1]]={p_getreg}({p_b2}) "
+        f"elseif {O('LOAD_UPVAL')} then "
         f"local {p_x}={ubox_v}[{p_b2}] "
         f"if {p_x} then {p_setreg}({p_a2},{p_x}.v) else {p_setreg}({p_a2},nil) end "
-        f"elseif {p_op2}=={O('SET_UPVAL')} then "
+        f"elseif {O('SET_UPVAL')} then "
         f"local {p_x}={ubox_v}[{p_a2}] "
         f"if {p_x} then {p_x}.v={p_getreg}({p_b2}) end "
-        f"elseif {p_op2}=={O('GET_TABLE')} then {p_setreg}({p_a2},{p_getreg}({p_b2})[{p_getreg}({p_c2})]) "
-        f"elseif {p_op2}=={O('SET_TABLE')} then {p_getreg}({p_a2})[{p_getreg}({p_b2})]={p_getreg}({p_c2}) "
-        f"elseif {p_op2}=={O('NEW_TABLE')} then {p_setreg}({p_a2},{{}}) "
-        f"elseif {p_op2}=={O('SET_LIST')} then {p_getreg}({p_a2})[{consts_v}[{p_b2}+1]]={p_getreg}({p_c2}) "
-        f"elseif {p_op2}=={O('SET_LIST_MULTI')} then "
+        f"elseif {O('GET_TABLE')} then {p_setreg}({p_a2},{p_getreg}({p_b2})[{p_getreg}({p_c2})]) "
+        f"elseif {O('SET_TABLE')} then {p_getreg}({p_a2})[{p_getreg}({p_b2})]={p_getreg}({p_c2}) "
+        f"elseif {O('NEW_TABLE')} then {p_setreg}({p_a2},{{}}) "
+        f"elseif {O('SET_LIST')} then {p_getreg}({p_a2})[{consts_v}[{p_b2}+1]]={p_getreg}({p_c2}) "
+        f"elseif {O('SET_LIST_MULTI')} then "
         f"local {p_jj}={p_b2} local {p_kk}={consts_v}[{p_c2}+1] "
         f"local {p_t}={p_getreg}({p_a2}) "
         f"while {p_jj}<{p_vtop} do {p_t}[{p_kk}]={p_getreg}({p_jj}) {p_kk}={p_kk}+1 {p_jj}={p_jj}+1 end "
-        f"elseif {p_op2}=={O('GET_FIELD')} then {p_setreg}({p_a2},{p_getreg}({p_b2})[{consts_v}[{p_c2}+1]]) "
-        f"elseif {p_op2}=={O('SET_FIELD')} then {p_getreg}({p_a2})[{consts_v}[{p_b2}+1]]={p_getreg}({p_c2}) "
-        f"elseif {p_op2}=={O('ADD')} then {p_setreg}({p_a2},{p_getreg}({p_b2})+{p_getreg}({p_c2})) "
-        f"elseif {p_op2}=={O('SUB')} then {p_setreg}({p_a2},{p_getreg}({p_b2})-{p_getreg}({p_c2})) "
-        f"elseif {p_op2}=={O('MUL')} then {p_setreg}({p_a2},{p_getreg}({p_b2})*{p_getreg}({p_c2})) "
-        f"elseif {p_op2}=={O('DIV')} then {p_setreg}({p_a2},{p_getreg}({p_b2})/{p_getreg}({p_c2})) "
-        f"elseif {p_op2}=={O('MOD')} then {p_setreg}({p_a2},{p_getreg}({p_b2})%{p_getreg}({p_c2})) "
-        f"elseif {p_op2}=={O('POW')} then {p_setreg}({p_a2},{p_getreg}({p_b2})^{p_getreg}({p_c2})) "
-        f"elseif {p_op2}=={O('CONCAT')} then {p_setreg}({p_a2},{p_getreg}({p_b2})..{p_getreg}({p_c2})) "
-        f"elseif {p_op2}=={O('IDIV')} then {p_setreg}({p_a2},{idiv_e(f'{p_getreg}({p_b2})', f'{p_getreg}({p_c2})')}) "
-        f"elseif {p_op2}=={O('BAND')} then {p_setreg}({p_a2},{band_e(f'{p_getreg}({p_b2})', f'{p_getreg}({p_c2})')}) "
-        f"elseif {p_op2}=={O('BOR')} then {p_setreg}({p_a2},{bor_e(f'{p_getreg}({p_b2})', f'{p_getreg}({p_c2})')}) "
-        f"elseif {p_op2}=={O('BXOR')} then {p_setreg}({p_a2},{bxor_e(f'{p_getreg}({p_b2})', f'{p_getreg}({p_c2})')}) "
-        f"elseif {p_op2}=={O('BNOT')} then {p_setreg}({p_a2},{bnot_e(f'{p_getreg}({p_b2})')}) "
-        f"elseif {p_op2}=={O('SHL')} then {p_setreg}({p_a2},{lshift_e(f'{p_getreg}({p_b2})', f'{p_getreg}({p_c2})')}) "
-        f"elseif {p_op2}=={O('SHR')} then {p_setreg}({p_a2},{rshift_e(f'{p_getreg}({p_b2})', f'{p_getreg}({p_c2})')}) "
-        f"elseif {p_op2}=={O('UNM')} then {p_setreg}({p_a2},-{p_getreg}({p_b2})) "
-        f"elseif {p_op2}=={O('LEN')} then {p_setreg}({p_a2},#{p_getreg}({p_b2})) "
-        f"elseif {p_op2}=={O('NOT')} then {p_setreg}({p_a2},not {p_getreg}({p_b2})) "
-        f"elseif {p_op2}=={O('AND')} then "
+        f"elseif {O('GET_FIELD')} then {p_setreg}({p_a2},{p_getreg}({p_b2})[{consts_v}[{p_c2}+1]]) "
+        f"elseif {O('SET_FIELD')} then {p_getreg}({p_a2})[{consts_v}[{p_b2}+1]]={p_getreg}({p_c2}) "
+        f"elseif {O('ADD')} then {p_setreg}({p_a2},{p_getreg}({p_b2})+{p_getreg}({p_c2})) "
+        f"elseif {O('SUB')} then {p_setreg}({p_a2},{p_getreg}({p_b2})-{p_getreg}({p_c2})) "
+        f"elseif {O('MUL')} then {p_setreg}({p_a2},{p_getreg}({p_b2})*{p_getreg}({p_c2})) "
+        f"elseif {O('DIV')} then {p_setreg}({p_a2},{p_getreg}({p_b2})/{p_getreg}({p_c2})) "
+        f"elseif {O('MOD')} then {p_setreg}({p_a2},{p_getreg}({p_b2})%{p_getreg}({p_c2})) "
+        f"elseif {O('POW')} then {p_setreg}({p_a2},{p_getreg}({p_b2})^{p_getreg}({p_c2})) "
+        f"elseif {O('CONCAT')} then {p_setreg}({p_a2},{p_getreg}({p_b2})..{p_getreg}({p_c2})) "
+        f"elseif {O('IDIV')} then {p_setreg}({p_a2},{idiv_e(f'{p_getreg}({p_b2})', f'{p_getreg}({p_c2})')}) "
+        f"elseif {O('BAND')} then {p_setreg}({p_a2},{band_e(f'{p_getreg}({p_b2})', f'{p_getreg}({p_c2})')}) "
+        f"elseif {O('BOR')} then {p_setreg}({p_a2},{bor_e(f'{p_getreg}({p_b2})', f'{p_getreg}({p_c2})')}) "
+        f"elseif {O('BXOR')} then {p_setreg}({p_a2},{bxor_e(f'{p_getreg}({p_b2})', f'{p_getreg}({p_c2})')}) "
+        f"elseif {O('BNOT')} then {p_setreg}({p_a2},{bnot_e(f'{p_getreg}({p_b2})')}) "
+        f"elseif {O('SHL')} then {p_setreg}({p_a2},{lshift_e(f'{p_getreg}({p_b2})', f'{p_getreg}({p_c2})')}) "
+        f"elseif {O('SHR')} then {p_setreg}({p_a2},{rshift_e(f'{p_getreg}({p_b2})', f'{p_getreg}({p_c2})')}) "
+        f"elseif {O('UNM')} then {p_setreg}({p_a2},-{p_getreg}({p_b2})) "
+        f"elseif {O('LEN')} then {p_setreg}({p_a2},#{p_getreg}({p_b2})) "
+        f"elseif {O('NOT')} then {p_setreg}({p_a2},not {p_getreg}({p_b2})) "
+        f"elseif {O('AND')} then "
         f"if not {p_getreg}({p_b2}) then {p_setreg}({p_a2},{p_getreg}({p_b2})) else {p_setreg}({p_a2},{p_getreg}({p_c2})) end "
-        f"elseif {p_op2}=={O('OR')} then "
+        f"elseif {O('OR')} then "
         f"if {p_getreg}({p_b2}) then {p_setreg}({p_a2},{p_getreg}({p_b2})) else {p_setreg}({p_a2},{p_getreg}({p_c2})) end "
-        f"elseif {p_op2}=={O('EQ')} then {p_setreg}({p_a2},({p_getreg}({p_b2})=={p_getreg}({p_c2}))) "
-        f"elseif {p_op2}=={O('NE')} then {p_setreg}({p_a2},({p_getreg}({p_b2})~={p_getreg}({p_c2}))) "
-        f"elseif {p_op2}=={O('LT')} then {p_setreg}({p_a2},({p_getreg}({p_b2})<{p_getreg}({p_c2}))) "
-        f"elseif {p_op2}=={O('LE')} then {p_setreg}({p_a2},({p_getreg}({p_b2})<={p_getreg}({p_c2}))) "
-        f"elseif {p_op2}=={O('GT')} then {p_setreg}({p_a2},({p_getreg}({p_b2})>{p_getreg}({p_c2}))) "
-        f"elseif {p_op2}=={O('GE')} then {p_setreg}({p_a2},({p_getreg}({p_b2})>={p_getreg}({p_c2}))) "
-        f"elseif {p_op2}=={O('JUMP')} then {p_pc}={p_a2}+1 "
-        f"elseif {p_op2}=={O('JUMP_REG')} then {p_pc}=({p_getreg}({p_a2}) or #{p_ins})+1 "
-        f"elseif {p_op2}=={O('JUMP_FALSE')} then if not {p_getreg}({p_a2}) then {p_pc}={p_b2}+1 end "
-        f"elseif {p_op2}=={O('JUMP_TRUE')} then if {p_getreg}({p_a2}) then {p_pc}={p_b2}+1 end "
-        f"elseif {p_op2}=={O('JUMP_FALSE_NK')} then if not {p_getreg}({p_a2}) then {p_pc}={p_b2}+1 end "
-        f"elseif {p_op2}=={O('JUMP_TRUE_NK')} then if {p_getreg}({p_a2}) then {p_pc}={p_b2}+1 end "
-        f"elseif {p_op2}=={O('CALL')} then "
+        f"elseif {O('EQ')} then {p_setreg}({p_a2},({p_getreg}({p_b2})=={p_getreg}({p_c2}))) "
+        f"elseif {O('NE')} then {p_setreg}({p_a2},({p_getreg}({p_b2})~={p_getreg}({p_c2}))) "
+        f"elseif {O('LT')} then {p_setreg}({p_a2},({p_getreg}({p_b2})<{p_getreg}({p_c2}))) "
+        f"elseif {O('LE')} then {p_setreg}({p_a2},({p_getreg}({p_b2})<={p_getreg}({p_c2}))) "
+        f"elseif {O('GT')} then {p_setreg}({p_a2},({p_getreg}({p_b2})>{p_getreg}({p_c2}))) "
+        f"elseif {O('GE')} then {p_setreg}({p_a2},({p_getreg}({p_b2})>={p_getreg}({p_c2}))) "
+        f"elseif {O('JUMP')} then {p_pc}={p_a2}+1 "
+        f"elseif {O('JUMP_REG')} then {p_pc}=({p_getreg}({p_a2}) or #{p_ins})+1 "
+        f"elseif {O('JUMP_FALSE')} then if not {p_getreg}({p_a2}) then {p_pc}={p_b2}+1 end "
+        f"elseif {O('JUMP_TRUE')} then if {p_getreg}({p_a2}) then {p_pc}={p_b2}+1 end "
+        f"elseif {O('JUMP_FALSE_NK')} then if not {p_getreg}({p_a2}) then {p_pc}={p_b2}+1 end "
+        f"elseif {O('JUMP_TRUE_NK')} then if {p_getreg}({p_a2}) then {p_pc}={p_b2}+1 end "
+        f"elseif {O('CALL')} then "
         f"local {p_fnv}={p_getreg}({p_a2}) local {p_nargs2}={p_b2} local {p_nret}={p_c2} "
         f"local {p_callargs}={{}} local {p_ncallargs}=0 "
         f"if {p_nargs2}==255 then "
@@ -3011,7 +3110,7 @@ def bytecode_to_lua_mltn_only(bytecode, rng, gen_name_fn, opmap=None, data_expr=
         f"{p_vtop}={p_a2}+{p_res}.n "
         f"elseif {p_nret}>0 then {p_setreg}({p_a2},{p_res}[1]) end "
         f"else error('attempt to call a '..type({p_fnv})..' value',0) end "
-        f"elseif {p_op2}=={O('CALL_METHOD')} then "
+        f"elseif {O('CALL_METHOD')} then "
         f"local {p_objv}={p_getreg}({p_a2}) local {p_mkey}={consts_v}[{p_b2}+1] "
         f"local {p_rawc}={p_c2} local {p_multi}=false "
         f"if {p_rawc}>=256 then {p_multi}=true {p_rawc}={p_rawc}-256 end "
@@ -3030,7 +3129,7 @@ def bytecode_to_lua_mltn_only(bytecode, rng, gen_name_fn, opmap=None, data_expr=
         f"{p_vtop}={p_a2}+{p_res}.n "
         f"elseif {p_res}.n>=1 then {p_setreg}({p_a2},{p_res}[1]) end "
         f"else error('attempt to call a '..type({p_mfn})..' value',0) end "
-        f"elseif {p_op2}=={O('RETURN')} then "
+        f"elseif {O('RETURN')} then "
         f"local {p_rbb}={p_a2} local {p_nret}={p_b2} "
         f"if {p_nret}==1 then local {p_res}={p_getreg}({p_rbb}) for {p_jj}=0,#{p_vr} do {p_vr}[{p_jj}]=nil end return {p_res} "
         f"elseif {p_nret}==0 then for {p_jj}=0,#{p_vr} do {p_vr}[{p_jj}]=nil end return "
@@ -3042,14 +3141,14 @@ def bytecode_to_lua_mltn_only(bytecode, rng, gen_name_fn, opmap=None, data_expr=
         f"else local {p_res}={{}} for {p_jj}=0,{p_nret}-1 do {p_res}[{p_jj}+1]={p_getreg}({p_rbb}+{p_jj}) end "
         f"for {p_jj}=0,#{p_vr} do {p_vr}[{p_jj}]=nil end "
         f"return {unpack_v}({p_res}) end "
-        f"elseif {p_op2}=={O('RETURN_NONE')} then for {p_jj}=0,#{p_vr} do {p_vr}[{p_jj}]=nil end return "
-        f"elseif {p_op2}=={O('VARARG')} then "
+        f"elseif {O('RETURN_NONE')} then for {p_jj}=0,#{p_vr} do {p_vr}[{p_jj}]=nil end return "
+        f"elseif {O('VARARG')} then "
         f"local {p_nret}={p_b2} "
         f"if {p_nret}==255 then for {p_jj}=1,{p_van} do {p_setreg}({p_a2}+{p_jj}-1,{p_va}[{p_jj}]) end "
         f"{p_setreg}({p_a2}+{p_van},nil) "
         f"{p_vtop}={p_a2}+{p_van} "
         f"elseif {p_nret}==1 then {p_setreg}({p_a2},{p_va}[1]) end "
-        f"elseif {p_op2}=={O('CLOSURE')} then "
+        f"elseif {O('CLOSURE')} then "
         f"local {p_cp}={protos_v}[{p_b2}+1] "
         f"local {p_childubox}={{}} "
         f"for {p_ii}=1,#{p_cp}.updescs do "
@@ -3058,24 +3157,24 @@ def bytecode_to_lua_mltn_only(bytecode, rng, gen_name_fn, opmap=None, data_expr=
         f"else {p_childubox}[{p_ii}-1]={ubox_v}[{p_ud}.idx] end "
         f"end "
         f"{p_setreg}({p_a2},function(...) return {exec_v}({p_cp},{p_childubox},...) end) "
-        f"elseif {p_op2}=={O('FOR_PREP')} then "
+        f"elseif {O('FOR_PREP')} then "
         f"local {p_iv}={p_getreg}({p_a2}) local {p_lim}={p_getreg}({p_a2}+1) local {p_st}={p_getreg}({p_a2}+2) "
         f"if not(({p_st}>0 and {p_iv}<={p_lim}) or ({p_st}<0 and {p_iv}>={p_lim})) then {p_pc}={p_b2}+1 "
         f"else {p_setreg}({p_a2}+3,{p_iv}) end "
-        f"elseif {p_op2}=={O('FOR_LOOP')} then "
+        f"elseif {O('FOR_LOOP')} then "
         f"local {p_iv}={p_getreg}({p_a2}+3)+{p_getreg}({p_a2}+2) "
         f"local {p_lim}={p_getreg}({p_a2}+1) local {p_st}={p_getreg}({p_a2}+2) "
         f"if ({p_st}>0 and {p_iv}<={p_lim}) or ({p_st}<0 and {p_iv}>={p_lim}) then {p_setreg}({p_a2}+3,{p_iv}) {p_pc}={p_b2}+1 end "
-        f"elseif {p_op2}=={O('TFOR_CALL')} then "
+        f"elseif {O('TFOR_CALL')} then "
         f"local {p_itf}={p_getreg}({p_a2}) local {p_stt}={p_getreg}({p_a2}+1) local {p_ctl}={p_getreg}({p_a2}+2) "
         f"local {p_res}={pack_v}({p_itf}({p_stt},{p_ctl})) "
         f"for {p_jj}=1,{p_c2} do {p_setreg}({p_a2}+2+{p_jj},{p_res}[{p_jj}]) end "
         f"{p_setreg}({p_a2}+2,{p_res}[1]) "
-        f"elseif {p_op2}=={O('TFOR_LOOP')} then "
+        f"elseif {O('TFOR_LOOP')} then "
         f"if {p_getreg}({p_a2})==nil then {p_pc}={p_b2}+1 end "
-        f"elseif {p_op2}=={O('CLOSE_UPVAL')} then "
+        f"elseif {O('CLOSE_UPVAL')} then "
         f"local {p_x}={p_rb}[{p_a2}] if {p_x}~=nil then {p_vr}[{p_a2}]={p_x}.v {p_rb}[{p_a2}]=nil end "
-        f"elseif {p_op2}=={O('MOVE')} then {p_setreg}({p_a2},{p_getreg}({p_b2})) "
+        f"elseif {O('MOVE')} then {p_setreg}({p_a2},{p_getreg}({p_b2})) "
         f"else "
         f"print({_hidden_str_lit('Melodie caught an illegal opcode modification :3', rng)}) "
         f"error('',0) "
@@ -3153,7 +3252,10 @@ def bytecode_to_lua_legacy(bytecode, rng, gen_name_fn, opmap=None, data_expr=Non
     p_logops = N(); p_lk = N(); p_lo = N(); p_fdidx = N(); p_fdent = N()
 
     om = opmap if opmap is not None else _DEFAULT_OPMAP
-    def O(name): return om[name]
+    def O(name):
+        return " or ".join(f"{p_op2}=={v}" for v in om[name])
+    def OV(name):
+        return om[name][0]
 
     uv_v = N()
     euv_v = N()
@@ -3189,15 +3291,15 @@ def bytecode_to_lua_legacy(bytecode, rng, gen_name_fn, opmap=None, data_expr=Non
         lines = []
         first = True
         for grp in groups_ab2:
-            cond = " or ".join(f"{p_o}=={O(n)}" for n in grp)
+            cond = " or ".join(f"{p_o}=={v}" for n in grp for v in om[n])
             kw = "if" if first else "elseif"
             lines.append(f"{kw} {cond} then {AB2}")
             first = False
         for grp in groups_ab2c:
-            cond = " or ".join(f"{p_o}=={O(n)}" for n in grp)
+            cond = " or ".join(f"{p_o}=={v}" for n in grp for v in om[n])
             lines.append(f"elseif {cond} then {AB2C}")
         for grp in groups_a2:
-            cond = " or ".join(f"{p_o}=={O(n)}" for n in grp)
+            cond = " or ".join(f"{p_o}=={v}" for n in grp for v in om[n])
             lines.append(f"elseif {cond} then {A2}")
         lines.append("end")
         return " ".join(lines)
@@ -3357,61 +3459,61 @@ def bytecode_to_lua_legacy(bytecode, rng, gen_name_fn, opmap=None, data_expr=Non
         f"local {p_rd}={p_ins}[{p_pc}] "
         f"local {p_op2}={p_rd}[1] local {p_a2}={p_rd}[2] local {p_b2}={p_rd}[3] local {p_c2}={p_rd}[4] "
         f"{p_pc}={p_pc}+1 "
-        f"if {p_op2}=={O('LOAD_CONST')} then {p_setreg}({p_a2},{consts_v}[{p_b2}+1]) "
-        f"elseif {p_op2}=={O('LOAD_VAR')} then {p_setreg}({p_a2},{p_getreg}({p_b2})) "
-        f"elseif {p_op2}=={O('SET_VAR')} then {p_setreg}({p_b2},{p_getreg}({p_a2})) "
-        f"elseif {p_op2}=={O('LOAD_GLOBAL')} then {p_setreg}({p_a2},{env_v}[{consts_v}[{p_b2}+1]]) "
-        f"elseif {p_op2}=={O('SET_GLOBAL')} then {env_v}[{consts_v}[{p_a2}+1]]={p_getreg}({p_b2}) "
-        f"elseif {p_op2}=={O('LOAD_UPVAL')} then "
+        f"if {O('LOAD_CONST')} then {p_setreg}({p_a2},{consts_v}[{p_b2}+1]) "
+        f"elseif {O('LOAD_VAR')} then {p_setreg}({p_a2},{p_getreg}({p_b2})) "
+        f"elseif {O('SET_VAR')} then {p_setreg}({p_b2},{p_getreg}({p_a2})) "
+        f"elseif {O('LOAD_GLOBAL')} then {p_setreg}({p_a2},{env_v}[{consts_v}[{p_b2}+1]]) "
+        f"elseif {O('SET_GLOBAL')} then {env_v}[{consts_v}[{p_a2}+1]]={p_getreg}({p_b2}) "
+        f"elseif {O('LOAD_UPVAL')} then "
         f"local {p_x}={ubox_v}[{p_b2}] "
         f"if {p_x} then {p_setreg}({p_a2},{p_x}.v) else {p_setreg}({p_a2},nil) end "
-        f"elseif {p_op2}=={O('SET_UPVAL')} then "
+        f"elseif {O('SET_UPVAL')} then "
         f"local {p_x}={ubox_v}[{p_a2}] "
         f"if {p_x} then {p_x}.v={p_getreg}({p_b2}) end "
-        f"elseif {p_op2}=={O('GET_TABLE')} then {p_setreg}({p_a2},{p_getreg}({p_b2})[{p_getreg}({p_c2})]) "
-        f"elseif {p_op2}=={O('SET_TABLE')} then {p_getreg}({p_a2})[{p_getreg}({p_b2})]={p_getreg}({p_c2}) "
-        f"elseif {p_op2}=={O('NEW_TABLE')} then {p_setreg}({p_a2},{{}}) "
-        f"elseif {p_op2}=={O('SET_LIST')} then {p_getreg}({p_a2})[{consts_v}[{p_b2}+1]]={p_getreg}({p_c2}) "
-        f"elseif {p_op2}=={O('SET_LIST_MULTI')} then "
+        f"elseif {O('GET_TABLE')} then {p_setreg}({p_a2},{p_getreg}({p_b2})[{p_getreg}({p_c2})]) "
+        f"elseif {O('SET_TABLE')} then {p_getreg}({p_a2})[{p_getreg}({p_b2})]={p_getreg}({p_c2}) "
+        f"elseif {O('NEW_TABLE')} then {p_setreg}({p_a2},{{}}) "
+        f"elseif {O('SET_LIST')} then {p_getreg}({p_a2})[{consts_v}[{p_b2}+1]]={p_getreg}({p_c2}) "
+        f"elseif {O('SET_LIST_MULTI')} then "
         f"local {p_jj}={p_b2} local {p_kk}={consts_v}[{p_c2}+1] "
         f"local {p_t}={p_getreg}({p_a2}) "
         f"while {p_jj}<{p_vtop} do {p_t}[{p_kk}]={p_getreg}({p_jj}) {p_kk}={p_kk}+1 {p_jj}={p_jj}+1 end "
-        f"elseif {p_op2}=={O('GET_FIELD')} then {p_setreg}({p_a2},{p_getreg}({p_b2})[{consts_v}[{p_c2}+1]]) "
-        f"elseif {p_op2}=={O('SET_FIELD')} then {p_getreg}({p_a2})[{consts_v}[{p_b2}+1]]={p_getreg}({p_c2}) "
-        f"elseif {p_op2}=={O('ADD')} then {p_setreg}({p_a2},{p_getreg}({p_b2})+{p_getreg}({p_c2})) "
-        f"elseif {p_op2}=={O('SUB')} then {p_setreg}({p_a2},{p_getreg}({p_b2})-{p_getreg}({p_c2})) "
-        f"elseif {p_op2}=={O('MUL')} then {p_setreg}({p_a2},{p_getreg}({p_b2})*{p_getreg}({p_c2})) "
-        f"elseif {p_op2}=={O('DIV')} then {p_setreg}({p_a2},{p_getreg}({p_b2})/{p_getreg}({p_c2})) "
-        f"elseif {p_op2}=={O('MOD')} then {p_setreg}({p_a2},{p_getreg}({p_b2})%{p_getreg}({p_c2})) "
-        f"elseif {p_op2}=={O('POW')} then {p_setreg}({p_a2},{p_getreg}({p_b2})^{p_getreg}({p_c2})) "
-        f"elseif {p_op2}=={O('CONCAT')} then {p_setreg}({p_a2},{p_getreg}({p_b2})..{p_getreg}({p_c2})) "
-        f"elseif {p_op2}=={O('IDIV')} then {p_setreg}({p_a2},{idiv_e(f'{p_getreg}({p_b2})', f'{p_getreg}({p_c2})')}) "
-        f"elseif {p_op2}=={O('BAND')} then {p_setreg}({p_a2},{band_e(f'{p_getreg}({p_b2})', f'{p_getreg}({p_c2})')}) "
-        f"elseif {p_op2}=={O('BOR')} then {p_setreg}({p_a2},{bor_e(f'{p_getreg}({p_b2})', f'{p_getreg}({p_c2})')}) "
-        f"elseif {p_op2}=={O('BXOR')} then {p_setreg}({p_a2},{bxor_e(f'{p_getreg}({p_b2})', f'{p_getreg}({p_c2})')}) "
-        f"elseif {p_op2}=={O('BNOT')} then {p_setreg}({p_a2},{bnot_e(f'{p_getreg}({p_b2})')}) "
-        f"elseif {p_op2}=={O('SHL')} then {p_setreg}({p_a2},{lshift_e(f'{p_getreg}({p_b2})', f'{p_getreg}({p_c2})')}) "
-        f"elseif {p_op2}=={O('SHR')} then {p_setreg}({p_a2},{rshift_e(f'{p_getreg}({p_b2})', f'{p_getreg}({p_c2})')}) "
-        f"elseif {p_op2}=={O('UNM')} then {p_setreg}({p_a2},-{p_getreg}({p_b2})) "
-        f"elseif {p_op2}=={O('LEN')} then {p_setreg}({p_a2},#{p_getreg}({p_b2})) "
-        f"elseif {p_op2}=={O('NOT')} then {p_setreg}({p_a2},not {p_getreg}({p_b2})) "
-        f"elseif {p_op2}=={O('AND')} then "
+        f"elseif {O('GET_FIELD')} then {p_setreg}({p_a2},{p_getreg}({p_b2})[{consts_v}[{p_c2}+1]]) "
+        f"elseif {O('SET_FIELD')} then {p_getreg}({p_a2})[{consts_v}[{p_b2}+1]]={p_getreg}({p_c2}) "
+        f"elseif {O('ADD')} then {p_setreg}({p_a2},{p_getreg}({p_b2})+{p_getreg}({p_c2})) "
+        f"elseif {O('SUB')} then {p_setreg}({p_a2},{p_getreg}({p_b2})-{p_getreg}({p_c2})) "
+        f"elseif {O('MUL')} then {p_setreg}({p_a2},{p_getreg}({p_b2})*{p_getreg}({p_c2})) "
+        f"elseif {O('DIV')} then {p_setreg}({p_a2},{p_getreg}({p_b2})/{p_getreg}({p_c2})) "
+        f"elseif {O('MOD')} then {p_setreg}({p_a2},{p_getreg}({p_b2})%{p_getreg}({p_c2})) "
+        f"elseif {O('POW')} then {p_setreg}({p_a2},{p_getreg}({p_b2})^{p_getreg}({p_c2})) "
+        f"elseif {O('CONCAT')} then {p_setreg}({p_a2},{p_getreg}({p_b2})..{p_getreg}({p_c2})) "
+        f"elseif {O('IDIV')} then {p_setreg}({p_a2},{idiv_e(f'{p_getreg}({p_b2})', f'{p_getreg}({p_c2})')}) "
+        f"elseif {O('BAND')} then {p_setreg}({p_a2},{band_e(f'{p_getreg}({p_b2})', f'{p_getreg}({p_c2})')}) "
+        f"elseif {O('BOR')} then {p_setreg}({p_a2},{bor_e(f'{p_getreg}({p_b2})', f'{p_getreg}({p_c2})')}) "
+        f"elseif {O('BXOR')} then {p_setreg}({p_a2},{bxor_e(f'{p_getreg}({p_b2})', f'{p_getreg}({p_c2})')}) "
+        f"elseif {O('BNOT')} then {p_setreg}({p_a2},{bnot_e(f'{p_getreg}({p_b2})')}) "
+        f"elseif {O('SHL')} then {p_setreg}({p_a2},{lshift_e(f'{p_getreg}({p_b2})', f'{p_getreg}({p_c2})')}) "
+        f"elseif {O('SHR')} then {p_setreg}({p_a2},{rshift_e(f'{p_getreg}({p_b2})', f'{p_getreg}({p_c2})')}) "
+        f"elseif {O('UNM')} then {p_setreg}({p_a2},-{p_getreg}({p_b2})) "
+        f"elseif {O('LEN')} then {p_setreg}({p_a2},#{p_getreg}({p_b2})) "
+        f"elseif {O('NOT')} then {p_setreg}({p_a2},not {p_getreg}({p_b2})) "
+        f"elseif {O('AND')} then "
         f"if not {p_getreg}({p_b2}) then {p_setreg}({p_a2},{p_getreg}({p_b2})) else {p_setreg}({p_a2},{p_getreg}({p_c2})) end "
-        f"elseif {p_op2}=={O('OR')} then "
+        f"elseif {O('OR')} then "
         f"if {p_getreg}({p_b2}) then {p_setreg}({p_a2},{p_getreg}({p_b2})) else {p_setreg}({p_a2},{p_getreg}({p_c2})) end "
-        f"elseif {p_op2}=={O('EQ')} then {p_setreg}({p_a2},({p_getreg}({p_b2})=={p_getreg}({p_c2}))) "
-        f"elseif {p_op2}=={O('NE')} then {p_setreg}({p_a2},({p_getreg}({p_b2})~={p_getreg}({p_c2}))) "
-        f"elseif {p_op2}=={O('LT')} then {p_setreg}({p_a2},({p_getreg}({p_b2})<{p_getreg}({p_c2}))) "
-        f"elseif {p_op2}=={O('LE')} then {p_setreg}({p_a2},({p_getreg}({p_b2})<={p_getreg}({p_c2}))) "
-        f"elseif {p_op2}=={O('GT')} then {p_setreg}({p_a2},({p_getreg}({p_b2})>{p_getreg}({p_c2}))) "
-        f"elseif {p_op2}=={O('GE')} then {p_setreg}({p_a2},({p_getreg}({p_b2})>={p_getreg}({p_c2}))) "
-        f"elseif {p_op2}=={O('JUMP')} then {p_pc}={p_a2}+1 "
-        f"elseif {p_op2}=={O('JUMP_REG')} then {p_pc}=({p_getreg}({p_a2}) or #{p_ins})+1 "
-        f"elseif {p_op2}=={O('JUMP_FALSE')} then if not {p_getreg}({p_a2}) then {p_pc}={p_b2}+1 end "
-        f"elseif {p_op2}=={O('JUMP_TRUE')} then if {p_getreg}({p_a2}) then {p_pc}={p_b2}+1 end "
-        f"elseif {p_op2}=={O('JUMP_FALSE_NK')} then if not {p_getreg}({p_a2}) then {p_pc}={p_b2}+1 end "
-        f"elseif {p_op2}=={O('JUMP_TRUE_NK')} then if {p_getreg}({p_a2}) then {p_pc}={p_b2}+1 end "
-        f"elseif {p_op2}=={O('CALL')} then "
+        f"elseif {O('EQ')} then {p_setreg}({p_a2},({p_getreg}({p_b2})=={p_getreg}({p_c2}))) "
+        f"elseif {O('NE')} then {p_setreg}({p_a2},({p_getreg}({p_b2})~={p_getreg}({p_c2}))) "
+        f"elseif {O('LT')} then {p_setreg}({p_a2},({p_getreg}({p_b2})<{p_getreg}({p_c2}))) "
+        f"elseif {O('LE')} then {p_setreg}({p_a2},({p_getreg}({p_b2})<={p_getreg}({p_c2}))) "
+        f"elseif {O('GT')} then {p_setreg}({p_a2},({p_getreg}({p_b2})>{p_getreg}({p_c2}))) "
+        f"elseif {O('GE')} then {p_setreg}({p_a2},({p_getreg}({p_b2})>={p_getreg}({p_c2}))) "
+        f"elseif {O('JUMP')} then {p_pc}={p_a2}+1 "
+        f"elseif {O('JUMP_REG')} then {p_pc}=({p_getreg}({p_a2}) or #{p_ins})+1 "
+        f"elseif {O('JUMP_FALSE')} then if not {p_getreg}({p_a2}) then {p_pc}={p_b2}+1 end "
+        f"elseif {O('JUMP_TRUE')} then if {p_getreg}({p_a2}) then {p_pc}={p_b2}+1 end "
+        f"elseif {O('JUMP_FALSE_NK')} then if not {p_getreg}({p_a2}) then {p_pc}={p_b2}+1 end "
+        f"elseif {O('JUMP_TRUE_NK')} then if {p_getreg}({p_a2}) then {p_pc}={p_b2}+1 end "
+        f"elseif {O('CALL')} then "
         f"local {p_fnv}={p_getreg}({p_a2}) local {p_nargs2}={p_b2} local {p_nret}={p_c2} "
         f"local {p_callargs}={{}} local {p_ncallargs}=0 "
         f"if {p_nargs2}==255 then "
@@ -3426,7 +3528,7 @@ def bytecode_to_lua_legacy(bytecode, rng, gen_name_fn, opmap=None, data_expr=Non
         f"{p_vtop}={p_a2}+{p_res}.n "
         f"elseif {p_nret}>0 then {p_setreg}({p_a2},{p_res}[1]) end "
         f"else error('attempt to call a '..type({p_fnv})..' value',0) end "
-        f"elseif {p_op2}=={O('CALL_METHOD')} then "
+        f"elseif {O('CALL_METHOD')} then "
         f"local {p_objv}={p_getreg}({p_a2}) local {p_mkey}={consts_v}[{p_b2}+1] "
         f"local {p_rawc}={p_c2} local {p_multi}=false "
         f"if {p_rawc}>=256 then {p_multi}=true {p_rawc}={p_rawc}-256 end "
@@ -3445,7 +3547,7 @@ def bytecode_to_lua_legacy(bytecode, rng, gen_name_fn, opmap=None, data_expr=Non
         f"{p_vtop}={p_a2}+{p_res}.n "
         f"elseif {p_res}.n>=1 then {p_setreg}({p_a2},{p_res}[1]) end "
         f"else error('attempt to call a '..type({p_mfn})..' value',0) end "
-        f"elseif {p_op2}=={O('RETURN')} then "
+        f"elseif {O('RETURN')} then "
         f"local {p_rbb}={p_a2} local {p_nret}={p_b2} "
         f"if {p_nret}==1 then local {p_res}={p_getreg}({p_rbb}) for {p_jj}=0,#{p_vr} do {p_vr}[{p_jj}]=nil end return {p_res} "
         f"elseif {p_nret}==0 then for {p_jj}=0,#{p_vr} do {p_vr}[{p_jj}]=nil end return "
@@ -3457,14 +3559,14 @@ def bytecode_to_lua_legacy(bytecode, rng, gen_name_fn, opmap=None, data_expr=Non
         f"else local {p_res}={{}} for {p_jj}=0,{p_nret}-1 do {p_res}[{p_jj}+1]={p_getreg}({p_rbb}+{p_jj}) end "
         f"for {p_jj}=0,#{p_vr} do {p_vr}[{p_jj}]=nil end "
         f"return {unpack_v}({p_res}) end "
-        f"elseif {p_op2}=={O('RETURN_NONE')} then for {p_jj}=0,#{p_vr} do {p_vr}[{p_jj}]=nil end return "
-        f"elseif {p_op2}=={O('VARARG')} then "
+        f"elseif {O('RETURN_NONE')} then for {p_jj}=0,#{p_vr} do {p_vr}[{p_jj}]=nil end return "
+        f"elseif {O('VARARG')} then "
         f"local {p_nret}={p_b2} "
         f"if {p_nret}==255 then for {p_jj}=1,{p_van} do {p_setreg}({p_a2}+{p_jj}-1,{p_va}[{p_jj}]) end "
         f"{p_setreg}({p_a2}+{p_van},nil) "
         f"{p_vtop}={p_a2}+{p_van} "
         f"elseif {p_nret}==1 then {p_setreg}({p_a2},{p_va}[1]) end "
-        f"elseif {p_op2}=={O('CLOSURE')} then "
+        f"elseif {O('CLOSURE')} then "
         f"local {p_cp}={protos_v}[{p_b2}+1] "
         f"local {p_childubox}={{}} "
         f"for {p_ii}=1,#{p_cp}.updescs do "
@@ -3473,24 +3575,24 @@ def bytecode_to_lua_legacy(bytecode, rng, gen_name_fn, opmap=None, data_expr=Non
         f"else {p_childubox}[{p_ii}-1]={ubox_v}[{p_ud}.idx] end "
         f"end "
         f"{p_setreg}({p_a2},function(...) return {exec_v}({p_cp},{p_childubox},...) end) "
-        f"elseif {p_op2}=={O('FOR_PREP')} then "
+        f"elseif {O('FOR_PREP')} then "
         f"local {p_iv}={p_getreg}({p_a2}) local {p_lim}={p_getreg}({p_a2}+1) local {p_st}={p_getreg}({p_a2}+2) "
         f"if not(({p_st}>0 and {p_iv}<={p_lim}) or ({p_st}<0 and {p_iv}>={p_lim})) then {p_pc}={p_b2}+1 "
         f"else {p_setreg}({p_a2}+3,{p_iv}) end "
-        f"elseif {p_op2}=={O('FOR_LOOP')} then "
+        f"elseif {O('FOR_LOOP')} then "
         f"local {p_iv}={p_getreg}({p_a2}+3)+{p_getreg}({p_a2}+2) "
         f"local {p_lim}={p_getreg}({p_a2}+1) local {p_st}={p_getreg}({p_a2}+2) "
         f"if ({p_st}>0 and {p_iv}<={p_lim}) or ({p_st}<0 and {p_iv}>={p_lim}) then {p_setreg}({p_a2}+3,{p_iv}) {p_pc}={p_b2}+1 end "
-        f"elseif {p_op2}=={O('TFOR_CALL')} then "
+        f"elseif {O('TFOR_CALL')} then "
         f"local {p_itf}={p_getreg}({p_a2}) local {p_stt}={p_getreg}({p_a2}+1) local {p_ctl}={p_getreg}({p_a2}+2) "
         f"local {p_res}={pack_v}({p_itf}({p_stt},{p_ctl})) "
         f"for {p_jj}=1,{p_c2} do {p_setreg}({p_a2}+2+{p_jj},{p_res}[{p_jj}]) end "
         f"{p_setreg}({p_a2}+2,{p_res}[1]) "
-        f"elseif {p_op2}=={O('TFOR_LOOP')} then "
+        f"elseif {O('TFOR_LOOP')} then "
         f"if {p_getreg}({p_a2})==nil then {p_pc}={p_b2}+1 end "
-        f"elseif {p_op2}=={O('CLOSE_UPVAL')} then "
+        f"elseif {O('CLOSE_UPVAL')} then "
         f"local {p_x}={p_rb}[{p_a2}] if {p_x}~=nil then {p_vr}[{p_a2}]={p_x}.v {p_rb}[{p_a2}]=nil end "
-        f"elseif {p_op2}=={O('MOVE')} then {p_setreg}({p_a2},{p_getreg}({p_b2})) "
+        f"elseif {O('MOVE')} then {p_setreg}({p_a2},{p_getreg}({p_b2})) "
         f"else "
         f"print({_hidden_str_lit('Melodie caught an illegal opcode modification :3', rng)}) "
         f"error('',0) "

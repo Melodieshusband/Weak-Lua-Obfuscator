@@ -1,4 +1,5 @@
 from vm import Instruction
+from vm_opcodes import build_rev_opmap, flatten_op_values
 
 MELODIE_DECOY = "Melodie doesn't approve of skidding be a good boy"
 
@@ -97,7 +98,7 @@ def _falls_through(instructions, end, rev_opmap, n):
     return rev_opmap[last.op] not in TERMINATOR_OPS
 
 def flatten_bytecode(proto, rng, opmap):
-    rev_opmap = {v: k for k, v in opmap.items()}
+    rev_opmap = build_rev_opmap(opmap)
     _flatten_proto(proto, rng, rev_opmap, opmap)
 
 def _flatten_proto(proto, rng, rev_opmap, opmap):
@@ -135,7 +136,7 @@ def _flatten_proto(proto, rng, rev_opmap, opmap):
     n_junk = min(max(2, n_real // 2), n_real)
     junk_names = [name for name in JUNK_SAFE_NAMES if name in opmap]
     if not junk_names:
-        junk_names = [rev_opmap[op] for op in opmap.values()]
+        junk_names = list({rev_opmap[v] for v in flatten_op_values(opmap)})
 
     slots = list(range(1, n_real + 1))
     rng.shuffle(slots)
@@ -231,7 +232,7 @@ FULL_JUNK_BINOPS = ('ADD', 'SUB', 'MUL', 'BAND', 'BOR', 'BXOR')
 
 
 def flatten_bytecode_full(proto, rng, opmap):
-    rev_opmap = {v: k for k, v in opmap.items()}
+    rev_opmap = build_rev_opmap(opmap)
     _flatten_proto_full(proto, rng, rev_opmap, opmap)
 
 
