@@ -373,6 +373,50 @@ class Obfuscator:
         opq_v = gen_name()
         opq_n = rng.randint(100, 9999)
 
+        # Opaque predicates up to here are pure arithmetic on literals and
+        # fold symbolically in an instant. For the roblox target, weave a
+        # genuine runtime/API-dependent predicate into the dispatch itself
+        # (not just a one-shot gate): the real sid1->sid2 transition and the
+        # sid2 entry both additionally require live Roblox behavior that a
+        # generic devirtualizer can't fold without emulating the client.
+        rt1_decl = ""
+        rt1_expr = "true"
+        rt2_decl = ""
+        rt2_expr = "true"
+        if at_target == "roblox":
+            enc_call = self.k_call
+            rt1_v = gen_name()
+            rt1_decl = (
+                f"local {rt1_v}=(typeof~=nil) and (typeof(workspace)=={enc_call('Instance')}) "
+                f"and (typeof(game)=={enc_call('Instance')}) and (game.ClassName=={enc_call('DataModel')}) "
+            )
+            rt1_expr = rt1_v
+
+            rt2_v = gen_name()
+            rt2_part_v = gen_name()
+            rt2_bv_v = gen_name()
+            rt2_ok_v = gen_name()
+            rt2_res_v = gen_name()
+            # The whole probe lives inside one outer pcall: on real Roblox
+            # Instance/workspace/typeof always exist, but under any stripped
+            # or spoofed sandbox (the thing this predicate is meant to
+            # distrust) any of these globals can legitimately be missing,
+            # and that must fail closed (rt2=false) rather than crash with
+            # an uncontrolled error.
+            rt2_decl = (
+                f"local {rt2_ok_v},{rt2_res_v}=pcall(function() "
+                f"local {rt2_part_v}=Instance.new({enc_call('Part')}) "
+                f"if typeof({rt2_part_v})~={enc_call('Instance')} then return false end "
+                f"{rt2_part_v}.Parent=workspace "
+                f"local {rt2_bv_v}=Instance.new({enc_call('BodyVelocity')},{rt2_part_v}) "
+                f"local {rt2_v}=typeof({rt2_bv_v})=={enc_call('Instance')} and {rt2_bv_v}.ClassName=={enc_call('BodyVelocity')} "
+                f"{rt2_part_v}:Destroy() "
+                f"return {rt2_v} "
+                f"end) "
+                f"local {rt2_v}={rt2_ok_v} and {rt2_res_v}==true "
+            )
+            rt2_expr = rt2_v
+
         err_enc, err_cid = self.encode("Script protection fault")
         s0e = rng.randint(100000, 2**31 - 1)
         s2e = rng.randint(100000, 2**31 - 1)
@@ -418,12 +462,16 @@ class Obfuscator:
             f"local {sm_var}={sid1} "
             f"while {sm_var} do "
             f"if {sm_var}<{sid2} then "
-            f"if {sm_var}=={sid1} then local {opq_v}={opq_n} if ({opq_v}*{opq_v})%4~=2 then {sm_var}={sid2} else {sm_var}={sid4} end "
+            f"if {sm_var}=={sid1} then local {opq_v}={opq_n} {rt1_decl} "
+            f"if ({opq_v}*{opq_v})%4~=2 and {rt1_expr} then {sm_var}={sid2} else {sm_var}={sid4} end "
             f"{junk_parts} "
             f"end "
             f"elseif {sm_var}=={sid2} then "
+            f"{rt2_decl} "
+            f"if not ({rt2_expr}) then {sm_var}={sid4} else "
             f"{payload_stage}"
             f"{sm_var}={sid3} "
+            f"end "
             f"elseif {sm_var}=={sid3} then break "
             f"elseif {sm_var}=={sid4} then "
             f'error({k}("{err_enc}",1,{s0e},{err_cid},{err_cid},{s2e},{s3e}),2) '
