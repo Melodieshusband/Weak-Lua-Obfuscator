@@ -1122,13 +1122,6 @@ def build_vm_dispatch(rng):
         "ternary":("s,m", "s~=nil and s or m"),
     }
 
-    # The handler table used to be a flat `{[hash]=function(...) ... end, ...}`
-    # literal: a single pairs()/next() pass over it dumps every entry in one
-    # shot. Instead, the exposed table is now an empty proxy whose __index
-    # metamethod builds the matching closure on demand from a private
-    # hash->opname map that is never itself exposed (only reachable as an
-    # upvalue of the proxy/verify closures, same as any other local in this
-    # chunk). pairs()/next() on the proxy now returns nothing.
     seen_hashes = set()
     all_keys = []
     hashes = {}

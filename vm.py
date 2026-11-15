@@ -1887,7 +1887,7 @@ def try_compile_vm(source, rng=None, debug=False, target="luau", cff_mode="full"
             if cff_mode == "legacy":
                 flatten_bytecode(compiler.proto, rng, opmap)
             else:
-                flatten_bytecode_full(compiler.proto, rng, opmap)
+                flatten_bytecode_full(compiler.proto, rng, opmap, target)
         bytecode_mltn = compiler.serialize(opmap=opmap)
         return bytecode_mltn, opmap, "mltn"
     except Exception as e:

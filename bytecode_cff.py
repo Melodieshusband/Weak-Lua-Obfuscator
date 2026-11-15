@@ -231,9 +231,9 @@ FULL_TERMINATORS = {'JUMP'} | FULL_COND_JUMPS | FULL_LOOP_BRANCHES | FULL_RETURN
 FULL_JUNK_BINOPS = ('ADD', 'SUB', 'MUL', 'BAND', 'BOR', 'BXOR')
 
 
-def flatten_bytecode_full(proto, rng, opmap):
+def flatten_bytecode_full(proto, rng, opmap, target='luau'):
     rev_opmap = build_rev_opmap(opmap)
-    _flatten_proto_full(proto, rng, rev_opmap, opmap)
+    _flatten_proto_full(proto, rng, rev_opmap, opmap, target)
 
 
 def _split_blocks_full(instructions, rev_opmap):
@@ -265,9 +265,9 @@ def _split_blocks_full(instructions, rev_opmap):
     return blocks
 
 
-def _flatten_proto_full(proto, rng, rev_opmap, opmap):
+def _flatten_proto_full(proto, rng, rev_opmap, opmap, target='luau'):
     for child in proto.protos:
-        _flatten_proto_full(child, rng, rev_opmap, opmap)
+        _flatten_proto_full(child, rng, rev_opmap, opmap, target)
 
     instructions = proto.instructions
     n = len(instructions)
@@ -320,16 +320,6 @@ def _flatten_proto_full(proto, rng, rev_opmap, opmap):
     sh2_reg = slot_base + 19
     mask_reg = slot_base + 20
 
-    # The dispatch PC table is no longer encoded with a single global key
-    # (that key would be one LOAD_CONST away from an attacker who could
-    # then XOR the whole table at once). Instead the effective per-entry
-    # mask is derived from the state id itself at runtime: mask(sid) =
-    # (sid*key_a + key_b) % key_m. Recovering it needs at least two
-    # distinct (sid, real_pc) pairs solved as a linear system, not one
-    # constant read out of the pool. key_a/key_b are themselves never a
-    # single bare constant in the bytecode either - each is reassembled
-    # at runtime from two shares via ADD/BXOR, same scattering idea the
-    # project already uses for the ChaCha key (drv_v).
     key_m = 0x40000000
     key_a = rng.randint(0x1000, 0x1FFFFF)
     key_b = rng.randint(0, 0x3FFFFFFF)
@@ -510,6 +500,46 @@ def _flatten_proto_full(proto, rng, rev_opmap, opmap):
     else:
         emit('NE', check_r3, check_r3, check_r4)
         branch_to('JUMP_TRUE', check_r3, 'melodie')
+
+    if target == 'roblox':
+        rbx_r0 = slot_base + 21
+        rbx_r1 = slot_base + 22
+
+        def emit_typeof_is(global_name, type_name):
+            style = rng.choice(['eq_false', 'ne_true'])
+            emit('LOAD_GLOBAL', rbx_r0, k('typeof'))
+            branch_to('JUMP_FALSE', rbx_r0, 'melodie')
+            emit('LOAD_GLOBAL', rbx_r0 + 1, k(global_name))
+            emit('CALL', rbx_r0, 1, 1)
+            emit('LOAD_CONST', rbx_r1, k(type_name))
+            if style == 'eq_false':
+                emit('EQ', rbx_r0, rbx_r0, rbx_r1)
+                branch_to('JUMP_FALSE', rbx_r0, 'melodie')
+            else:
+                emit('NE', rbx_r0, rbx_r0, rbx_r1)
+                branch_to('JUMP_TRUE', rbx_r0, 'melodie')
+
+        def emit_field_is(global_name, field_name, value_name):
+            style = rng.choice(['eq_false', 'ne_true'])
+            emit('LOAD_GLOBAL', rbx_r0, k(global_name))
+            branch_to('JUMP_FALSE', rbx_r0, 'melodie')
+            emit('GET_FIELD', rbx_r0, rbx_r0, k(field_name))
+            emit('LOAD_CONST', rbx_r1, k(value_name))
+            if style == 'eq_false':
+                emit('EQ', rbx_r0, rbx_r0, rbx_r1)
+                branch_to('JUMP_FALSE', rbx_r0, 'melodie')
+            else:
+                emit('NE', rbx_r0, rbx_r0, rbx_r1)
+                branch_to('JUMP_TRUE', rbx_r0, 'melodie')
+
+        rbx_checks = [
+            lambda: emit_typeof_is('workspace', 'Instance'),
+            lambda: emit_typeof_is('game', 'Instance'),
+            lambda: emit_field_is('game', 'ClassName', 'DataModel'),
+        ]
+        rng.shuffle(rbx_checks)
+        for chk in rbx_checks:
+            chk()
 
     mark('check_pass')
     set_state(entry_sid)

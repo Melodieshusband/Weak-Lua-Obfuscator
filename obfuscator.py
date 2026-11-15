@@ -373,12 +373,6 @@ class Obfuscator:
         opq_v = gen_name()
         opq_n = rng.randint(100, 9999)
 
-        # Opaque predicates up to here are pure arithmetic on literals and
-        # fold symbolically in an instant. For the roblox target, weave a
-        # genuine runtime/API-dependent predicate into the dispatch itself
-        # (not just a one-shot gate): the real sid1->sid2 transition and the
-        # sid2 entry both additionally require live Roblox behavior that a
-        # generic devirtualizer can't fold without emulating the client.
         rt1_decl = ""
         rt1_expr = "true"
         rt2_decl = ""
@@ -397,12 +391,6 @@ class Obfuscator:
             rt2_bv_v = gen_name()
             rt2_ok_v = gen_name()
             rt2_res_v = gen_name()
-            # The whole probe lives inside one outer pcall: on real Roblox
-            # Instance/workspace/typeof always exist, but under any stripped
-            # or spoofed sandbox (the thing this predicate is meant to
-            # distrust) any of these globals can legitimately be missing,
-            # and that must fail closed (rt2=false) rather than crash with
-            # an uncontrolled error.
             rt2_decl = (
                 f"local {rt2_ok_v},{rt2_res_v}=pcall(function() "
                 f"local {rt2_part_v}=Instance.new({enc_call('Part')}) "
